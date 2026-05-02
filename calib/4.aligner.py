@@ -11,6 +11,18 @@ from scipy.spatial.transform import Rotation as R_tool_scipy
 class Aligner:
     # 定义安全过渡位置 (Transition Point)
     SAFE_POSE_LIST = [460.0, 125.0, 1077.0, -3.141, 0.0, 0.0]
+    DEFAULT_SPEED = 50  # 统一默认速度 (mm/s)
+    
+    # SDK 错误码映射
+    RESULT_MAP = {
+        0: "成功 (SUCCESS)",
+        -1: "接收失败 (RECEIVE_FAILED)",
+        -2: "连接断开 (DISCONNECT)",
+        -3: "参数错误 (PARAM_ERR) - 请检查位姿是否在软限位内",
+        -4: "操作被禁止 (OPERATION_NOT_ALLOWED) - 请检查是否上电或模式正确",
+        -5: "异常 (EXCEPTION)",
+        -6: "超时 (TIMEOUT)"
+    }
 
     def __init__(self, robot_ip="192.168.2.14", calib_res_path="calib/data/calib_20260501/calibration_result.yaml"):
         # 加载全量标定结果 (包含外参、内参、标定板参数)
@@ -24,6 +36,15 @@ class Aligner:
         self.D = np.array(res["camera_params"]["distortion_coeffs"])
         self.pattern_size = tuple(res["board_params"]["pattern_size_inner"])
         self.sq_size = res["board_params"]["square_size_mm"]
+        
+        # 打印加载的信息
+        print("\n" + "="*50)
+        print(" [参数加载成功] ")
+        print(f" 相机内参 K:\n{self.K}")
+        print(f" 畸变系数 D: {self.D}")
+        print(f" 标定板规格: {self.pattern_size}, 间距: {self.sq_size}mm")
+        print(f" 手眼外参 T_base_camera:\n{self.T_base_camera}")
+        print("="*50 + "\n")
         
         # 初始化驱动
         self.cam = OrbbecDriver()
@@ -57,6 +78,14 @@ class Aligner:
             
         abc_base = R_tool_scipy.from_matrix(R_base_board).as_euler('XYZ', degrees=False)
         return np.concatenate([p_target_base, abc_base])
+
+    def check_move_result(self, res, stage_name):
+        """检查并打印运动结果"""
+        if res == 0:
+            return True
+        err_msg = self.RESULT_MAP.get(res, f"未知错误 ({res})")
+        print(f"[-] {stage_name} 指令执行失败: {err_msg}")
+        return False
 
     def align_to_board(self, safe_offset=120.0):
         """执行对准流程"""
@@ -92,13 +121,26 @@ class Aligner:
 
         safe_pose_obj = RobotPose.from_list(self.SAFE_POSE_LIST)
         print("[*] 1/2 移动至安全过渡点...")
-        self.robot.move_l(safe_pose_obj, velocity=50)
+        res1 = self.robot.move_j(safe_pose_obj, velocity=self.DEFAULT_SPEED)
+        if not self.check_move_result(res1, "安全过渡点"): return False
         self.robot.wait_motion_done()
         
-        print("[*] 2/2 移动至最终目标点...")
-        self.robot.move_l(target_pose_obj, velocity=50)
+        # 拆分步骤 2: 保持 Home 的姿态 (即 SAFE_POSE 的 ABC) 移动到目标 XYZ
+        step2_pose_obj = RobotPose(
+            x=target_pose_obj.x, y=target_pose_obj.y, z=target_pose_obj.z,
+            a=self.SAFE_POSE_LIST[3], b=self.SAFE_POSE_LIST[4], c=self.SAFE_POSE_LIST[5]
+        )
+        print("[*] 2/3 保持 Home 姿态平移至目标位置...")
+        res2 = self.robot.move_j(step2_pose_obj, velocity=self.DEFAULT_SPEED)
+        if not self.check_move_result(res2, "平移目标点"): return False
         self.robot.wait_motion_done()
-        print("[+] 运动完成。")
+        
+        # 拆分步骤 3: 在目标位置原地调整姿态
+        print("[*] 3/3 原地调整姿态至最终目标...")
+        res3 = self.robot.move_j(target_pose_obj, velocity=self.DEFAULT_SPEED)
+        if not self.check_move_result(res3, "最终目标姿态"): return False
+        self.robot.wait_motion_done()
+        print("[+] 自动对准运动全部完成。")
         return True
 
     def run(self):
@@ -116,9 +158,19 @@ class Aligner:
 
             print("[*] 正在运动至 Home...")
             safe_pose_obj = RobotPose.from_list(self.SAFE_POSE_LIST)
-            self.robot.move_l(safe_pose_obj, velocity=30)
-            self.robot.wait_motion_done()
-            self.robot.go_home()
+            res_safe = self.robot.move_j(safe_pose_obj, velocity=self.DEFAULT_SPEED)
+            if self.check_move_result(res_safe, "初始安全过渡"):
+                self.robot.wait_motion_done()
+                print("[*] 安全点位运动完成。1/2")
+                time.sleep(1)
+                res_home = self.robot.go_home(velocity=self.DEFAULT_SPEED)
+                if self.check_move_result(res_home, "初始回Home"):
+                    self.robot.wait_motion_done()
+                    print("[*] Home运动完成。2/2")
+                else:
+                    print("[-] 初始回Home失败"); return
+            else:
+                print("[-] 无法移动至初始安全点"); return
             
             while True:
                 print("\n" + "="*50)
@@ -132,9 +184,12 @@ class Aligner:
                 if cmd == 'g':
                     self.align_to_board()
                 elif cmd == 'h':
-                    self.robot.move_l(safe_pose_obj, velocity=30)
-                    self.robot.wait_motion_done()
-                    self.robot.go_home()
+                    res = self.robot.move_j(safe_pose_obj, velocity=self.DEFAULT_SPEED)
+                    if self.check_move_result(res, "回Home安全过渡"):
+                        self.robot.wait_motion_done()
+                        self.robot.go_home()
+                    else:
+                        print("[-] 无法执行回Home运动")
                 elif cmd == 'q':
                     break
         finally:

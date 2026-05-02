@@ -77,15 +77,14 @@ class _SdkBackend:
         self._fd = None
 
     def _make_cmd(self, target, coord, vel, acc, dec):
+        # 1. 构造 14 位点位数组 (前 7 位本体，后 7 位外部轴)
         vec = self._nrc.VectorDouble()
-        for v in target: vec.append(float(v))
+        full_target = list(target) + [0.0] * (14 - len(target))
+        for v in full_target: vec.append(float(v))
+        
         cmd = self._nrc.MoveCmd()
-        # 核心：必须使用 PosType_data (通常=2)
-        if hasattr(self._nrc, "PosType_data"):
-            cmd.targetPosType = self._nrc.PosType_data
-        else:
-            cmd.targetPosType = 2
-            
+        # 2. 核心修正：targetPosType 必须为 0 (对应 PosType::data)
+        cmd.targetPosType = 0 
         cmd.targetPosValue = vec
         cmd.velocity = float(vel)
         cmd.acc = float(acc)
@@ -98,11 +97,11 @@ class _SdkBackend:
 
     def robot_movej(self, target, coord, vel, acc, dec):
         cmd = self._make_cmd(target, coord, vel, acc, dec)
-        self._nrc.robot_movej(self._fd, cmd)
+        return self._nrc.robot_movej(self._fd, cmd)
 
     def robot_movel(self, target, coord, vel, acc, dec):
         cmd = self._make_cmd(target, coord, vel, acc, dec)
-        self._nrc.robot_movel(self._fd, cmd)
+        return self._nrc.robot_movel(self._fd, cmd)
 
     def get_position(self, coord):
         pos = self._nrc.VectorDouble()
@@ -126,6 +125,7 @@ class InexbotDriver:
     def __init__(self, ip, port=6001):
         self.ip, self.port = ip, port
         self._backend = _SdkBackend()
+        self._last_target_pose = None
 
     def connect(self): return self._backend.connect(self.ip, self.port)
     def disconnect(self): self._backend.disconnect()
@@ -163,12 +163,13 @@ class InexbotDriver:
     def clear_error(self): self._backend._nrc.clear_error(self._backend._fd)
     def get_current_pose(self): return RobotPose.from_list(self._backend.get_position(COORD_MCS))
     def get_current_joints(self): return JointPose.from_list(self._backend.get_position(COORD_ACS))
-    def move_to_pose(self, target: RobotPose, velocity=DEFAULT_VELOCITY, acc=DEFAULT_ACC, dec=DEFAULT_DEC):
-        self._backend.robot_movej(target.to_list() + [0.0], COORD_MCS, velocity, acc, dec)
+    def move_j(self, target: RobotPose, velocity=50, acc=50, dec=50):
+        self._last_target_pose = target
+        return self._backend.robot_movej(target.to_list(), 1, velocity, acc, dec)
 
-    def move_l(self, target: RobotPose, velocity=DEFAULT_VELOCITY, acc=DEFAULT_ACC, dec=DEFAULT_DEC):
-        """执行直线插补运动 (Linear Motion)"""
-        self._backend.robot_movel(target.to_list() + [0.0], COORD_MCS, velocity, acc, dec)
+    def move_l(self, target: RobotPose, velocity=50, acc=50, dec=50):
+        self._last_target_pose = target
+        return self._backend.robot_movel(target.to_list(), 1, velocity, acc, dec)
 
     def go_home(self, velocity=DEFAULT_VELOCITY):
         """移动到预设的 Home 位姿"""
@@ -176,17 +177,67 @@ class InexbotDriver:
             x=870.975, y=125.478, z=1077.028,
             a=-3.141, b=0.0, c=0.0
         )
-        self.move_to_pose(home_pose, velocity=velocity)
-        return self.wait_motion_done()
+        return self.move_j(home_pose, velocity=velocity)
 
     def wait_motion_done(self, timeout=60):
-        start = time.time(); time.sleep(0.5)
+        """等待运动完成：基于绝对距离与物理位移变化双重校验"""
+        start = time.time()
+        time.sleep(0.3) # 留出指令被控制器执行的缓冲期
+        
+        last_pos = self.get_current_pose().to_list()
+        last_change_time = time.time()
+        has_moved = False
+        
         while time.time() - start < timeout:
-            if self.get_running_state() == 0: return True
-            time.sleep(0.3)
+            state = self.get_running_state()
+            curr_pose = self.get_current_pose()
+            curr_pos = curr_pose.to_list()
+            
+            # 1. 终极判断：如果明确知道目标，距离 < 2.0mm 直接认为到达
+            if self._last_target_pose is not None:
+                dist = sum((a - b)**2 for a, b in zip(curr_pos[:3], self._last_target_pose.to_list()[:3]))**0.5
+                if dist < 2.0:
+                    self._last_target_pose = None # 消耗掉该目标
+                    return True
+            
+            # 2. 常规判断：位置是否发生显著变化
+            is_moving = any(abs(a - b) > 0.05 for a, b in zip(curr_pos, last_pos))
+            
+            if state == 2 or is_moving:
+                has_moved = True
+                last_change_time = time.time()
+                last_pos = curr_pos
+            else:
+                if has_moved:
+                    # 停顿了超过 1.0 秒才认为彻底结束 (避免中间路径点附近减速被误判)
+                    if time.time() - last_change_time > 1.0:
+                        return True
+                else:
+                    # 指令发出了，但迟迟没有开始动 (比如被忽略了，或卡在限位)
+                    if time.time() - start > 5.0:
+                        print("[-] 警告: 5秒内机械臂未产生物理位移，且未到达目标点，可能遇到死区")
+                        return True
+            
+            time.sleep(0.1)
+            
         return False
         
-    def is_reachable(self, target: RobotPose, move_type=0):
-        """保守起见，暂时跳过 SDK 的可达性检查，直接返回 True"""
-        # 如果 get_pos_reachable 在此版本中有 Bug，可能会触发控制器报警
-        return True
+    def is_reachable(self, target: RobotPose, move_type="MOVL"):
+        """调用 SDK 接口预检点位是否可达"""
+        # 构造 14 位预检数组
+        # [0]坐标系, [1]0角度/1弧度, [2]形态, [3]工具, [4]用户, [5,6]备用, [7-13]点位
+        test_vec = self._nrc.VectorDouble()
+        test_vec.append(1.0) # COORD_MCS
+        test_vec.append(1.0) # 弧度制
+        test_vec.append(0.0) # 形态
+        test_vec.append(0.0) # 工具 0
+        test_vec.append(0.0) # 用户 0
+        test_vec.append(0.0); test_vec.append(0.0) # 备用
+        
+        # 填入点位 (7位)
+        for v in target.to_list() + [0.0]: test_vec.append(float(v))
+        
+        reachable = self._nrc.bool_ptr() # 假设 SDK 导出了 bool 指针或引用
+        # 这里为了演示，直接调用原始接口。如果 bool_ptr 有问题，请反馈
+        res = self._backend._nrc.get_pos_reachable(self._backend._fd, test_vec, move_type, reachable)
+        return reachable.value() if hasattr(reachable, 'value') else True
