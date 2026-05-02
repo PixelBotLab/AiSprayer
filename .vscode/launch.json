@@ -1,0 +1,15 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Current File (iNexbot)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${file}",
+            "args": ["--ip", "127.0.0.1"],
+            "console": "integratedTerminal",
+            "python": "/home/zhanlu/miniconda3/envs/inexbot/bin/python",
+            "cwd": "${workspaceFolder}"
+        }
+    ]
+}

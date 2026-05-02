@@ -1,0 +1,4 @@
+{
+    "python.defaultInterpreterPath": "/home/zhanlu/miniconda3/envs/inexbot/bin/python",
+    "python.terminal.activateEnvironment": true
+}

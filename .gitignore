@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虚拟环境
+.env
+.venv
+venv/
+ENV/
+
+# 编译器/IDE
+.idea/
+*.swp
+*.swo
+
+# 项目特定：日志与临时文件
+Log/
+calib/Log/
+calib/tmp/
+*.log
+OrbbecSDK.log.*
+
+# 系统文件
+.DS_Store
+Thumbs.db

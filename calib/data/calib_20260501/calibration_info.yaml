@@ -1,0 +1,214 @@
+board_params:
+  cols: 9
+  pattern_size_inner:
+  - 8
+  - 11
+  rows: 12
+  square_size_mm: 15.0
+camera_params:
+  distortion_coeffs:
+  - -0.035219743847846985
+  - 0.038513410836458206
+  - 0.0003776616940740496
+  - 0.0001178734892164357
+  - -0.013504322618246078
+  intrinsic_matrix:
+  - - 366.73321533203125
+    - 0.0
+    - 317.40679931640625
+  - - 0.0
+    - 366.8358459472656
+    - 243.4528350830078
+  - - 0.0
+    - 0.0
+    - 1.0
+samples:
+- id: 1
+  image_file: image_001.png
+  robot_pose:
+    a: -3.1416
+    b: 0.0
+    c: 0.0
+    x: 742.777
+    y: 125.491
+    z: 926.894
+- id: 2
+  image_file: image_002.png
+  robot_pose:
+    a: 3.1416
+    b: 0.0
+    c: 0.0
+    x: 742.786
+    y: -89.968
+    z: 926.898
+- id: 3
+  image_file: image_003.png
+  robot_pose:
+    a: -3.1416
+    b: 0.0
+    c: 0.0
+    x: 742.785
+    y: 275.308
+    z: 926.897
+- id: 4
+  image_file: image_004.png
+  robot_pose:
+    a: -3.1416
+    b: 0.0
+    c: 0.0
+    x: 742.781
+    y: 275.307
+    z: 1196.357
+- id: 5
+  image_file: image_005.png
+  robot_pose:
+    a: -3.1416
+    b: 0.0
+    c: 0.0
+    x: 742.772
+    y: 89.326
+    z: 1196.354
+- id: 6
+  image_file: image_006.png
+  robot_pose:
+    a: 3.1416
+    b: 0.0
+    c: 0.0
+    x: 742.787
+    y: -223.344
+    z: 1196.356
+- id: 7
+  image_file: image_007.png
+  robot_pose:
+    a: -3.1416
+    b: 0.0
+    c: 0.0
+    x: 742.778
+    y: -223.332
+    z: 732.485
+- id: 8
+  image_file: image_008.png
+  robot_pose:
+    a: -3.1416
+    b: 0.0
+    c: 0.0
+    x: 742.786
+    y: 280.511
+    z: 732.48
+- id: 9
+  image_file: image_009.png
+  robot_pose:
+    a: -3.1415
+    b: 0.0
+    c: 0.0
+    x: 689.335
+    y: 345.617
+    z: 453.272
+- id: 10
+  image_file: image_010.png
+  robot_pose:
+    a: -3.1416
+    b: 0.0
+    c: 0.0
+    x: 664.81
+    y: 65.656
+    z: 453.276
+- id: 11
+  image_file: image_011.png
+  robot_pose:
+    a: -3.1416
+    b: 0.0
+    c: 0.0
+    x: 664.819
+    y: -171.402
+    z: 1175.797
+- id: 12
+  image_file: image_012.png
+  robot_pose:
+    a: -2.691
+    b: 0.0
+    c: 0.0
+    x: 664.807
+    y: -171.403
+    z: 1175.788
+- id: 13
+  image_file: image_013.png
+  robot_pose:
+    a: -2.6751
+    b: 0.253
+    c: -0.1255
+    x: 664.802
+    y: -171.399
+    z: 1175.796
+- id: 14
+  image_file: image_014.png
+  robot_pose:
+    a: -2.6592
+    b: 0.2192
+    c: -0.193
+    x: 664.807
+    y: -322.058
+    z: 1175.795
+- id: 15
+  image_file: image_015.png
+  robot_pose:
+    a: -2.6593
+    b: 0.2193
+    c: -0.1931
+    x: 664.817
+    y: 150.386
+    z: 1175.801
+- id: 16
+  image_file: image_016.png
+  robot_pose:
+    a: -2.6154
+    b: 0.0077
+    c: -0.5736
+    x: 664.809
+    y: 150.388
+    z: 1175.799
+- id: 17
+  image_file: image_017.png
+  robot_pose:
+    a: -2.6154
+    b: 0.0076
+    c: -0.5735
+    x: 589.734
+    y: 150.387
+    z: 841.528
+- id: 18
+  image_file: image_018.png
+  robot_pose:
+    a: -2.6154
+    b: 0.0077
+    c: -0.5736
+    x: 589.753
+    y: 150.388
+    z: 593.667
+- id: 19
+  image_file: image_019.png
+  robot_pose:
+    a: 2.9931
+    b: -0.0731
+    c: -0.5267
+    x: 589.736
+    y: 150.391
+    z: 593.678
+- id: 20
+  image_file: image_020.png
+  robot_pose:
+    a: 2.7639
+    b: 0.3494
+    c: -0.3646
+    x: 589.735
+    y: 150.391
+    z: 593.674
+- id: 21
+  image_file: image_021.png
+  robot_pose:
+    a: 2.7639
+    b: 0.3494
+    c: -0.3646
+    x: 589.738
+    y: -86.668
+    z: 593.673
