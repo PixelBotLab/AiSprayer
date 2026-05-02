@@ -67,6 +67,11 @@ class Aligner:
         R_cam_board, _ = cv2.Rodrigues(rvec)
         
         # 核心修正：沿法线方向退让
+        p_center_cam = R_cam_board @ self.center_offset_obj + tvec.flatten()
+        print(f"[Board] 检测到中心 (Camera): X={p_center_cam[0]:.2f}, Y={p_center_cam[1]:.2f}, Z={p_center_cam[2]:.2f}")
+        
+        p_center_base = self.T_base_camera[:3, :3] @ p_center_cam + self.T_base_camera[:3, 3]
+
         center_with_offset_obj = self.center_offset_obj + np.array([0, 0, -safe_offset])
         p_target_cam = R_cam_board @ center_with_offset_obj + tvec.flatten()
         p_target_base = self.T_base_camera[:3, :3] @ p_target_cam + self.T_base_camera[:3, 3]
