@@ -193,10 +193,14 @@ class InexbotDriver:
             curr_pose = self.get_current_pose()
             curr_pos = curr_pose.to_list()
             
-            # 1. 终极判断：如果明确知道目标，距离 < 2.0mm 直接认为到达
+            # 1. 终极判断：如果明确知道目标，需同时满足 距离 < 2.0mm 且 角度偏差 < 0.02 rad
             if self._last_target_pose is not None:
-                dist = sum((a - b)**2 for a, b in zip(curr_pos[:3], self._last_target_pose.to_list()[:3]))**0.5
-                if dist < 2.0:
+                target_list = self._last_target_pose.to_list()
+                dist = sum((a - b)**2 for a, b in zip(curr_pos[:3], target_list[:3]))**0.5
+                # 计算 ABC 角度的总偏差
+                angle_diff = sum(abs(a - b) for a, b in zip(curr_pos[3:6], target_list[3:6]))
+                
+                if dist < 2.0 and angle_diff < 0.02:
                     self._last_target_pose = None # 消耗掉该目标
                     return True
             
