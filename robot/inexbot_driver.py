@@ -204,8 +204,9 @@ class InexbotDriver:
                     self._last_target_pose = None # 消耗掉该目标
                     return True
             
-            # 2. 常规判断：位置是否发生显著变化
-            is_moving = any(abs(a - b) > 0.05 for a, b in zip(curr_pos, last_pos))
+            # 2. 常规判断：位置是否发生变化 (提高灵敏度，阈值设为 0.005)
+            # 这样即便微小的旋转也能被捕捉到，设置 has_moved = True
+            is_moving = any(abs(a - b) > 0.005 for a, b in zip(curr_pos, last_pos))
             
             if state == 2 or is_moving:
                 has_moved = True
@@ -213,13 +214,16 @@ class InexbotDriver:
                 last_pos = curr_pos
             else:
                 if has_moved:
-                    # 停顿了超过 1.0 秒才认为彻底结束 (避免中间路径点附近减速被误判)
+                    # 停顿了超过 1.0 秒才认为彻底结束
                     if time.time() - last_change_time > 1.0:
                         return True
                 else:
-                    # 指令发出了，但迟迟没有开始动 (比如被忽略了，或卡在限位)
+                    # 指令发出了，但迟迟没有产生位移
                     if time.time() - start > 5.0:
-                        print("[-] 警告: 5秒内机械臂未产生物理位移，且未到达目标点，可能遇到死区")
+                        target_list = self._last_target_pose.to_list() if self._last_target_pose else []
+                        print(f"[-] 警告: 5秒内未检测到物理位移。")
+                        print(f"    当前: {[round(x,3) for x in curr_pos]}")
+                        print(f"    目标: {[round(x,3) for x in target_list]}")
                         return True
             
             time.sleep(0.1)
