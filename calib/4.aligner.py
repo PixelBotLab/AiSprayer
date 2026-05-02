@@ -47,7 +47,8 @@ class Aligner:
         print("="*50 + "\n")
         
         # 初始化驱动
-        self.cam = OrbbecDriver()
+        # 强制使用 640x480 分辨率，以匹配标定文件中的内参 (fx~366, cx~317 对应 480p)
+        self.cam = OrbbecDriver(width=640, height=480)
         self.robot = InexbotDriver(ip=robot_ip)
         
         # 预计算
