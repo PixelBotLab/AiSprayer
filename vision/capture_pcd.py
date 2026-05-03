@@ -9,7 +9,7 @@ import yaml
 
 # 确保能找到项目根目录下的模块
 sys.path.append(os.getcwd())
-from camera.orbbec_driver import OrbbecDriver
+from camera.factory import get_camera
 
 def depth_to_pcd(depth, intrinsics):
     """将深度图转换为点云数据"""
@@ -83,6 +83,7 @@ def main():
     parser.add_argument("--calib", default="calib/data/calib_20260501/calibration_result.yaml", help="标定文件路径")
     parser.add_argument("--output_dir", default="vision/data", help="数据保存目录")
     parser.add_argument("--mock", nargs="+", help="模拟模式：指定一个或多个输入图片路径，将跳过相机直接生成点云数据")
+    parser.add_argument("--camera", choices=["orbbec", "realsense"], default="orbbec", help="选择相机类型 (默认 orbbec)")
     args = parser.parse_args()
 
     if not os.path.exists(args.output_dir):
@@ -130,8 +131,9 @@ def main():
         return
 
     # 3. 正常相机模式
-    cam = OrbbecDriver(width=width, height=height)
+    print(f"[*] 正在初始化 {args.camera} 相机...")
     try:
+        cam = get_camera(args.camera, width=width, height=height)
         cam.start()
         print(f"[+] 相机已就绪。")
     except Exception as e:
