@@ -28,10 +28,21 @@ def extract_corners_and_pnp(data_dir, config):
     objp = np.zeros((pattern_size[0] * pattern_size[1], 3), np.float32)
     objp[:, :2] = np.mgrid[0:pattern_size[0], 0:pattern_size[1]].T.reshape(-1, 2) * sq_size
     
+    first_img_size = None
     for s in config["samples"]:
         img_path = os.path.join(data_dir, s["image_file"])
         img = cv2.imread(img_path)
         if img is None: continue
+        
+        # 记录图像分辨率（如果配置中没有的话）
+        if first_img_size is None:
+            h, w = img.shape[:2]
+            first_img_size = (w, h)
+            if "width" not in config["camera_params"]:
+                config["camera_params"]["width"] = w
+                config["camera_params"]["height"] = h
+                print(f"[*] 自动检测到标定分辨率: {w}x{h}")
+
         ret, corners = cv2.findChessboardCorners(img, pattern_size, None)
         if ret:
             # 亚像素级精细化

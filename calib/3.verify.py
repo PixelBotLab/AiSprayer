@@ -21,9 +21,11 @@ def main():
     with open(info_path, 'r') as f: info = yaml.safe_load(f)
     K = np.array(info["camera_params"]["intrinsic_matrix"])
     D = np.array(info["camera_params"]["distortion_coeffs"])
+    calib_w = info["camera_params"].get("width", 640)
+    calib_h = info["camera_params"].get("height", 480)
     
     # 3. 初始化 Orbbec 相机驱动
-    cam = OrbbecDriver()
+    cam = OrbbecDriver(width=calib_w, height=calib_h)
     try:
         cam.start()
     except Exception as e:

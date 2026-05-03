@@ -47,8 +47,11 @@ class Aligner:
         print("="*50 + "\n")
         
         # 初始化驱动
-        # 强制使用 640x480 分辨率，以匹配标定文件中的内参 (fx~366, cx~317 对应 480p)
-        self.cam = OrbbecDriver(width=640, height=480)
+        # 自动从标定结果中读取分辨率，如果没有则默认为 640x480 (fx~366 对应 480p)
+        calib_w = res.get("camera_params", {}).get("width", 640)
+        calib_h = res.get("camera_params", {}).get("height", 480)
+        print(f"[*] 正在按标定分辨率初始化相机: {calib_w}x{calib_h}")
+        self.cam = OrbbecDriver(width=calib_w, height=calib_h)
         self.robot = InexbotDriver(ip=robot_ip)
         
         # 预计算

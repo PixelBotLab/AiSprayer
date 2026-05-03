@@ -15,6 +15,7 @@ import cv2
 import yaml
 import argparse
 import numpy as np
+import time
 from datetime import datetime
 
 # 确保导入路径正确
@@ -42,8 +43,11 @@ def load_or_init_info(yaml_path, cam, args, pattern_size):
     else:
         # 获取相机内参
         K, D = cam.get_intrinsics()
+        # 由于 OrbbecDriver 已在内部校准了真实分辨率，这里直接使用
         info = {
             "camera_params": {
+                "width": cam.width,
+                "height": cam.height,
                 "intrinsic_matrix": K.tolist() if K is not None else [],
                 "distortion_coeffs": D.tolist() if D is not None else []
             },
@@ -53,7 +57,7 @@ def load_or_init_info(yaml_path, cam, args, pattern_size):
             },
             "samples": []
         }
-        print("[*] 未发现历史数据，开始新的采集任务。")
+        print(f"[*] 未发现历史数据，开始新的采集任务。分辨率: {cam.width}x{cam.height}")
     return info
 
 def do_capture(info, color, pose, save_dir, yaml_path):
@@ -111,7 +115,7 @@ def main():
         robot.go_home()
         print("go home done")
         
-        # 3. 加载数据配置
+        # 3. 加载数据配置 (此时 cam.width 已经是驱动层校准后的真实值)
         info = load_or_init_info(yaml_path, cam, args, pattern_size)
 
         print(f"[*] 输出目录: {save_dir}")

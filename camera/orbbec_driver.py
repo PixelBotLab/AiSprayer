@@ -82,6 +82,11 @@ class OrbbecDriver:
             
             self.pipeline.start(self.config)
             
+            # 核心修正：从实际加载的 profile 中更新分辨率
+            # 这样即便发生 Fallback，self.width 和 self.height 也是绝对准确的
+            self.width = color_profile.get_width()
+            self.height = color_profile.get_height()
+
             # 保存内参 (Gemini 336L 可能在启动后才能获取内参)
             self.color_intrinsic = color_profile.get_intrinsic()
             self.color_distortion = color_profile.get_distortion()

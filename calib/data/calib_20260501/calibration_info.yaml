@@ -6,6 +6,8 @@ board_params:
   rows: 12
   square_size_mm: 15.0
 camera_params:
+  width: 640
+  height: 480
   distortion_coeffs:
   - -0.035219743847846985
   - 0.038513410836458206
