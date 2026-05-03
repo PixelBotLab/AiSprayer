@@ -19,6 +19,9 @@ torchvision==0.19.1
 ultralytics==8.4.46
 safetensors==0.5.3
 
+# --- 硬件驱动 (相机) ---
+pyrealsense2==2.55.1.6486
+
 # --- 其他可能需要的依赖 ---
 # pillow
 # tqdm
