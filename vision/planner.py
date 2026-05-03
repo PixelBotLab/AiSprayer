@@ -124,10 +124,11 @@ class AiSprayPlanner:
 
         # 获取 2D 多边形的 bounding box 并外扩 10 像素以确保覆盖边缘
         margin = 10
-        u_min = np.min(self.polygon_pts[:, 0]) - margin
-        u_max = np.max(self.polygon_pts[:, 0]) + margin
-        v_min = np.min(self.polygon_pts[:, 1]) - margin
-        v_max = np.max(self.polygon_pts[:, 1]) + margin
+        img_h, img_w = self.depth_map.shape
+        u_min = max(0, int(np.min(self.polygon_pts[:, 0]) - margin))
+        u_max = min(img_w - 1, int(np.max(self.polygon_pts[:, 0]) + margin))
+        v_min = max(0, int(np.min(self.polygon_pts[:, 1]) - margin))
+        v_max = min(img_h - 1, int(np.max(self.polygon_pts[:, 1]) + margin))
         
         # 估算像素步长
         valid_depths = self.depth_map[(self.depth_map > 100) & (self.depth_map < 3000)]
@@ -354,7 +355,7 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="裤子喷涂路径规划器验证工具")
     parser.add_argument("--input_dir", help="指定要处理的数据目录 (如 vision/data/0)")
-    parser.add_argument("--width_mm", type=float, default=80.0, help="喷头有效幅宽 (mm), 默认 80")
+    parser.add_argument("--width_mm", type=float, default=100.0, help="喷头有效幅宽 (mm), 默认 80")
     parser.add_argument("--overlap", type=float, default=0.2, help="路径重叠率 (0~1), 默认 0.2")
     parser.add_argument("--dist_mm", type=float, default=150.0, help="喷涂法向距离 (mm), 默认 150")
     parser.add_argument("--v_step_mm", type=float, default=20.0, help="纵向采样间隔 (mm), 默认 20")

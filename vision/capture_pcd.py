@@ -31,7 +31,7 @@ def depth_to_pcd(depth, intrinsics):
     points = np.column_stack((x, y, z))
     return points
 
-def save_scan(color, depth, intrinsics, output_dir, custom_name=None):
+def save_scan(color, depth, intrinsics_dict, output_dir, custom_name=None):
     """保存扫描数据 (每个采集保存到独立文件夹)"""
     if custom_name:
         scan_dir = os.path.join(output_dir, custom_name)
@@ -41,8 +41,12 @@ def save_scan(color, depth, intrinsics, output_dir, custom_name=None):
         
     os.makedirs(scan_dir, exist_ok=True)
     
+    # 获取简单的 fx, fy, cx, cy 用于点云生成
+    intr = intrinsics_dict["intrinsic_matrix"]
+    fx, fy, cx, cy = intr["fx"], intr["fy"], intr["cx"], intr["cy"]
+    
     # 转换为点云
-    points = depth_to_pcd(depth, intrinsics)
+    points = depth_to_pcd(depth, [fx, fy, cx, cy])
     pcd = o3d.geometry.PointCloud()
     pcd.points = o3d.utility.Vector3dVector(points)
 
@@ -50,13 +54,30 @@ def save_scan(color, depth, intrinsics, output_dir, custom_name=None):
     pcd_path = os.path.join(scan_dir, "scan.pcd")
     img_path = os.path.join(scan_dir, "scan.jpg")
     depth_path = os.path.join(scan_dir, "scan.depth.npy")
+    params_path = os.path.join(scan_dir, "scan.params.yaml")
     
+    # 保存基础数据
     o3d.io.write_point_cloud(pcd_path, pcd)
     cv2.imwrite(img_path, color)
     np.save(depth_path, depth)
     
+    # 保存内参和分辨率
+    h, w = depth.shape[:2]
+    params = {
+        "camera_model": intrinsics_dict.get("camera_model", "unknown"),
+        "width": w,
+        "height": h,
+        "source": intrinsics_dict.get("source", "unknown"),
+        "intrinsic_matrix": intr,
+        "distortion_coeffs": intrinsics_dict.get("distortion_coeffs", [])
+    }
+    
+    with open(params_path, 'w') as f:
+        yaml.dump(params, f, default_flow_style=False)
+    
     print(f"[+] 保存成功: {scan_dir}")
-    print(f"    - 点数: {len(points)}")
+    print(f"    - 相机型号: {params['camera_model']}")
+    print(f"    - 参数来源: {params['source']}")
 
 def letterbox(img, target_size=(640, 480), color=(0, 0, 0)):
     """保持比例缩放并填充 (Letterbox)"""
@@ -80,7 +101,7 @@ def letterbox(img, target_size=(640, 480), color=(0, 0, 0)):
 def main():
     parser = argparse.ArgumentParser(description="点云采集工具 (支持实机采集与模拟生成)")
     parser.add_argument("--frames", type=int, default=1, help="融合的帧数 (默认 1)")
-    parser.add_argument("--calib", default="calib/data/calib_20260501/calibration_result.yaml", help="标定文件路径")
+    parser.add_argument("--calib", default=None, help="标定文件路径 (如果不指定且非模拟模式，则使用相机硬件内参)")
     parser.add_argument("--output_dir", default="vision/data", help="数据保存目录")
     parser.add_argument("--mock", nargs="+", help="模拟模式：指定一个或多个输入图片路径，将跳过相机直接生成点云数据")
     parser.add_argument("--camera", choices=["orbbec", "realsense"], default="orbbec", help="选择相机类型 (默认 orbbec)")
@@ -89,22 +110,47 @@ def main():
     if not os.path.exists(args.output_dir):
         os.makedirs(args.output_dir)
 
-    # 1. 从标定文件读取分辨率和内参
+    # 1. 参数初始化
     width, height = 1280, 720
-    intrinsics = [900, 900, 640, 360]
-    if os.path.exists(args.calib):
-        with open(args.calib, 'r') as f:
-            res = yaml.safe_load(f)
-            width = res.get("camera_params", {}).get("width", 1280)
-            height = res.get("camera_params", {}).get("height", 720)
-            K = np.array(res["camera_params"]["intrinsic_matrix"])
-            intrinsics = [K[0, 0], K[1, 1], K[0, 2], K[1, 2]]
-        print(f"[+] 已从标定文件加载参数: {width}x{height}, fx={intrinsics[0]}")
-    else:
-        print(f"[!] 警告: 找不到标定文件 {args.calib}，使用默认参数")
+    # 默认内参字典结构
+    current_params = {
+        "camera_model": args.camera,
+        "source": "default",
+        "intrinsics": {"fx": 900.0, "fy": 900.0, "cx": 640.0, "cy": 360.0},
+        "distortion": [0.0, 0.0, 0.0, 0.0, 0.0]
+    }
+    params_loaded = False
 
-    # 2. 模拟模式逻辑
+    # 2. 尝试从标定文件读取
+    if args.calib and os.path.exists(args.calib):
+        try:
+            with open(args.calib, 'r') as f:
+                res = yaml.safe_load(f)
+                cam_params = res.get("camera_params", {})
+                width = cam_params.get("width", 1280)
+                height = cam_params.get("height", 720)
+                K = np.array(cam_params["intrinsic_matrix"])
+                dist = cam_params.get("distortion_coeffs", [0.0]*5)
+                
+                current_params = {
+                    "camera_model": args.camera,
+                    "source": args.calib,
+                    "intrinsic_matrix": {
+                        "fx": float(K[0, 0]), "fy": float(K[1, 1]),
+                        "cx": float(K[0, 2]), "cy": float(K[1, 2])
+                    },
+                    "distortion_coeffs": [float(x) for x in dist]
+                }
+                params_loaded = True
+            print(f"[+] 已从标定文件加载参数: {width}x{height}, 源: {args.calib}")
+        except Exception as e:
+            print(f"[!] 加载标定文件失败: {e}，将尝试其他方式")
+
+    # 3. 模拟模式逻辑
     if args.mock:
+        if not params_loaded:
+            print(f"[*] 模拟模式未找到标定文件，使用默认参数")
+        
         print(f"[*] 正在运行批量模拟模式，共 {len(args.mock)} 个文件...")
         for img_path in args.mock:
             if not os.path.exists(img_path):
@@ -119,22 +165,39 @@ def main():
                 print(f"[-] 错误: 图片 {img_path} 解码失败，跳过")
                 continue
                 
-            # 使用 Letterbox 缩放，保持比例不变形
             mock_img = letterbox(mock_img, (width, height))
-            
-            # 模拟 1200mm 的平面深度图
             mock_depth = np.full((height, width), 1200, dtype=np.uint16)
-            
-            save_scan(mock_img, mock_depth, intrinsics, args.output_dir, custom_name=file_name)
+            save_scan(mock_img, mock_depth, current_params, args.output_dir, custom_name=file_name)
             
         print("[+] 所有模拟数据生成完成。")
         return
 
-    # 3. 正常相机模式
+    # 4. 正常相机模式
     print(f"[*] 正在初始化 {args.camera} 相机...")
     try:
+        # 如果还没加载参数，先用默认分辨率启动，启动后再获取硬件内参
         cam = get_camera(args.camera, width=width, height=height)
         cam.start()
+        
+        if not params_loaded:
+            # 从相机获取硬件内参
+            width = cam.width
+            height = cam.height
+            K, D = cam.get_intrinsics()
+            if K is not None:
+                current_params = {
+                    "camera_model": args.camera,
+                    "source": f"hardware_{args.camera}",
+                    "intrinsic_matrix": {
+                        "fx": float(K[0, 0]), "fy": float(K[1, 1]),
+                        "cx": float(K[0, 2]), "cy": float(K[1, 2])
+                    },
+                    "distortion_coeffs": [float(x) for x in D] if D is not None else []
+                }
+                print(f"[+] 已获取相机硬件内参: {width}x{height}, 源: {current_params['source']}")
+            else:
+                print(f"[!] 警告: 无法获取相机内参，使用默认参数")
+        
         print(f"[+] 相机已就绪。")
     except Exception as e:
         print(f"[-] 相机启动失败: {e}")
@@ -179,7 +242,7 @@ def main():
                 mask = valid_counts > 0
                 final_depth[mask] = (accum_depth[mask] / valid_counts[mask]).astype(np.uint16)
 
-                save_scan(captured_color, final_depth, intrinsics, args.output_dir)
+                save_scan(captured_color, final_depth, current_params, args.output_dir)
 
             elif key == ord('q'):
                 break

@@ -1,28 +1,53 @@
 import os, cv2, yaml, numpy as np, time, sys
+import argparse
+import glob
 
 # 确保能找到项目根目录下的模块
 sys.path.append(os.getcwd())
 from camera.orbbec_driver import OrbbecDriver
 from scipy.spatial.transform import Rotation as R_tool
 
+def get_latest_calib_file(data_dir="calib/data"):
+    dirs = glob.glob(os.path.join(data_dir, "calib_*"))
+    if not dirs:
+        return None
+    latest_dir = max(dirs, key=os.path.getctime)
+    calib_file = os.path.join(latest_dir, "calibration_result.yaml")
+    return calib_file if os.path.exists(calib_file) else None
+
 def main():
-    # 1. 加载最新的标定结果
-    res_path = "calib/data/calib_20260501/calibration_result.yaml"
+    parser = argparse.ArgumentParser(description="标定验证工具")
+    parser.add_argument("--calib", default=None, help="标定结果文件路径 (默认自动查找最新的)")
+    args = parser.parse_args()
+
+    # 1. 确定标定文件路径
+    res_path = args.calib
+    if not res_path:
+        res_path = get_latest_calib_file()
+        if not res_path:
+            print("[-] 找不到任何标定文件！请手动指定。")
+            return
+        print(f"[*] 自动找到最新标定文件: {res_path}")
+
     if not os.path.exists(res_path):
-        print(f"[-] 找不到标定文件: {res_path}"); return
+        print(f"[-] 标定文件不存在: {res_path}")
+        return
     
     with open(res_path, 'r') as f: res = yaml.safe_load(f)
     T_bc = np.array(res["T_base_camera"])
     R_bc = T_bc[:3, :3]
     t_bc = T_bc[:3, 3]
     
-    # 2. 加载相机参数
-    info_path = "calib/data/calib_20260501/calibration_info.yaml"
-    with open(info_path, 'r') as f: info = yaml.safe_load(f)
-    K = np.array(info["camera_params"]["intrinsic_matrix"])
-    D = np.array(info["camera_params"]["distortion_coeffs"])
-    calib_w = info["camera_params"].get("width", 640)
-    calib_h = info["camera_params"].get("height", 480)
+    # 2. 从标定文件中直接加载相机参数
+    cam_params = res.get("camera_params", {})
+    if not cam_params:
+        print("[-] 标定文件中未找到 camera_params 字段！")
+        return
+        
+    K = np.array(cam_params.get("intrinsic_matrix", []))
+    D = np.array(cam_params.get("distortion_coeffs", []))
+    calib_w = cam_params.get("width", 640)
+    calib_h = cam_params.get("height", 480)
     
     # 3. 初始化 Orbbec 相机驱动
     cam = OrbbecDriver(width=calib_w, height=calib_h)
