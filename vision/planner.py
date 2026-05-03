@@ -16,15 +16,17 @@ class AiSprayPlanner:
     基于 14 个裤子关键点和 3D 点云，生成符合机器人基座坐标系的“之”字形轨迹。
     参考了 calib/4.aligner.py 的坐标转换逻辑。
     """
-    def __init__(self, spray_width=80, overlap=0.2, spray_dist=150, calib_path=None):
+    def __init__(self, spray_width=80, overlap=0.2, spray_dist=150, v_step_mm=20.0, calib_path=None):
         """
         :param spray_width: 喷头有效幅宽 (mm)
         :param overlap: 路径重叠率 (0~1)
         :param spray_dist: 喷涂时保持的法向距离 (mm)
+        :param v_step_mm: 纵向轨迹点采样间隔 (mm)
         :param calib_path: 标定文件路径，用于获取 T_base_camera
         """
         self.step_x = spray_width * (1 - overlap) 
-        self.spray_dist = spray_dist
+        self.spray_dist_mm = spray_dist
+        self.v_step_mm = v_step_mm
         self.points_3d_cam = {} # 存储 14 个关键点的相机坐标 (1-based)
         self.T_base_camera = np.eye(4)
         self.camera_intrinsics = None # [fx, fy, cx, cy]
@@ -136,7 +138,7 @@ class AiSprayPlanner:
         
         fx, fy, cx, cy = self.camera_intrinsics
         step_u_target = int(self.step_x * fx / median_z)
-        step_v = int(20 * fy / median_z) 
+        step_v = int(self.v_step_mm * fy / median_z) 
         
         if step_u_target < 1: step_u_target = 10
         if step_v < 1: step_v = 5
@@ -223,7 +225,7 @@ class AiSprayPlanner:
                 is_inside = info["is_inside"]
 
                 # TCP 位置：沿法向后退喷涂距离
-                tcp_pos_cam = pt_cam + normal_cam * self.spray_dist
+                tcp_pos_cam = pt_cam + normal_cam * self.spray_dist_mm
                 
                 # 基座坐标
                 p_base = self.T_base_camera[:3, :3] @ tcp_pos_cam + self.T_base_camera[:3, 3]
@@ -286,9 +288,11 @@ class AiSprayPlanner:
         fx, fy, cx, cy = camera_intrinsics
         vis_img = image.copy()
         
-        # 1. 首先画出裤子的多边形参考边界 (蓝色虚线/细线)
+        # 1. 首先画出物理多边形参考边界 (黄色，加粗)
         if self.polygon_pts is not None:
-            cv2.polylines(vis_img, [self.polygon_pts], True, (255, 0, 0), 1)
+            cv2.polylines(vis_img, [self.polygon_pts.astype(np.int32)], True, (0, 255, 255), 2)
+            cv2.putText(vis_img, "PLANNING POLYGON", (int(self.polygon_pts[0,0]), int(self.polygon_pts[0,1]-10)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
             
         # 2. 画出 14 个原始关键点 (红色点 + 编号)
         if landmarks_2d is not None:
@@ -350,21 +354,23 @@ if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="裤子喷涂路径规划器验证工具")
     parser.add_argument("--input_dir", help="指定要处理的数据目录 (如 vision/data/0)")
-    parser.add_argument("--width", type=float, default=80.0, help="喷头有效幅宽 (mm), 默认 80")
+    parser.add_argument("--width_mm", type=float, default=80.0, help="喷头有效幅宽 (mm), 默认 80")
     parser.add_argument("--overlap", type=float, default=0.2, help="路径重叠率 (0~1), 默认 0.2")
-    parser.add_argument("--dist", type=float, default=150.0, help="喷涂法向距离 (mm), 默认 150")
+    parser.add_argument("--dist_mm", type=float, default=150.0, help="喷涂法向距离 (mm), 默认 150")
+    parser.add_argument("--v_step_mm", type=float, default=20.0, help="纵向采样间隔 (mm), 默认 20")
     args = parser.parse_args()
 
     # 1. 初始化路径规划器
     calib_file = "calib/data/calib_20260501/calibration_result.yaml"
     planner = AiSprayPlanner(
-        spray_width=args.width, 
+        spray_width=args.width_mm, 
         overlap=args.overlap, 
-        spray_dist=args.dist, 
+        spray_dist=args.dist_mm, 
+        v_step_mm=args.v_step_mm,
         calib_path=calib_file
     )
     
-    print(f"[*] 参数配置: 幅宽={args.width}mm, 重叠={args.overlap}, 距离={args.dist}mm")
+    print(f"[*] 参数配置: 幅宽={args.width_mm}mm, 重叠={args.overlap}, 距离={args.dist_mm}mm, 纵向步长={args.v_step_mm}mm")
     
     # 2. 确定采集子目录
     data_dir = "vision/data"
@@ -426,7 +432,7 @@ if __name__ == "__main__":
                     
                     # 8. 可视化关键点识别结果
                     out_kpts = os.path.join(latest_dir, "kpts.png")
-                    detector.visualize(img_file, detect_res, out_kpts)
+                    detector.visualize(img_file, detect_res, out_kpts, polygon=planner.polygon_pts)
                     
                     # 9. 可视化规划轨迹
                     img = cv2.imread(img_file)

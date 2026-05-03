@@ -92,7 +92,7 @@ class TrousersKeypoints:
         }
         return result
 
-    def visualize(self, image_path, result, output_path):
+    def visualize(self, image_path, result, output_path, polygon=None):
         """
         Visualize detection results and save to an image.
         
@@ -100,6 +100,7 @@ class TrousersKeypoints:
             image_path (str): Path to the original input image.
             result (dict): Prediction result from the predict method.
             output_path (str): Path to save the visualized image.
+            polygon (numpy.ndarray, optional): Physical silhouette polygon to draw.
         """
         if result is None:
             print("No trousers detected above the threshold.")
@@ -109,6 +110,13 @@ class TrousersKeypoints:
         if img is None:
             print(f"Error: Could not read image at {image_path}")
             return
+
+        # 0. 如果提供了物理轮廓，先画出来 (黄色，加粗)
+        if polygon is not None:
+            poly_pts = np.array(polygon, np.int32).reshape((-1, 1, 2))
+            cv2.polylines(img, [poly_pts], True, (0, 255, 255), 2)
+            cv2.putText(img, "PHYSICAL CONTOUR", (int(polygon[0,0]), int(polygon[0,1]-25)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
         keypoints = result['keypoints']
         

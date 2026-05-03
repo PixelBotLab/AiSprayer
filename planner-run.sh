@@ -1,11 +1,12 @@
 #!/bin/bash
 
 # 默认工艺参数
-WIDTH=${1:-80}
+WIDTH_MM=${1:-100}
 OVERLAP=${2:-0.2}
-DIST=${3:-150}
+DIST_MM=${3:-150}
+V_STEP_MM=${4:-20.0}
 
-echo "[*] 开始批量规划任务 (幅宽: ${WIDTH}mm, 重叠: ${OVERLAP}, 距离: ${DIST}mm)..."
+echo "[*] 开始批量规划任务 (幅宽: ${WIDTH_MM}mm, 重叠: ${OVERLAP}, 距离: ${DIST_MM}mm, 纵向步长: ${V_STEP_MM}mm)..."
 
 for angle in 0 90 180 270
 do
@@ -13,9 +14,10 @@ do
     echo "[*] 处理视角: ${angle} 度"
     conda run -n inexbot python vision/planner.py \
         --input_dir vision/data/${angle} \
-        --width ${WIDTH} \
+        --width_mm ${WIDTH_MM} \
         --overlap ${OVERLAP} \
-        --dist ${DIST}
+        --dist_mm ${DIST_MM} \
+        --v_step_mm ${V_STEP_MM}
 done
 
 echo "------------------------------------------------"
