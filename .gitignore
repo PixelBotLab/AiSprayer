@@ -30,15 +30,17 @@ ENV/
 *.swo
 
 # 项目特定：日志与临时文件
-Log/
-calib/Log/
-calib/tmp/
+logs/
 *.log
 OrbbecSDK.log.*
 
-# 系统文件
-.DS_Store
-Thumbs.db
+# 数据文件 (忽略采集的原始数据和标定过程数据)
+data/runs/*
+data/calib/*
+!data/samples/
+models/*
+!models/wissight.pt
 
-vision/data/*
-vision/images/*
+# 模型文件 (可选：如果模型很大不建议进 Git，可以保持忽略)
+# models/*.pt
+# models/*.onnx
