@@ -170,7 +170,8 @@ def main():
     model_path = args.model
     if not os.path.isabs(model_path):
         # Try to find it relative to workspace root if it's not absolute
-        workspace_root = "/home/zhanlu/dev/repos/AiSparyer"
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        workspace_root = os.path.dirname(script_dir)
         model_path = os.path.join(workspace_root, args.model)
 
     if not os.path.exists(model_path):
