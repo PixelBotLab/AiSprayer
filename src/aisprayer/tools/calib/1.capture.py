@@ -133,13 +133,22 @@ def main():
         # 标定必须在教学模式 (MODE_TEACH) 下手动移动机械臂
         robot.set_mode(MODE_TEACH)
         robot.set_coord(COORD_MCS)
+        
+        print("[*] 正在执行伺服上电...")
+        if not robot.servo_power_on():
+            print("[-] 伺服上电失败！请检查机器人急停或报警状态。")
+            return
 
         print("[*] 正在执行 Home 回零，确保坐标系状态一致...")
         res_home = robot.go_home()
         if res_home != 0:
             print(f"[-] 回零运动失败！错误码: {res_home}")
             return
-        robot.wait_motion_done()
+        
+        if not robot.wait_motion_done():
+            print("[-] 运动超时或未检测到物理位移，程序终止。")
+            return
+            
         print("[+] 硬件自检通过，机械臂已就位。")
 
         # --- 4. 目录准备 ---

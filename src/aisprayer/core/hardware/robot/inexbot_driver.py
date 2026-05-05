@@ -222,10 +222,11 @@ class InexbotDriver:
                     # 指令发出了，但迟迟没有产生位移
                     if time.time() - start > 5.0:
                         target_list = self._last_target_pose.to_list() if self._last_target_pose else []
+                        logger.error("5秒内未检测到物理位移，指令可能未生效或机械臂被锁定。")
                         print(f"[-] 警告: 5秒内未检测到物理位移。")
                         print(f"    当前: {[round(x,3) for x in curr_pos]}")
                         print(f"    目标: {[round(x,3) for x in target_list]}")
-                        return True
+                        return False
             
             time.sleep(0.1)
             
