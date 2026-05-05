@@ -73,10 +73,10 @@ metadata:
     - 1
     - 1
     - 1
-  optimized_at: 1777988995.615936
+  optimized_at: 1777989303.0720189
   reprojection_error_mm: 2.050452397082336
   rotation_error_deg: 0.47611931176027056
   samples_total: 15
   samples_used: 15
   source_data_dir: /home/zhanlu/dev/repos/AiSprayer/data/calib/calib_20260505
-  timestamp: '2026-05-05 21:49:55'
+  timestamp: '2026-05-05 21:55:03'

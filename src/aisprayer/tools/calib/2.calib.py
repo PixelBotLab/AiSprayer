@@ -98,8 +98,8 @@ def extract_corners_and_pnp(data_dir, config):
     print(f"[*] 角点提取完成: 成功 {len(all_samples)} 张, 失败 {fail_count} 张")
     return all_samples
 
-def clean_data(all_samples, threshold=0.15):
-    """根据位移比例清洗数据，阈值提高至 15% 以容忍旋转带来的杆臂效应"""
+def clean_data(all_samples, threshold=0.05):
+    """根据位移比例清洗数据，阈值为 5% 以容忍旋转带来的杆臂效应(20%)"""
     if not all_samples: return []
     base = all_samples[0]
     samples = [base]
@@ -130,7 +130,7 @@ def clean_data(all_samples, threshold=0.15):
             
             if rot_diff > 0.05: # 约 3 度以上旋转
                 # 即便有旋转，位移比例也不应过于离谱 (设定 0.5 ~ 2.5 的宽泛区间)
-                if 0.5 < ratio < 2.5:
+                if 0.2 < ratio < 1.2:
                     samples.append(s)
                     print(f"  [KEEP*] Sample {s['id']}: 位移比例 = {ratio:.3f} (检测到姿态变化且位移合理，放行)")
                 else:
