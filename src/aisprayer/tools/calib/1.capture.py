@@ -191,6 +191,12 @@ def main():
             if key == ord(' '):
                 pose = robot.get_current_pose()
                 if pose:
+                    # 检查是否存在无效的 SDK 填充值 (如 -2147483648)
+                    pose_list = pose.to_list()
+                    if any(x < -2500 for x in pose_list):
+                        print("\n[!] 警告: 检测到无效的机器人位姿数据 (SDK 异常)，请重试或检查机器人连接。")
+                        continue
+                        
                     do_capture(info, color, pose, save_dir, yaml_path)
                 else:
                     print("[-] 获取位姿失败，无法采集")

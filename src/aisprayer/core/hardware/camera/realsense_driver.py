@@ -21,6 +21,7 @@ class RealSenseDriver:
     def __init__(self, width=1280, height=720):
         self.width = width
         self.height = height
+        self.model_name = "realsense"
         self.pipeline = None
         self.config = None
         self.align = None

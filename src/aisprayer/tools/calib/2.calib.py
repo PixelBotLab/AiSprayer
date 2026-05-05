@@ -15,6 +15,7 @@ from aisprayer.utils.config_helper import load_config as load_global_config, get
 def parse_args():
     parser = argparse.ArgumentParser(description="标定计算工具 (生产版)")
     parser.add_argument("--config", default=os.path.join(PROJECT_ROOT, "configs/aisprayer_config.yaml"), help="配置文件路径")
+    parser.add_argument("--data", help="指定待处理的采集目录路径 (如 data/calib/calib_20260505)。若不指定则自动使用最新目录。")
     return parser.parse_args()
 
 def create_rotation_matrix(a, b, c, order, s=(1,1,1)):
@@ -58,6 +59,11 @@ def extract_corners_and_pnp(data_dir, config):
     fail_count = 0
     first_img_size = None
     for s in config["samples"]:
+        pose = s.get("robot_pose", {})
+        if any(abs(v) > 2500 for v in [pose.get('x',0), pose.get('y',0), pose.get('z',0)]):
+            print(f"  [!] 忽略无效数据样本 (SDK 异常): {s['id']}")
+            continue
+
         img_file = s.get("image_file", "unknown")
         img_path = os.path.join(data_dir, img_file)
         img = cv2.imread(img_path)
@@ -92,12 +98,12 @@ def extract_corners_and_pnp(data_dir, config):
     print(f"[*] 角点提取完成: 成功 {len(all_samples)} 张, 失败 {fail_count} 张")
     return all_samples
 
-def clean_data(all_samples, threshold=0.05):
-    """根据位移比例清洗数据，剔除畸变或失焦坏点"""
+def clean_data(all_samples, threshold=0.15):
+    """根据位移比例清洗数据，阈值提高至 15% 以容忍旋转带来的杆臂效应"""
     if not all_samples: return []
     base = all_samples[0]
     samples = [base]
-    print(f"[*] 正在清洗数据 (基于物理位移比例分析)...")
+    print(f"[*] 正在清洗数据 (阈值: {threshold*100:.1f}%)...")
     print(f"  [KEEP] Sample {base['id']}: 基准点")
     for i in range(1, len(all_samples)):
         s = all_samples[i]
@@ -105,14 +111,28 @@ def clean_data(all_samples, threshold=0.05):
         p_curr = np.array([s["pose"]["x"], s["pose"]["y"], s["pose"]["z"]])
         dist_r = np.linalg.norm(p_curr - p_base)
         dist_c = np.linalg.norm(s["t_cb"] - base["t_cb"])
-        ratio = dist_c / dist_r if dist_r > 5 else 1.0
         
-        # 默认阈值 0.05 代表允许 0.95 ~ 1.05 的偏差
+        # 如果机器人几乎没动，则不检查比例
+        if dist_r < 10:
+            samples.append(s)
+            continue
+            
+        ratio = dist_c / dist_r
+        # 允许较大偏差，因为标定板中心不在 TCP 上时，旋转会导致比例大幅偏离 1.0
         if (1.0 - threshold) < ratio < (1.0 + threshold):
             samples.append(s)
             print(f"  [KEEP] Sample {s['id']}: 位移比例 = {ratio:.3f}")
         else:
-            print(f"  [DROP] Sample {s['id']}: 位移比例 = {ratio:.3f} (偏差过大剔除，阈值 ±{threshold*100:.1f}%)")
+            # 特殊处理：如果有明显的旋转 (角度变化 > 0.05 rad)，即使比例偏离也建议保留
+            r_base = np.array([base["pose"]["a"], base["pose"]["b"], base["pose"]["c"]])
+            r_curr = np.array([s["pose"]["a"], s["pose"]["b"], s["pose"]["c"]])
+            rot_diff = np.linalg.norm(r_curr - r_base)
+            
+            if rot_diff > 0.05: # 约 3 度以上旋转
+                samples.append(s)
+                print(f"  [KEEP*] Sample {s['id']}: 位移比例 = {ratio:.3f} (检测到姿态变化，放行)")
+            else:
+                print(f"  [DROP] Sample {s['id']}: 位移比例 = {ratio:.3f} (偏差过大且无显著旋转)")
             
     print(f"[*] 最终参与计算的优质样本数: {len(samples)} / {len(all_samples)}")
     return samples
@@ -177,7 +197,7 @@ def optimize_extrinsics(samples):
             R_bt_list = [create_rotation_matrix(s["pose"]['a'], s["pose"]['b'], s["pose"]['c'], order, s_vec) for s in samples]
             
             try:
-                for _ in range(10): # 交替迭代10次
+                for _ in range(15): # 增加迭代次数
                     P_board_base = P_robot + np.array([R @ t_off for R in R_bt_list])
                     
                     cA, cB = np.mean(P_board_base, axis=0), np.mean(P_cam, axis=0)
@@ -197,6 +217,11 @@ def optimize_extrinsics(samples):
                     res, _, _, _ = np.linalg.lstsq(np.vstack(A_mat), np.hstack(B_mat), rcond=None)
                     t_base_cam, t_off = res[:3], res[3:]
                 
+                # 物理合理性约束：标定板偏移通常不应超过 0.5 米 (针对工业机器人的常规手柄长度)
+                if np.linalg.norm(t_off) > 500:
+                    print(f"  [DROP] Sample {s['id']}: 标定板偏移过大，不予计算")
+                    continue
+
                 t_errs = []
                 for i in range(len(samples)):
                     p_board_base = P_robot[i] + R_bt_list[i] @ t_off
@@ -291,25 +316,31 @@ def main():
     c_cfg = full_cfg.get("calib", {})
     camera_model = full_cfg.get("hardware", {}).get("camera", {}).get("model", "orbbec")
     
-    # 2. 自动定位最新的采集目录
-    data_root = get_abs_path(c_cfg.get("capture", {}).get("output_dir", "data/calib"), PROJECT_ROOT)
-    dirs = sorted(glob.glob(os.path.join(data_root, "calib_*")))
-    if not dirs:
-        print(f"[-] 找不到标定数据目录: {data_root}")
-        return
+    # 2. 确定采集数据目录
+    if args.data:
+        target_dir = get_abs_path(args.data, PROJECT_ROOT)
+        if not os.path.exists(target_dir):
+            print(f"[-] 指定的目录不存在: {target_dir}")
+            return
+        print(f"[*] 使用指定采集目录: {target_dir}")
+    else:
+        data_root = get_abs_path(c_cfg.get("capture", {}).get("output_dir", "data/calib"), PROJECT_ROOT)
+        dirs = sorted(glob.glob(os.path.join(data_root, "calib_*")))
+        if not dirs:
+            print(f"[-] 找不到标定数据目录: {data_root}")
+            return
+        target_dir = dirs[-1]
+        print(f"[*] 自动锁定最新采集目录: {target_dir}")
     
-    latest_dir = dirs[-1]
-    print(f"[*] 自动锁定最新采集目录: {latest_dir}")
-
     # 3. 加载该目录下的标定元数据
     try:
-        info = load_calib_info(latest_dir, camera_model)
+        info = load_calib_info(target_dir, camera_model)
     except Exception as e:
         print(f"[-] 加载标定信息失败: {e}")
         return
     
     # 4. 提取角点与 PnP (直接离线处理采集数据)
-    all_samples = extract_corners_and_pnp(latest_dir, info)
+    all_samples = extract_corners_and_pnp(target_dir, info)
     if not all_samples:
         print("[-] 未能提取任何样本的角点，标定失败")
         return
@@ -342,7 +373,7 @@ def main():
     # 9. 打印并保存结果 (信任并透传采集数据中的相机参数)
     calib_out = c_cfg.get("result_path", "configs/calib/calibration_result.yaml")
     save_and_print_results(
-        latest_dir, best_res, r_err_mean, 
+        target_dir, best_res, r_err_mean, 
         info["camera_params"], info["board_params"],
         calib_out,
         (len(all_samples), len(samples)),

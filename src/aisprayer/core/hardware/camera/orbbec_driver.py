@@ -35,6 +35,7 @@ class OrbbecDriver:
     def __init__(self, width=1280, height=800):
         self.width = width
         self.height = height
+        self.model_name = "orbbec"
         self.pipeline = None
         self.config = None
         self.align_filter = None

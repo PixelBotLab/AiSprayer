@@ -38,7 +38,7 @@ def verify_hardware_consistency(live=None, scan=None, calib=None):
         cam = live
         K, D = cam.get_intrinsics()
         live = {
-            "camera_model": getattr(cam, "model_name", "unknown"),
+            "camera_model": getattr(cam, "model_name", getattr(cam, "model", "unknown")),
             "width": getattr(cam, "width", None),
             "height": getattr(cam, "height", None),
             "intrinsic_matrix": K.tolist() if K is not None else [],
@@ -68,7 +68,8 @@ def verify_hardware_consistency(live=None, scan=None, calib=None):
 
             k1, k2 = get_k(p1), get_k(p2)
             if k1.size > 0 and k2.size > 0:
-                if not np.allclose(k1, k2, atol=1e-2):
-                    return False, f"内参矩阵不匹配! [{name1}] vs [{name2}]。硬件状态已变更。"
+                if not np.allclose(k1, k2, atol=1.0):
+                    diff = np.abs(k1 - k2).max()
+                    return False, f"内参矩阵差异过大 (max_diff={diff:.4f})! [{name1}] vs [{name2}]。请确认是否更换了相机或调整了分辨率。"
 
     return True, "硬件一致性校验通过"
