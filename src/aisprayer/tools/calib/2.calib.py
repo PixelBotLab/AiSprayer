@@ -129,8 +129,12 @@ def clean_data(all_samples, threshold=0.15):
             rot_diff = np.linalg.norm(r_curr - r_base)
             
             if rot_diff > 0.05: # 约 3 度以上旋转
-                samples.append(s)
-                print(f"  [KEEP*] Sample {s['id']}: 位移比例 = {ratio:.3f} (检测到姿态变化，放行)")
+                # 即便有旋转，位移比例也不应过于离谱 (设定 0.5 ~ 2.5 的宽泛区间)
+                if 0.5 < ratio < 2.5:
+                    samples.append(s)
+                    print(f"  [KEEP*] Sample {s['id']}: 位移比例 = {ratio:.3f} (检测到姿态变化且位移合理，放行)")
+                else:
+                    print(f"  [DROP] Sample {s['id']}: 位移比例 = {ratio:.3f} (即便有旋转，位移也过于离谱，剔除)")
             else:
                 print(f"  [DROP] Sample {s['id']}: 位移比例 = {ratio:.3f} (偏差过大且无显著旋转)")
             
