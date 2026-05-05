@@ -1,0 +1,82 @@
+T_base_camera:
+- - 0.01663491499574973
+  - 0.18113399583493822
+  - 0.9833177284865523
+  - -42.48635479364373
+- - 0.006893856938701737
+  - -0.9834512105335274
+  - 0.18104195987849647
+  - -134.73985213564038
+- - 0.9998378640257591
+  - 0.003767234132232688
+  - -0.017608339143713764
+  - 695.4696933155145
+- - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+board_params:
+  cols: 9
+  pattern_size_inner:
+  - 8
+  - 11
+  rows: 12
+  square_size_mm: 15.0
+camera_params:
+  camera_model: orbbec
+  distortion_coeffs:
+  - -0.035219743847846985
+  - 0.038513410836458206
+  - 0.0003776616940740496
+  - 0.0001178734892164357
+  - -0.013504322618246078
+  height: 480
+  intrinsic_matrix:
+  - - 366.73321533203125
+    - 0.0
+    - 317.40679931640625
+  - - 0.0
+    - 366.8358459472656
+    - 243.4528350830078
+  - - 0.0
+    - 0.0
+    - 1.0
+  width: 640
+camera_pose_base:
+  pitch_deg: -88.96822929918102
+  roll_deg: 167.9238526242295
+  x: -42.48635479364373
+  y: -134.73985213564038
+  yaw_deg: 22.510140558989058
+  z: 695.4696933155145
+chessboard_offset:
+- -31.350466578732217
+- -76.16673743065728
+- 201.98442562586678
+metadata:
+  calibration_mode: eye-to-hand
+  data_diversity:
+    p_score: 100.0
+    position_range_mm:
+      x: 153.053
+      y: 667.675
+      z: 743.085
+    r_score: 100.0
+    rotation_range_deg:
+      a: 360.00084183659885
+      b: 24.207466844277278
+      c: 32.86485912870402
+    score: 100.0
+  optimization_config:
+    axis_order: XYZ
+    sign_vector:
+    - 1
+    - 1
+    - 1
+  optimized_at: 1777987696.455949
+  reprojection_error_mm: 3.194937756945901
+  rotation_error_deg: 0.6266962118713602
+  samples_total: 21
+  samples_used: 21
+  source_data_dir: /home/zhanlu/dev/repos/AiSprayer/data/calib/calib_20260501
+  timestamp: '2026-05-05 21:28:16'
