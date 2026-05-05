@@ -63,19 +63,17 @@ class AiSprayPlanner:
     def plan_garment(self, scan_dir, garment_id="unknown", angle="0"):
         """对指定的裤子视角进行轨迹规划"""
         # 1. 查找数据文件
-        color = cv2.imread(os.path.join(scan_dir, "scan.jpg"))
+        color_file = os.path.join(scan_dir, "scan.jpg")
+        color = cv2.imread(color_file)
         depth = np.load(os.path.join(scan_dir, "scan.depth.npy"))
         with open(os.path.join(scan_dir, "scan.params.yaml"), 'r') as f:
             params = yaml.safe_load(f)
         
-        # 使用 Scan 自带的内参 (如果可用)
+        # 使用 Scan 自带的内参
         intr = params.get("camera_params", {}).get("intrinsic_matrix", [])
         if len(intr) > 0:
             K = np.array(intr)
-            if K.shape == (3, 3):
-                current_intr = [K[0, 0], K[1, 1], K[0, 2], K[1, 2]]
-            else:
-                current_intr = intr
+            current_intr = [K[0, 0], K[1, 1], K[0, 2], K[1, 2]] if K.shape == (3, 3) else intr
         else:
             current_intr = self.camera_intrinsics
 
@@ -85,7 +83,6 @@ class AiSprayPlanner:
             polygon_pts = self.yolo_segmenter.get_silhouette_polygon(color)
         
         if polygon_pts is None:
-            print("[!] Planner: YOLO 识别失败，使用默认全图区域 (示例)")
             h, w = color.shape[:2]
             polygon_pts = np.array([[w//4, h//4], [3*w//4, h//4], [3*w//4, 3*h//4], [w//4, 3*h//4]], dtype=np.int32)
 
@@ -99,49 +96,81 @@ class AiSprayPlanner:
             pcd_proc, depth, polygon_pts, current_intr, self.T_base_camera, self.config
         )
 
-        # 5. 保存结果到 scan_dir (恢复为 YAML 格式，更具可读性)
-        self.save_path(trajectory, scan_dir, garment_id=garment_id, angle=angle)
+        # 5. 保存结果到 scan_dir (指定文件名 plan.yaml)
+        img_info = {"path": color_file, "size": (color.shape[1], color.shape[0])}
+        self.save_path(trajectory, scan_dir, garment_id, angle, polygon_pts, img_info)
+        
+        # 6. 生成预览图
         self.visualize_plan(color, trajectory, current_intr, polygon_pts, 
                             os.path.join(scan_dir, "plan.png"), 
                             garment_id=garment_id, angle=angle)
         
         return trajectory
 
-    def save_path(self, trajectory, save_dir, garment_id="unknown", angle="0"):
-        """将轨迹保存为人类可读的 YAML 格式"""
+    def save_path(self, trajectory, save_dir, garment_id, angle, polygon_pts, img_info):
+        """将轨迹按纵列分组，并以归一化坐标保存至 plan.yaml"""
+        import time
         os.makedirs(save_dir, exist_ok=True)
-        save_path = os.path.join(save_dir, "path.yaml")
-        
-        # 计算物理参数
-        w = self.config.get("spray_width_mm", 100.0)
-        ov = self.config.get("overlap_rate", 0.2)
-        col_dist = w * (1 - ov)
-        v_step = self.config.get("v_step_mm", 20.0)
+        save_path = os.path.join(save_dir, "plan.yaml")
+        img_w, img_h = img_info["size"]
 
+        # 1. 计算元数据
+        u_min, v_min = np.min(polygon_pts, axis=0)
+        u_max, v_max = np.max(polygon_pts, axis=0)
+        bbox_ratio = [float(u_min/img_w), float(v_min/img_h), float(u_max/img_w), float(v_max/img_h)]
+        polygon_ratio = [[float(p[0]/img_w), float(p[1]/img_h)] for p in polygon_pts]
+
+        # 2. 分列逻辑
+        columns = []
+        current_column = []
+        for p in trajectory:
+            if p.get("new_line") and current_column:
+                columns.append(current_column)
+                current_column = []
+            
+            pt_data = {
+                "pos": p["pos"].tolist(),
+                "abc": p["abc"].tolist(),
+                "normal_cam": [round(float(v), 6) for v in p["normal_cam"]],
+                "uv_ratio": [float(p["uv"][0] / img_w), float(p["uv"][1] / img_h)],
+                "spray_on": bool(p["spray_on"]),
+                "speed_factor": float(p["speed_factor"])
+            }
+            current_column.append(pt_data)
+        if current_column:
+            columns.append(current_column)
+
+        # 3. 构造完整数据
+        total_points = len(trajectory)
         data = {
             "metadata": {
                 "garment_id": garment_id,
                 "angle": angle,
-                "spray_width_mm": float(w),
-                "overlap_rate": float(ov),
-                "inter_column_dist_mm": float(col_dist),
-                "intra_column_step_mm": float(v_step),
-                "point_count": len(trajectory)
+                "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "total_points": total_points,
+                "column_count": len(columns),
+                "source_image": img_info["path"],
+                "image_size": [img_w, img_h],
+                "bbox_ratio": bbox_ratio,
+                "polygon_ratio": polygon_ratio,
+                "spray_params": {
+                    "width_mm": float(self.config.get("spray_width_mm", 100.0)),
+                    "overlap": float(self.config.get("overlap_rate", 0.2)),
+                    "v_step_mm": float(self.config.get("v_step_mm", 20.0)),
+                    "spray_dist_mm": float(self.config.get("spray_dist_mm", 150.0))
+                }
             },
-            "points": []
+            "columns": columns
         }
-        
-        for p in trajectory:
-            data["points"].append({
-                "pos": p["pos"].tolist(),
-                "abc": p["abc"].tolist(),
-                "spray_on": bool(p["spray_on"]),
-                "speed_factor": float(p["speed_factor"])
-            })
         
         with open(save_path, 'w') as f:
             yaml.safe_dump(data, f, sort_keys=False)
-        print(f"[+] Planner: 轨迹已导出至 {save_path}")
+            
+        print(f"\n[+] Planner 规划完成:")
+        print(f"    - 任务 ID: {garment_id} (视角: {angle})")
+        print(f"    - 总点数: {total_points}")
+        print(f"    - 总纵列: {len(columns)}")
+        print(f"    - 结果文件: {save_path}")
 
     def visualize_plan(self, image, trajectory, intrinsics, polygon_pts, output_path, garment_id="unknown", angle="0"):
         """可视化规划结果：增加物理参数水印"""
