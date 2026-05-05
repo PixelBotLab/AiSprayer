@@ -38,11 +38,9 @@ class Aligner:
         self.SAFE_POSE_LIST = a_cfg.get("safe_pose", self.SAFE_POSE_LIST)
         self.DEFAULT_SPEED = a_cfg.get("speed", self.DEFAULT_SPEED)
         
-        # 2. 标定文件一致性校验
-        v_cfg = config_dict.get("vision", {})
-        p_cfg = v_cfg.get("planner", {})
-        camera_model = h_cfg.get("camera", {}).get("model", "orbbec")
-        calib_path = get_abs_path(p_cfg.get("calib_path", "configs/calibration_result.yaml"), PROJECT_ROOT)
+        # 2. 标定文件一致性校验 (只关注 calib 自身的配置或默认路径)
+        raw_path = c_cfg.get("result_path", "configs/calib/calibration_result.yaml")
+        calib_path = get_abs_path(raw_path, PROJECT_ROOT)
         
         if not os.path.exists(calib_path):
             raise FileNotFoundError(f"找不到标定文件: {calib_path}")
@@ -61,6 +59,7 @@ class Aligner:
         # 初始化驱动对象
         calib_w = res.get("camera_params", {}).get("width", 640)
         calib_h = res.get("camera_params", {}).get("height", 480)
+        camera_model = res.get("camera_params", {}).get("camera_model", "orbbec")
         self.cam = get_camera(camera_model, width=calib_w, height=calib_h)
         self.robot = InexbotDriver(ip=self.robot_ip, port=self.robot_port)
         

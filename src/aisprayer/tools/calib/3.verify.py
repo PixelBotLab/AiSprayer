@@ -15,8 +15,9 @@ def get_latest_calib_file(config_dict):
     c_cfg = config_dict.get("calib", {})
     p_cfg = config_dict.get("vision", {}).get("planner", {})
     
-    # 1. 优先尝试配置中的正式路径
-    official_path = get_abs_path(p_cfg.get("calib_path"), PROJECT_ROOT)
+    # 1. 优先尝试配置中的正式路径 (只关注 calib 自身的配置或默认路径)
+    raw_path = c_cfg.get("result_path", "configs/calib/calibration_result.yaml")
+    official_path = get_abs_path(raw_path, PROJECT_ROOT)
     if official_path and os.path.exists(official_path):
         return official_path
         

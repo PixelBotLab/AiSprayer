@@ -25,6 +25,12 @@ calib:
   capture:
     output_dir: "data/calib"    # 标定采集数据存储根目录
   
+  # 标定计算结果保存路径 (默认与视觉规划引用的路径一致)
+  result_path: "configs/calib/calibration_result.yaml"
+  
+  # 数据清洗阈值 (允许视觉位移与物理位移的偏差比例，0.05 代表 ±5%)
+  cleaning_threshold: 0.05
+  
   board:
     rows: 12                    # 标定板行数 (节点数)
     cols: 9                     # 标定板列数 (节点数)

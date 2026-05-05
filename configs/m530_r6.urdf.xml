@@ -1,0 +1,136 @@
+<?xml version="1.0"?>
+<robot name="m530_r6">
+
+  <!-- ================= 材质定义 ================= -->
+  <material name="silver"><color rgba="0.7 0.7 0.7 1"/></material>
+  <material name="blue"><color rgba="0.0 0.5 0.8 1"/></material>
+  <material name="black"><color rgba="0.1 0.1 0.1 1"/></material>
+
+  <!-- ================= 链路与关节 ================= -->
+
+  <!-- World 固定点 -->
+  <link name="base_link">
+    <visual>
+      <geometry><cylinder length="0.05" radius="0.2"/></geometry>
+      <material name="black"/>
+    </visual>
+  </link>
+
+  <!-- Joint 1: 旋转基座 (J1 逆时针旋转) -->
+  <joint name="joint_1" type="revolute">
+    <parent link="base_link"/>
+    <child link="link_1"/>
+    <origin xyz="0 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.7925" upper="2.7925" effort="150" velocity="1.5"/> <!-- ±160° -->
+  </joint>
+
+  <link name="link_1">
+    <visual>
+      <!-- L1 杆长 = 218mm -->
+      <origin xyz="0 0 0.109" rpy="0 0 0"/>
+      <geometry><cylinder length="0.218" radius="0.12"/></geometry>
+      <material name="silver"/>
+    </visual>
+  </link>
+
+  <!-- Joint 2: 肩部 (J2 向上旋转) -->
+  <joint name="joint_2" type="revolute">
+    <parent link="link_1"/>
+    <child link="link_2"/>
+    <!-- 加入 L6 偏置 (图示 L6=0) 和 L1=218mm -->
+    <origin xyz="0 0 0.218" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-2.0944" upper="1.7453" effort="150" velocity="1.5"/> <!-- +100° / -120° -->
+  </joint>
+
+  <link name="link_2">
+    <visual>
+      <!-- L2 杆长 = 965mm -->
+      <origin xyz="0 0 0.4825" rpy="0 0 0"/>
+      <geometry><box size="0.12 0.12 0.965"/></geometry>
+      <material name="blue"/>
+    </visual>
+  </link>
+
+  <!-- Joint 3: 肘部 (J3 向上旋转) -->
+  <joint name="joint_3" type="revolute">
+    <parent link="link_2"/>
+    <child link="link_3"/>
+    <!-- 加入 L3 偏置 (图示 L3=0) 和 L2=965mm -->
+    <origin xyz="0 0 0.965" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-1.6580" upper="1.7453" effort="100" velocity="1.5"/> <!-- +100° / -95° -->
+  </joint>
+
+  <link name="link_3">
+    <visual>
+      <origin xyz="0.06 0 0" rpy="0 1.5708 0"/>
+      <geometry><cylinder length="0.12" radius="0.08"/></geometry>
+      <material name="silver"/>
+    </visual>
+  </link>
+
+  <!-- Joint 4: 前臂旋转 (J4 逆时针旋转) -->
+  <joint name="joint_4" type="revolute">
+    <parent link="link_3"/>
+    <child link="link_4"/>
+    <!-- 核心偏移：L8=121.5mm, L7=-4mm -->
+    <origin xyz="0.1215 -0.004 0" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-3.2288" upper="3.2288" effort="100" velocity="1.5"/> <!-- ±185° -->
+  </joint>
+
+  <link name="link_4">
+    <visual>
+      <!-- L4 杆长 = 871mm -->
+      <origin xyz="0.4355 0 0" rpy="0 1.5708 0"/>
+      <geometry><box size="0.08 0.08 0.871"/></geometry>
+      <material name="blue"/>
+    </visual>
+  </link>
+
+  <!-- Joint 5: 手腕俯仰 (J5 向下旋转) -->
+  <joint name="joint_5" type="revolute">
+    <parent link="link_4"/>
+    <child link="link_5"/>
+    <!-- L4 = 871mm -->
+    <origin xyz="0.871 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-3.3161" upper="0.5236" effort="50" velocity="2.0"/> <!-- +30° / -190° -->
+  </joint>
+
+  <link name="link_5">
+    <visual>
+      <geometry><sphere radius="0.06"/></geometry>
+      <material name="silver"/>
+    </visual>
+  </link>
+
+  <!-- Joint 6: 法兰旋转 (J6 顺时针旋转) -->
+  <joint name="joint_6" type="revolute">
+    <parent link="link_5"/>
+    <child link="link_6"/>
+    <!-- L5 = 106mm -->
+    <origin xyz="0.106 0 0" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-6.2831" upper="6.2831" effort="50" velocity="2.5"/> <!-- ±360° -->
+  </joint>
+
+  <link name="link_6">
+    <visual>
+      <origin xyz="0.005 0 0" rpy="0 1.5708 0"/>
+      <geometry><cylinder length="0.01" radius="0.04"/></geometry>
+      <material name="black"/>
+    </visual>
+  </link>
+
+  <!-- 末端工具点 (TCP) -->
+  <link name="spray_nozzle_link"/>
+  <joint name="tool_joint" type="fixed">
+    <parent link="link_6"/>
+    <child link="spray_nozzle_link"/>
+    <origin xyz="0.05 0 0" rpy="0 0 0"/> <!-- 假设喷头伸出 5cm -->
+  </joint>
+
+</robot>
