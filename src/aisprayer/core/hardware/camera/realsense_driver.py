@@ -18,10 +18,9 @@ except ImportError:
 class RealSenseDriver:
     """Intel RealSense 相机驱动封装类"""
 
-    def __init__(self, width=1280, height=720, fps=30):
+    def __init__(self, width=1280, height=720):
         self.width = width
         self.height = height
-        self.fps = fps
         self.pipeline = None
         self.config = None
         self.align = None
@@ -41,8 +40,8 @@ class RealSenseDriver:
             self.config = rs.config()
             
             # 配置彩色流和深度流
-            self.config.enable_stream(rs.stream.color, self.width, self.height, rs.format.bgr8, self.fps)
-            self.config.enable_stream(rs.stream.depth, self.width, self.height, rs.format.z16, self.fps)
+            self.config.enable_stream(rs.stream.color, self.width, self.height, rs.format.bgr8)
+            self.config.enable_stream(rs.stream.depth, self.width, self.height, rs.format.z16)
 
             # 启动管线
             profile = self.pipeline.start(self.config)
@@ -60,7 +59,7 @@ class RealSenseDriver:
             for _ in range(15):
                 self.pipeline.wait_for_frames(5000)
             
-            print(f"[+] RealSense 相机已启动: {self.width}x{self.height}@{self.fps}fps")
+            print(f"[+] RealSense 相机已启动: {self.width}x{self.height}")
             
         except Exception as e:
             raise RuntimeError(f"RealSense 相机启动失败: {e}")

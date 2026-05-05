@@ -32,10 +32,9 @@ logger = logging.getLogger(__name__)
 class OrbbecDriver:
     """Orbbec Gemini 336 相机原生驱动"""
 
-    def __init__(self, width=1280, height=720, fps=30):
+    def __init__(self, width=1280, height=800):
         self.width = width
         self.height = height
-        self.fps = fps
         self.pipeline = None
         self.config = None
         self.align_filter = None
@@ -56,17 +55,24 @@ class OrbbecDriver:
             color_profile_list = self.pipeline.get_stream_profile_list(OBSensorType.COLOR_SENSOR)
             color_profile = None
             
-            # 尝试列表：优先 1280x720，否则尝试 640x480 或默认
-            for w, h in [(self.width, self.height), (640, 480), (0, 0)]:
+            # 尝试列表：优先使用传入的分辨率，否则依次尝试 1280x720, 640x480 或默认
+            for w, h in [(self.width, self.height), (1280, 720), (640, 480), (0, 0)]:
                 try:
-                    # 尝试不同格式
+                    # 尝试不同格式 (RGB 是生产首选，MJPG/YUYV 作为备份)
                     for fmt in [OBFormat.RGB, OBFormat.MJPG, OBFormat.YUYV]:
                         try:
-                            color_profile = color_profile_list.get_video_stream_profile(w, h, fmt, self.fps)
-                            if color_profile: break
-                        except: continue
+                            color_profile = color_profile_list.get_video_stream_profile(w, h, fmt)
+                            if color_profile: 
+                                print(f"[+] 成功匹配彩色流模式: {w}x{h} ({fmt})")
+                                break
+                        except Exception as e:
+                            print(f"    [-] 尝试 {w}x{h} ({fmt}) 失败: {e}")
+                            continue
                     if color_profile: break
-                except: continue
+                    print(f"[-] 分辨率 {w}x{h} 在当前设备上所有格式均不可用。")
+                except Exception as e:
+                    print(f"    [!] 分辨率尝试过程出错: {e}")
+                    continue
             
             if not color_profile:
                 color_profile = color_profile_list.get_default_video_stream_profile()
@@ -100,7 +106,7 @@ class OrbbecDriver:
             for _ in range(10):
                 self.pipeline.wait_for_frames(5000)
             
-            print(f"Orbbec 相机已启动: {self.width}x{self.height}@{self.fps}fps")
+            print(f"Orbbec 相机已启动: {self.width}x{self.height}")
             
         except Exception as e:
             raise RuntimeError(f"相机初始化失败: {e}")
