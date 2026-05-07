@@ -89,7 +89,8 @@ def do_capture(info, color, pose, save_dir, yaml_path):
     with open(yaml_path, 'w', encoding='utf-8') as f:
         yaml.dump(info, f, default_flow_style=False)
     
-    print(f"[OK] 已保存第 {count} 组样本: {img_name}")
+    pose_str = f"X:{pose.x:.2f} Y:{pose.y:.2f} Z:{pose.z:.2f} A:{pose.a:.3f} B:{pose.b:.3f} C:{pose.c:.3f}"
+    print(f"[OK] 已保存第 {count} 组样本: {img_name} | Pose: {pose_str}")
 
 def main():
     args = parse_args()
@@ -194,12 +195,13 @@ def main():
                     # 检查是否存在无效的 SDK 填充值 (如 -2147483648)
                     pose_list = pose.to_list()
                     if any(x < -2500 for x in pose_list):
-                        print("\n[!] 警告: 检测到无效的机器人位姿数据 (SDK 异常)，请重试或检查机器人连接。")
+                        print(f"\n[!] 警告: 检测到无效的机器人位姿数据 (SDK 异常)。数据: {pose_list}")
+                        print("[*] 请重试或检查机器人连接。")
                         continue
                         
                     do_capture(info, color, pose, save_dir, yaml_path)
                 else:
-                    print("[-] 获取位姿失败，无法采集")
+                    print("[-] 获取位姿失败 (返回 None)，无法采集。请检查驱动状态。")
             elif key == ord('q'):
                 break
                 
