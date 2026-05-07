@@ -254,9 +254,11 @@ class InexbotDriver:
             查询失败（非 SUCCESS）时返回 None
             """
             result = call(fd, *args)
-            if isinstance(result, (list, tuple)) and int(result[0]) == nrc.SUCCESS:
-                return result[1]
-            return None
+            if isinstance(result, (list, tuple)):
+                # 如果成功，返回实际值 result[1]；如果失败，返回错误码 result[0]
+                return result[1] if int(result[0]) == nrc.SUCCESS else int(result[0])
+            # 如果返回的是整数，无论成功（0）还是失败（负数），直接返回该结果
+            return result
         
         # 1. 获取控制器 ID (使用 VectorChar 版本, 比 char* 版本更稳定)
         ctrl_id_vec = nrc.VectorChar()
@@ -296,12 +298,12 @@ class InexbotDriver:
         # 9. 当前关节坐标(上电后有效， 单位: °)
         raw_joint = nrc.VectorDouble()
         result = nrc.get_current_position(self.fd, 0, raw_joint)
-        joint_pose_str = str(RobotPose.from_list(list(raw_joint))) if int(result[0]) == nrc.SUCCESS and raw_joint else "--"
+        joint_pose_str = str(RobotPose.from_list(list(raw_joint))) if result == nrc.SUCCESS and raw_joint else "--"
 
         # 10. 当前末端位姿(直角坐标，单位: mm,°)
         raw_cart = nrc.VectorDouble()
         result = nrc.get_current_position(self.fd, 1, raw_cart)
-        cart_pose_str = str(RobotPose.from_list(list(raw_cart))) if int(result[0]) == nrc.SUCCESS and raw_cart else "--"
+        cart_pose_str = str(RobotPose.from_list(list(raw_cart))) if result == nrc.SUCCESS and raw_cart else "--"
 
         print(
             f"\n{'-' * 50}\n"
@@ -351,14 +353,11 @@ class InexbotDriver:
             return -1
         
         result = nrc.get_running_state(self.fd, 0)
-        if result is None:
-            logger.error("[get_running_state] Failed to get running state")
-            return -1
-        elif result[0] != nrc.SUCCESS:
-            logger.error(f"[get_running_state] Failed to get running state, error code: {result[0]}")
-            return -1
-        else:
-            return result[1]
+        if isinstance(result, (list, tuple)) and len(result) > 1:
+            if int(result[0]) == nrc.SUCCESS:
+                return int(result[1])
+            logger.error(f"[get_running_state] SDK error code: {result[0]}")
+        return -1
         
     def get_current_pose(self) -> RobotPose:
         """
@@ -372,14 +371,10 @@ class InexbotDriver:
         
         raw_cart = nrc.VectorDouble()
         result = nrc.get_current_position(self.fd, self.COORD, raw_cart)
-        if result is None:
-            logger.error("[get_current_pose] Failed to get current position")
+        if result != nrc.SUCCESS:
+            logger.error(f"[get_current_pose] Failed to get current position, code: {result}")
             return None
-        elif result[0] != nrc.SUCCESS:
-            logger.error(f"[get_current_pose] Failed to get current position, error code: {result[0]}")
-            return None
-        else:
-            return RobotPose.from_list(list(raw_cart))
+        return RobotPose.from_list(list(raw_cart))
     
     # -------------------------------------------------
     #  可达性判断
@@ -406,15 +401,13 @@ class InexbotDriver:
         for i, v in enumerate(_to_list(pose)[:6]):
             pose_vec[7+i] = float(v)
 
-        result = False
-        result = nrc.get_pos_reachable(self.fd, pose_vec, movetype, result)
-        if result is None:
-            logger.error("[is_reachable] Failed to get current position")
-            return False
-        elif result[0] != nrc.SUCCESS:
-            logger.error(f"[is_reachable] Failed to get current position, error code: {result[0]}")
-            return False
-        return bool(result[1])
+        result_bool = False
+        res = nrc.get_pos_reachable(self.fd, pose_vec, movetype, result_bool)
+        if isinstance(res, (list, tuple)) and len(res) > 1:
+            if int(res[0]) == nrc.SUCCESS:
+                return bool(res[1])
+            logger.error(f"[is_reachable] SDK error code: {res[0]}")
+        return False
 
     # -------------------------------------------------
     #  运动控制（内部工具方法）
@@ -451,7 +444,8 @@ class InexbotDriver:
             vec.append(0.0)
 
         cmd = nrc.MoveCmd()
-        cmd.targetPosType = nrc.PosType_data
+        # 核心修正：必须强制设为 2 以保证连接稳定
+        cmd.targetPosType = 2
         cmd.targetPosValue = vec
         cmd.coord = self.COORD
         cmd.velocity = velocity
@@ -470,7 +464,9 @@ class InexbotDriver:
         """
         time.sleep(0.1)
         while True:
-            if self.get_running_state() == nrc.RUNNING_STATE_STOP:
+            # 心跳机制：通过查询伺服状态维持 TCP 连接，防止长距离运动时断连
+            nrc.get_servo_state(self.fd, 0)
+            if self.get_running_state() == RUNNING_STATE_STOP:
                 break
             time.sleep(poll_interval)
 
