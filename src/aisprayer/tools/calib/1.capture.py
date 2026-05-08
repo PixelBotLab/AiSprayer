@@ -175,7 +175,18 @@ def main():
         print(" [Q]: 退出并保存")
         print("="*50)
 
+        last_heartbeat_time = 0
         while True:
+            # 心跳机制：每隔 1s 主动查询一次状态和位姿，并在终端显示（动态刷新）
+            if time.time() - last_heartbeat_time > 1.0:
+                state = robot.get_running_state()
+                curr_pose = robot.get_current_pose()
+                if curr_pose:
+                    p = curr_pose
+                    # 使用 \r 实现在同一行更新状态，不刷屏
+                    print(f"\r[*] Heartbeat - State: {state} | Pose: [{p.x:.1f}, {p.y:.1f}, {p.z:.1f}, {p.a:.2f}, {p.b:.2f}, {p.c:.2f}]", end="", flush=True)
+                last_heartbeat_time = time.time()
+
             color, depth = cam.get_frame()
             if color is None: continue
             
