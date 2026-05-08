@@ -94,7 +94,7 @@ def main():
 
             # 简单的实时预览
             display = color.copy()
-            cv2.putText(display, f"ID: {args.garment} | Angle: {args.angle}", (20, 40), 
+            cv2.putText(display, f"ID: {garment_id} | Angle: {args.angle}", (20, 40), 
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
             cv2.imshow(win_name, display)
 
@@ -103,7 +103,7 @@ def main():
                 print(f"[*] 正在保存数据 (相机: {camera_model})...")
                 # 调用 recorder 保存数据，传入标准化的 cam_info
                 saved_path = recorder.save_scan(color, depth, cam_info, 
-                                               garment_id=args.garment, 
+                                               garment_id=garment_id, 
                                                angle=args.angle)
                 print(f"[+] 数据已成功落盘: {saved_path}")
             elif key == ord('q'):

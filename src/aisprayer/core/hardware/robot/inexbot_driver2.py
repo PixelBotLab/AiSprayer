@@ -16,6 +16,7 @@ import math
 import logging
 import pathlib
 import sys
+import threading
 from dataclasses import dataclass
 from typing import Optional, List, Union
 
@@ -130,13 +131,17 @@ class InexbotDriver:
     MODE       = 0    # 运行模式(0=示教模式 1=远程模式 2=运行模式)
     ANGLE_UNIT = 1    # 角度单位(0=弧度制 1=度制)
 
-    def __init__(self, ip: str, port: str = "6001", toolnum: int = 0, reconnect: bool = False):
+    _KEEPALIVE_INTERVAL = 3
+    
+    def __init__(self, ip: str, port: str = "6001", toolnum: int = 0, reconnect: bool = True):
         self.ip           = ip
         self.port         = port
-        self.tool_num      = toolnum
+        self.tool_num     = toolnum
         self.reconnect    = reconnect
         self.fd           = -1
         self._queue_size  = 0     # 本地队列已追加的指令条数
+        self._keepalive_thread: Optional[threading.Thread] = None
+        self._keepalive_stop = threading.Event()
 
     # ---------------------------------------
     # 连接 / 断开
@@ -162,6 +167,15 @@ class InexbotDriver:
             logger.error(f"[startup] Failed to connect to robot: {self.ip}:{self.port}")
             return False
         logger.info(f"[startup] Connection established to {self.ip}:{self.port}")
+
+        nrc.set_reconnect(self.fd, self.reconnect)
+
+        # 启动后台心跳线程
+        self._keepalive_stop.clear()
+        self._keepalive_thread = threading.Thread(
+            target=self._keepalive_loop, daemon=True, name="robot-keepalive"
+        )
+        self._keepalive_thread.start()
 
         # 步骤2：设置坐标系和运行模式
         result = nrc.set_current_coord(self.fd, self.COORD)
@@ -214,6 +228,12 @@ class InexbotDriver:
         """
         关闭机器人连接，断开控制器。
         """
+        # 停止心跳线程
+        self._keepalive_stop.set()
+        if self._keepalive_thread is not None:
+            self._keepalive_thread.join(timeout=2.0)
+            self._keepalive_thread = None
+
         if self.fd >= 0:
             #断电
             nrc.set_servo_poweroff(self.fd)
@@ -222,6 +242,27 @@ class InexbotDriver:
             nrc.disconnect_robot(self.fd)
             self.fd = -1
         logger.info(f"[shutdown] Disconnected from {self.ip}:{self.port}")
+
+    def _keepalive_loop(self):
+        """
+        后台心跳：每隔 _KEEPALIVE_INTERVAL 秒查询一次伺服状态和位姿，
+        防止控制器因应用层空闲超时（~23s）主动发 FIN+RST 断连。
+        同时在终端打印状态快照。
+        """
+        while not self._keepalive_stop.wait(self._KEEPALIVE_INTERVAL):
+            if self.fd < 0:
+                break
+            try:
+                # 1. 获取伺服状态 (0=停止, 1=就绪, 2=报警, 3=运行)
+                state = self.get_servo_state()
+                # 2. 获取当前直角坐标位姿
+                p = self.get_position()
+                
+                if p:
+                    # 在终端打印心跳快照
+                    print(f"[*] Heartbeat - Servo: {state} | Pose: [{p.x:.1f}, {p.y:.1f}, {p.z:.1f}, {p.a:.3f}, {p.b:.3f}, {p.c:.3f}]")
+            except Exception:
+                pass
 
     def print_system_info(self) -> None:
         """
@@ -463,8 +504,6 @@ class InexbotDriver:
         """
         time.sleep(0.1)
         while True:
-            # 心跳机制：通过查询伺服状态维持 TCP 连接，防止长距离运动时断连
-            nrc.get_servo_state(self.fd, 0)
             if self.get_running_state() == RUNNING_STATE_STOP:
                 break
             time.sleep(poll_interval)

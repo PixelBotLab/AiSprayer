@@ -177,21 +177,21 @@ def main():
 
         last_heartbeat_time = 0
         while True:
-            # 心跳机制：每隔 1s 主动查询一次状态和位姿，并在终端显示（动态刷新）
+            # 心跳机制：每隔 1s 主动查询一次状态，防止连接进入 Idle 状态触发控制器 Bug 断连
             if time.time() - last_heartbeat_time > 1.0:
-                state = robot.get_running_state()
-                curr_pose = robot.get_current_pose()
-                if curr_pose:
-                    p = curr_pose
-                    # 使用 \r 实现在同一行更新状态，不刷屏
-                    print(f"\r[*] Heartbeat - State: {state} | Pose: [{p.x:.1f}, {p.y:.1f}, {p.z:.1f}, {p.a:.2f}, {p.b:.2f}, {p.c:.2f}]", end="", flush=True)
+                robot.get_running_state()
                 last_heartbeat_time = time.time()
 
             color, depth = cam.get_frame()
             if color is None: continue
             
             display = color.copy()
-            # 绘制角点预览
+            # 1. 在图像上显示当前已采集的样本数量
+            sample_count = len(info.get("samples", []))
+            cv2.putText(display, f"Samples Collected: {sample_count}", (20, 40), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+
+            # 2. 绘制角点预览
             gray = cv2.cvtColor(color, cv2.COLOR_BGR2GRAY)
             ret, corners = cv2.findChessboardCorners(gray, pattern_size, None)
             if ret:
@@ -201,6 +201,12 @@ def main():
             key = cv2.waitKey(1) & 0xFF
             
             if key == ord(' '):
+                # 3. 按下空格后再次检查角点是否有效
+                if not ret:
+                    print(f"\n[-] 采集失败: 未能在当前画面识别到完整的棋盘格角点 ({pattern_size[0]}x{pattern_size[1]})。")
+                    print("    请确保标定板完全位于视野内且无遮挡。")
+                    continue
+
                 pose = robot.get_current_pose()
                 if pose:
                     # 检查是否存在无效的 SDK 填充值 (如 -2147483648)
