@@ -444,8 +444,7 @@ class InexbotDriver:
             vec.append(0.0)
 
         cmd = nrc.MoveCmd()
-        # 核心修正：必须强制设为 2 以保证连接稳定
-        cmd.targetPosType = 2
+        cmd.targetPosType = nrc.PosType_data
         cmd.targetPosValue = vec
         cmd.coord = self.COORD
         cmd.velocity = velocity
