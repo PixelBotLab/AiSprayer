@@ -12,6 +12,7 @@ import logging
 import pathlib
 import sys
 import math
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Optional, List
@@ -71,6 +72,7 @@ class _SdkBackend:
             res = self._nrc.get_servo_state(self._fd, 0)
             if isinstance(res, (list, tuple)) and int(res[0]) == 0: return True
             time.sleep(0.5)
+        self._nrc.set_reconnect(self._fd, True)
         return False
 
     def disconnect(self):
@@ -86,8 +88,8 @@ class _SdkBackend:
         cmd = self._nrc.MoveCmd()
         # 2. 核心修正：必须使用 2 (在旧版中对应 PosType_data)
         # 虽然新版 SDK 定义 data 为 0，但在实机测试中必须设为 2 才能维持连接稳定
-        cmd.targetPosType = 2
-            
+        cmd.targetPosType = 0
+         #cmd.targetPosType = 2   
         cmd.targetPosValue = vec
         cmd.velocity = float(vel)
         cmd.acc = float(acc)
@@ -135,13 +137,44 @@ class _SdkBackend:
 # ═══════════════════════════════════════════════
 
 class InexbotDriver:
+    # 心跳间隔（秒）。抓包确认控制器约 23 秒无应用数据即发 FIN+RST，
+    # 取 10 秒以留足余量。
+    _KEEPALIVE_INTERVAL = 3
+
     def __init__(self, ip, port=6001):
         self.ip, self.port = ip, port
         self._backend = _SdkBackend()
         self._last_target_pose = None
+        self._keepalive_thread: Optional[threading.Thread] = None
+        self._keepalive_stop = threading.Event()
 
-    def connect(self): return self._backend.connect(self.ip, self.port)
-    def disconnect(self): self._backend.disconnect()
+    def _keepalive_loop(self):
+        """后台心跳：每隔 _KEEPALIVE_INTERVAL 秒查询一次伺服状态，
+        防止控制器因应用层空闲超时（~23s）主动发 FIN+RST 断连。"""
+        while not self._keepalive_stop.wait(self._KEEPALIVE_INTERVAL):
+            try:
+                self._backend.get_servo_state()
+                print(f"[keepalive] servo state: {self._backend.get_servo_state()}")
+            except Exception as e:
+                print(f"[keepalive] error: {e}")
+                pass
+
+    def connect(self):
+        ok = self._backend.connect(self.ip, self.port)
+        if ok:
+            self._keepalive_stop.clear()
+            self._keepalive_thread = threading.Thread(
+                target=self._keepalive_loop, daemon=True, name="robot-keepalive"
+            )
+            self._keepalive_thread.start()
+        return ok
+
+    def disconnect(self):
+        self._keepalive_stop.set()
+        if self._keepalive_thread is not None:
+            self._keepalive_thread.join(timeout=2)
+            self._keepalive_thread = None
+        self._backend.disconnect()
     def __enter__(self): self.connect(); return self
     def __exit__(self, *args): self.disconnect()
 
