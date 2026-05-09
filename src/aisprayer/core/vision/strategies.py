@@ -37,10 +37,18 @@ class ZigZagStrategy(PathStrategy):
         u_min, v_min = np.min(polygon_pts, axis=0)
         u_max, v_max = np.max(polygon_pts, axis=0)
 
+        # 获取区域内的中值深度作为参考，避免硬编码 1000mm 的误差
+        roi_depth = depth_map[int(v_min):int(v_max), int(u_min):int(u_max)]
+        valid_depths = roi_depth[(roi_depth > 100) & (roi_depth < 3000)]
+        ref_depth = np.median(valid_depths) if len(valid_depths) > 0 else 1000.0
+
         step_x = spray_width * (1 - overlap)
-        n_cols = int(max((u_max - u_min) / (step_x * fx / 1000.0), 2))
+        # 使用向上取整并增加冗余列，确保完全覆盖
+        n_cols = int(np.ceil((u_max - u_min) / (step_x * fx / ref_depth))) + 1
+        n_cols = max(n_cols, 2)
+        
         u_samples = np.linspace(u_min, u_max, n_cols).astype(np.int32)
-        step_v    = max(1, int(v_step_mm * fy / 1000.0))
+        step_v    = max(1, int(v_step_mm * fy / ref_depth))
 
         full_trajectory = []
         is_downward = True

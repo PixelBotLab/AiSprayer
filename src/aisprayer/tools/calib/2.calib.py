@@ -130,7 +130,7 @@ def clean_data(all_samples, threshold=0.05):
             
             if rot_diff > 0.05: # 约 3 度以上旋转
                 # 即便有旋转，位移比例也不应过于离谱 (设定 0.5 ~ 2.5 的宽泛区间)
-                if 0.2 < ratio < 1.2:
+                if 0.80 < ratio < 1.20:
                     samples.append(s)
                     print(f"  [KEEP*] Sample {s['id']}: 位移比例 = {ratio:.3f} (检测到姿态变化且位移合理，放行)")
                 else:

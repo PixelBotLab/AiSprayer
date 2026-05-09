@@ -17,11 +17,11 @@ vision:
     model_path: "models/wissight.pt"
     spray_width_mm: 100.0
     overlap_rate: 0.2
-    spray_dist_mm: 150.0
-    v_step_mm: 100.0
+    spray_dist_mm: 100.0
+    v_step_mm: 20.0
     # 机械臂工作空间安全限位 (单位: mm)
     workspace_limits:
-      x: [1000.0, 2000.0]
+      x: [500.0, 1800.0]
       y: [-1600.0, 1600.0]
       z: [100.0, 1800.0]
 

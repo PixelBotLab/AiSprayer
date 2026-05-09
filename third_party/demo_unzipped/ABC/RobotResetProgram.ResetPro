@@ -1,0 +1,15 @@
+//DIR
+//JOB
+//NAME RobotResetProgram
+//POS
+///NPOS 0,0,0,0,0,0
+///POSTYPE PULSE
+///PULSE
+//INSTRUCTION
+///DATE 2025.02.26 15:02:39
+ROBOTTYPE = [R_GENERAL_6S]
+DOUBLEROBOT = [NoCooperative]
+EXTGROUPTYPE = [LineSingle,SpinDouble,SpinDouble]
+PROVERSION = [1.0.6]
+NOP
+END
