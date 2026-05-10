@@ -133,9 +133,9 @@ class InexbotDriver:
 
     _KEEPALIVE_INTERVAL = 3
     
-    def __init__(self, ip: str, port: str = "6001", toolnum: int = 0, reconnect: bool = True):
+    def __init__(self, ip: str = "192.168.2.14", port: str = "6001", toolnum: int = 0, reconnect: bool = True):
         self.ip           = ip
-        self.port         = port
+        self.port         = str(port)
         self.tool_num     = toolnum
         self.reconnect    = reconnect
         self.fd           = -1

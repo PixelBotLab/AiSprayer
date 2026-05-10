@@ -45,3 +45,9 @@ calib:
   align:
     safe_pose: [460.0, 125.0, 1077.0, -3.141, 0.0, 0.0]  # 安全过渡点 [X, Y, Z, A, B, C]
     speed: 50                   # 运动速度 (mm/s)
+# 喷涂作业参数
+spraying:
+  ready_dist_mm: 300.0   # 准备点后撤距离
+  velocity: 150.0        # 喷涂移动速度 (mm/s)
+  pl: 2                  # 平滑级别 (0-5), 越大越平衡，但是也越容易偏离预定轨迹点
+  tool_num: 0            # 默认工具号
