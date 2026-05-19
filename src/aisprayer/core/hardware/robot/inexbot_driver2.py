@@ -22,7 +22,7 @@ from typing import Optional, List, Union
 
 # SDK 路径配置 (必须在 import nrc_interface 之前)
 _project_root = pathlib.Path(__file__).parents[5]
-_sdk_dir = str(_project_root / "third_party" / "robot_sdk" / "sdk_22.07" / "python" / "linux" / "linux_python_3.8_v2.0.4")
+_sdk_dir = str(_project_root / "third_party" / "robot_sdk" / "sdk_24.03" / "python" / "linux" / "linux_python_3.8_v2.0.4")
 if _sdk_dir not in sys.path: 
     sys.path.insert(0, _sdk_dir)
 
@@ -162,20 +162,12 @@ class InexbotDriver:
             return True
 
         # 步骤1: 连接控制器
+        nrc.set_reconnect(self.fd, self.reconnect)
         self.fd = nrc.connect_robot(self.ip, self.port)
         if self.fd < 0:
             logger.error(f"[startup] Failed to connect to robot: {self.ip}:{self.port}")
             return False
         logger.info(f"[startup] Connection established to {self.ip}:{self.port}")
-
-        nrc.set_reconnect(self.fd, self.reconnect)
-
-        # 启动后台心跳线程
-        self._keepalive_stop.clear()
-        self._keepalive_thread = threading.Thread(
-            target=self._keepalive_loop, daemon=True, name="robot-keepalive"
-        )
-        self._keepalive_thread.start()
 
         # 步骤2：设置坐标系和运行模式
         result = nrc.set_current_coord(self.fd, self.COORD)
@@ -207,9 +199,17 @@ class InexbotDriver:
             result = nrc.set_servo_state(self.fd, state)
             if result != nrc.SUCCESS:
                 logger.error(f"[startup] Failed to set state to {state}, result: {result}")
-                return False
+                #return False
             logger.info(f"[startup] Set state to {state}")
-            time.sleep(0.2)
+            time.sleep(0.5)
+
+        # 启动后台心跳线程
+        self._keepalive_stop.clear()
+        self._keepalive_thread = threading.Thread(
+            target=self._keepalive_loop, daemon=True, name="robot-keepalive"
+        )
+        self._keepalive_thread.start()
+
 
         # 步骤5：上电
         result = nrc.set_servo_poweron(self.fd)
@@ -222,6 +222,7 @@ class InexbotDriver:
         time.sleep(2)
         logger.info(f"[startup] Robot startup successful and servo enabled")
         self.print_system_info()
+
         return True
 
     def shutdown(self) -> None:

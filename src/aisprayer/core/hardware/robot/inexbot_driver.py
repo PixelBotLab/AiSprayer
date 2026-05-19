@@ -59,7 +59,7 @@ DEFAULT_DEC = 50
 class _SdkBackend:
     def __init__(self):
         _project_root = pathlib.Path(__file__).parents[5]
-        _sdk_dir = str(_project_root / "third_party" / "robot_sdk" / "sdk_22.07" / "python" / "linux" / "linux_python_3.8_v2.0.4")
+        _sdk_dir = str(_project_root / "third_party" / "robot_sdk" / "sdk_24.03" / "python" / "linux" / "linux_python_3.8_v2.0.4")
         if _sdk_dir not in sys.path: sys.path.insert(0, _sdk_dir)
         import nrc_interface
         self._nrc = nrc_interface
@@ -153,8 +153,13 @@ class InexbotDriver:
         防止控制器因应用层空闲超时（~23s）主动发 FIN+RST 断连。"""
         while not self._keepalive_stop.wait(self._KEEPALIVE_INTERVAL):
             try:
-                self._backend.get_servo_state()
-                print(f"[keepalive] servo state: {self._backend.get_servo_state()}")
+                state = self._backend.get_servo_state()
+                curr_pose = self._backend.get_current_pose()
+                if curr_pose:
+                    p = curr_pose
+                    # 使用 \r 实现在同一行更新状态，不刷屏
+                    print(f"[*] Heartbeat - State: {state} | Pose: \
+                        [{p.x:.1f}, {p.y:.1f}, {p.z:.1f}, {p.a:.2f}, {p.b:.2f}, {p.c:.2f}]")
             except Exception as e:
                 print(f"[keepalive] error: {e}")
                 pass
@@ -187,13 +192,16 @@ class InexbotDriver:
         time.sleep(0.3)
         
         # 步骤 3: 强制停止(0) -> 就绪(1)
-        nrc.set_servo_state(fd, 0)
+        ret = nrc.set_servo_state(fd, 0)
+        print(f"[debug] set_servo_state(0) ret: {ret}")
         time.sleep(0.3)
-        nrc.set_servo_state(fd, 1)
+        ret = nrc.set_servo_state(fd, 1)
+        print(f"[debug] set_servo_state(1) ret: {ret}")
         time.sleep(0.5)
         
         # 步骤 4: 上电
-        nrc.set_servo_poweron(fd)
+        ret = nrc.set_servo_poweron(fd)
+        print(f"[debug] set_servo_poweron ret: {ret}")
         
         for _ in range(20):
             time.sleep(0.5)
