@@ -192,14 +192,21 @@ class InexbotDriver:
         time.sleep(0.3)
         
         # 步骤 3: 强制停止(0) -> 就绪(1)
-        ret = nrc.set_servo_state(fd, 0)
-        print(f"[debug] set_servo_state(0) ret: {ret}")
-        time.sleep(0.3)
-        ret = nrc.set_servo_state(fd, 1)
-        print(f"[debug] set_servo_state(1) ret: {ret}")
-        time.sleep(0.5)
+        for state in [0, 1]:
+            current_state = self.get_servo_state()
+            if current_state in [2, 3]:
+                print(f"[debug] Current state is {current_state} (cannot set_servo_state). Skipping.")
+                continue
+            ret = nrc.set_servo_state(fd, state)
+            print(f"[debug] set_servo_state({state}) ret: {ret}")
+            time.sleep(0.3)
         
         # 步骤 4: 上电
+        current_state = self.get_servo_state()
+        if current_state == 3:
+            logger.info("伺服已处于上电状态 (state=3)，跳过上电")
+            return True
+
         ret = nrc.set_servo_poweron(fd)
         print(f"[debug] set_servo_poweron ret: {ret}")
         

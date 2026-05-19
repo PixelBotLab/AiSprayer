@@ -196,6 +196,10 @@ class InexbotDriver:
 
         # 步骤4：设置状态 0 → 1
         for state in [0, 1]:
+            current_state = self.get_servo_state()
+            if current_state in [2, 3]:
+                logger.info(f"[startup] Current state is {current_state} (cannot set_servo_state). Skipping.")
+                continue
             result = nrc.set_servo_state(self.fd, state)
             if result != nrc.SUCCESS:
                 logger.error(f"[startup] Failed to set state to {state}, result: {result}")
@@ -212,14 +216,34 @@ class InexbotDriver:
 
 
         # 步骤5：上电
-        result = nrc.set_servo_poweron(self.fd)
-        if result != nrc.SUCCESS:
-            logger.error(f"[startup] Failed to power on, result: {result}")
-            return False
-        logger.info(f"[startup] Powered on")
+        already_powered_on = False
+        current_state = self.get_servo_state()
+        if current_state == 3:
+            logger.info("[startup] Servo is already powered on (state=3). Skipping power on.")
+            already_powered_on = True
 
-        # 强制等待伺服稳定（关键步骤）
-        time.sleep(2)
+        if not already_powered_on:
+            result = nrc.set_servo_poweron(self.fd)
+            if result != nrc.SUCCESS:
+                logger.error(f"[startup] Failed to power on, result: {result}")
+                return False
+            logger.info(f"[startup] Powered on")
+
+            # 检查上电是否成功
+            poweron_success = False
+            for _ in range(20):
+                time.sleep(0.5)
+                if self.get_servo_state() == 3:
+                    poweron_success = True
+                    break
+
+            if not poweron_success:
+                logger.error("[startup] Failed to verify servo power on (state did not reach 3)")
+                self.shutdown()
+                return False
+            logger.info("[startup] Servo power on verified (state=3)")
+        else:
+            time.sleep(0.5)
         logger.info(f"[startup] Robot startup successful and servo enabled")
         self.print_system_info()
 
