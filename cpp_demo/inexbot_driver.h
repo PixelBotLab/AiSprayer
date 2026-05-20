@@ -28,6 +28,8 @@ inline std::string get_current_time_str() {
 #define __FILENAME__ (strrchr(__FILE__, '/') ? strrchr(__FILE__, '/') + 1 : (strrchr(__FILE__, '\\') ? strrchr(__FILE__, '\\') + 1 : __FILE__))
 
 #define LOG_INFO std::cout << "[" << get_current_time_str() << "][" << __FILENAME__ << ":" << __LINE__ << "] "
+#define LOG_WARN std::cout << "\033[33m[" << get_current_time_str() << "][" << __FILENAME__ << ":" << __LINE__ << "] "
+#define LOG_WARN_END "\033[0m" << std::endl
 #define LOG_ERROR std::cerr << "\033[31m[" << get_current_time_str() << "][" << __FILENAME__ << ":" << __LINE__ << "] "
 #define LOG_ERROR_END "\033[0m" << std::endl
 
@@ -71,7 +73,6 @@ struct RobotPose {
                std::abs(c - other.c) < eps;
     }
 };
-
 class InexbotDriver {
 public:
     // Constants matching the configuration in inexbot_driver2.py
@@ -106,7 +107,8 @@ public:
     int get_servo_state();
     int get_running_state();
     RobotPose get_current_pose();
-    bool is_reachable(const RobotPose& pose, const std::string& movetype = "MOVL");
+    bool is_reachable_l(const RobotPose& pose);
+    bool is_reachable_j(const RobotPose& pose);
 
     int move_j(const RobotPose& pose, 
                double velocity = DEFAULT_VELOCITY, 
@@ -124,7 +126,43 @@ public:
 
     int go_home(bool wait = true);
 
-    // Queue movement methods
+    // High-level queue execution method
+    int execute_queue(const std::vector<RobotPose>& poses,
+                      const std::string& move_type = "L",
+                      double velocity = DEFAULT_VELOCITY,
+                      double acc = DEFAULT_ACC,
+                      double dec = DEFAULT_DEC,
+                      int tool_num = 0,
+                      int pl = 0,
+                      bool wait = true);
+
+    void print_system_info();
+
+private:
+    std::string m_ip;
+    std::string m_port;
+    int m_tool_num;
+    bool m_reconnect;
+    SOCKETFD m_fd;
+    int m_queue_size;
+
+    // std::thread m_keepalive_thread;
+    // std::atomic<bool> m_keepalive_stop;
+
+    // void _keepalive_loop();
+    bool _is_reachable(const RobotPose& pose, const std::string& movetype);
+    MoveCmd _make_movecmd(const RobotPose& pose, 
+                         double velocity, 
+                         double acc, 
+                         double dec, 
+                         int tool_num = 0, 
+                         int user_num = 0, 
+                         int pl = 0);
+    void _wait_motion_done(double poll_interval_sec = 0.05);
+    int _queue_send_batched(bool wait);
+    void _wait_queue_done(double poll_interval_sec = 0.05);
+
+    // Private queue helper methods
     int queue_start();
     int queue_push_l(const RobotPose& pose, 
                      double velocity = DEFAULT_VELOCITY, 
@@ -143,29 +181,4 @@ public:
     int queue_resume();
     int queue_stop();
     int queue_get_remaining();
-
-    void print_system_info();
-
-private:
-    std::string m_ip;
-    std::string m_port;
-    int m_tool_num;
-    bool m_reconnect;
-    SOCKETFD m_fd;
-    int m_queue_size;
-
-    // std::thread m_keepalive_thread;
-    // std::atomic<bool> m_keepalive_stop;
-
-    // void _keepalive_loop();
-    MoveCmd _make_movecmd(const RobotPose& pose, 
-                         double velocity, 
-                         double acc, 
-                         double dec, 
-                         int tool_num = 0, 
-                         int user_num = 0, 
-                         int pl = 0);
-    void _wait_motion_done(double poll_interval_sec = 0.05);
-    int _queue_send_batched(bool wait);
-    void _wait_queue_done(double poll_interval_sec = 0.05);
 };

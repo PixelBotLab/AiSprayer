@@ -296,8 +296,18 @@ RobotPose InexbotDriver::get_current_pose() {
     return pose;
 }
 
-// Is Reachable
-bool InexbotDriver::is_reachable(const RobotPose& pose, const std::string& movetype) {
+// Is Reachable L
+bool InexbotDriver::is_reachable_l(const RobotPose& pose) {
+    return _is_reachable(pose, "MOVL");
+}
+
+// Is Reachable J
+bool InexbotDriver::is_reachable_j(const RobotPose& pose) {
+    return _is_reachable(pose, "MOVJ");
+}
+
+// Internal Reachable helper
+bool InexbotDriver::_is_reachable(const RobotPose& pose, const std::string& movetype) {
     if (m_fd < 0) return false;
     std::vector<double> pose_vec(14, 0.0);
     pose_vec[0] = static_cast<double>(COORD);
@@ -504,6 +514,53 @@ int InexbotDriver::queue_get_remaining() {
     LOG_INFO << "[API] queue_motion_get_queuelen() returned: " << result_to_string(res) << ", len: " << len << std::endl;
     if (res != SUCCESS) return static_cast<int>(res);
     return len;
+}
+
+// Execute Queue with RobotPoses and a vector of move types
+int InexbotDriver::execute_queue(const std::vector<RobotPose>& poses,
+                                 const std::string& move_type,
+                                 double velocity,
+                                 double acc,
+                                 double dec,
+                                 int tool_num,
+                                 int pl,
+                                 bool wait) {
+    if (poses.empty()) {
+        LOG_INFO << "[execute_queue] Empty poses list." << std::endl;
+        return 0;
+    }
+    int ret = queue_start();
+    if (ret != SUCCESS) return ret;
+
+    for (size_t i = 0; i < poses.size(); ++i) {
+        // Default: last point has pl=0 to stop at the destination
+        int current_pl = pl;
+        if (i == poses.size() - 1) {
+            current_pl = 0;
+        }
+
+        if (move_type == "J" || move_type == "j" || move_type == "MOVEJ") {
+            ret = queue_push_j(poses[i], velocity, acc, dec, tool_num, current_pl);
+        } else {
+            ret = queue_push_l(poses[i], velocity, acc, dec, tool_num, current_pl);
+        }
+
+        if (ret != SUCCESS) {
+            queue_stop();
+            return ret;
+        }
+    }
+    int ret_send = queue_send(wait);
+    if (wait) {
+        Result ret_status = ::queue_motion_set_status(m_fd, false);
+        if (ret_status != SUCCESS) {
+            LOG_ERROR << "[execute_queue] Failed to disable queue motion status, error code: " << result_to_string(ret_status) << LOG_ERROR_END;
+            if (ret_send == SUCCESS) {
+                ret_send = static_cast<int>(ret_status);
+            }
+        }
+    }
+    return ret_send;
 }
 
 // Queue Send Batched
