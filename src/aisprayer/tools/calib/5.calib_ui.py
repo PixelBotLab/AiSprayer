@@ -36,7 +36,7 @@ from PyQt5.QtGui import QImage, QPixmap
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
 sys.path.append(os.path.join(PROJECT_ROOT, "src"))
 
-from aisprayer.core.hardware.robot.inexbot_driver2 import InexbotDriver, RobotPose
+from aisprayer.core.hardware.robot.inexbot_driver import InexbotDriver, RobotPose
 from aisprayer.core.hardware.camera.factory import get_camera
 from aisprayer.utils.config_helper import load_config, get_abs_path
 from aisprayer.utils.hardware_helper import verify_hardware_consistency

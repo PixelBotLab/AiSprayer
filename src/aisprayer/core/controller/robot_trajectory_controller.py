@@ -4,7 +4,7 @@ import logging
 import os
 import numpy as np
 from scipy.spatial.transform import Rotation as R
-from aisprayer.core.hardware.robot.inexbot_driver2 import InexbotDriver, RobotPose
+from aisprayer.core.hardware.robot.inexbot_driver import InexbotDriver, RobotPose
 
 logger = logging.getLogger(__name__)
 

@@ -75,7 +75,7 @@ struct RobotPose {
 };
 class InexbotDriver {
 public:
-    // Constants matching the configuration in inexbot_driver2.py
+    // Constants matching the configuration in inexbot_driver.py
     static constexpr int COORD = 1;       // Cartesian Coordinate System (直角坐标系)
     static constexpr int MODE = 0;        // Running mode (0=Teach mode, 示教模式)
     static constexpr int ANGLE_UNIT = 1;  // Radian mode (弧度制)
