@@ -33,8 +33,11 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QPoint
 from PyQt5.QtGui import QImage, QPixmap
 
 # Setup paths
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
-sys.path.append(os.path.join(PROJECT_ROOT, "src"))
+if getattr(sys, 'frozen', False):
+    PROJECT_ROOT = os.path.dirname(sys.executable)
+else:
+    PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
+    sys.path.append(os.path.join(PROJECT_ROOT, "src"))
 
 from aisprayer.core.hardware.robot.inexbot_driver import InexbotDriver, RobotPose
 from aisprayer.core.hardware.camera.factory import get_camera

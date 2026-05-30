@@ -23,6 +23,10 @@ wheels/
 .venv
 venv/
 ENV/
+build_venv/
+
+# PyInstaller
+*.spec
 
 # 编译器/IDE
 .idea/
