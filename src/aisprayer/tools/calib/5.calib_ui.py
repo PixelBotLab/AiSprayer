@@ -28,7 +28,8 @@ from scipy.spatial.transform import Rotation as R_tool
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QTabWidget, QLabel, QPushButton, 
                              QLineEdit, QFileDialog, QMessageBox, QGroupBox, 
-                             QFormLayout, QDoubleSpinBox, QTextEdit, QGridLayout)
+                             QFormLayout, QDoubleSpinBox, QTextEdit, QGridLayout,
+                             QSizePolicy)
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QPoint
 from PyQt5.QtGui import QImage, QPixmap
 
@@ -126,44 +127,49 @@ class CalibUI(QMainWindow):
 
     def init_capture_calib_tab(self):
         tab = QWidget()
-        main_layout = QHBoxLayout(tab)
+        main_layout = QVBoxLayout(tab)
+
+        # Top area: Video (left) and Controls (right)
+        top_layout = QHBoxLayout()
 
         # Left Column: Camera View
         left_layout = QVBoxLayout()
         self.cap_video = QLabel()
-        self.cap_video.setMinimumSize(640, 480)
+        self.cap_video.setMinimumSize(400, 225)
         self.cap_video.setAlignment(Qt.AlignCenter)
         self.cap_video.setStyleSheet("background-color: #000; border: 2px solid #222;")
         left_layout.addWidget(self.cap_video)
+        
+        top_layout.addLayout(left_layout, 3)
 
-        # Status Line
-        status_layout = QHBoxLayout()
+        # Right Column: Controls Splitter
+        right_layout = QVBoxLayout()
+
+        # 0. Camera Status Group (above Robot Connection)
+        cam_group = QGroupBox("Camera Connection")
+        cam_layout = QHBoxLayout(cam_group)
+        cam_layout.setContentsMargins(5, 5, 5, 5)
         self.lbl_cam_status = QLabel("Camera: Disconnected")
         self.lbl_cam_status.setStyleSheet("font-size: 12px; font-weight: bold; color: #f44336;")
         self.btn_reconnect_cam = QPushButton("Retry Camera")
         self.btn_reconnect_cam.setFixedWidth(100)
         self.btn_reconnect_cam.clicked.connect(self.start_camera)
 
-        status_layout.addWidget(self.lbl_cam_status)
-        status_layout.addWidget(self.btn_reconnect_cam)
-        status_layout.addStretch()
-        
-        left_layout.addLayout(status_layout)
-        main_layout.addLayout(left_layout, 3)
-
-        # Right Column: Controls Splitter
-        right_layout = QVBoxLayout()
+        cam_layout.addWidget(self.btn_reconnect_cam)
+        cam_layout.addWidget(self.lbl_cam_status)
+        cam_layout.addStretch()
+        right_layout.addWidget(cam_group)
 
         # 1. Connection Group
         conn_group = QGroupBox("Robot Connection")
         conn_layout = QHBoxLayout(conn_group)
+        conn_layout.setContentsMargins(5, 5, 5, 5)
         conn_layout.setSpacing(5)
         self.txt_ip = QLineEdit(self.default_ip)
         self.txt_ip.setFixedWidth(90)
         self.txt_port = QLineEdit(self.default_port)
         self.txt_port.setFixedWidth(40)
         self.btn_connect_robot = QPushButton("Connect Robot")
-        #self.btn_connect_robot.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold;")
         self.btn_connect_robot.clicked.connect(self.toggle_robot_connection)
         
         self.lbl_robot_status = QLabel("Robot: Disconnected")
@@ -174,16 +180,17 @@ class CalibUI(QMainWindow):
         conn_layout.addSpacing(8)
         conn_layout.addWidget(QLabel("Port:"))
         conn_layout.addWidget(self.txt_port)
-        conn_layout.addSpacing(30)
+        conn_layout.addSpacing(15)
         conn_layout.addWidget(self.btn_connect_robot)
         conn_layout.addSpacing(10)
         conn_layout.addWidget(self.lbl_robot_status)
         conn_layout.addStretch()
         right_layout.addWidget(conn_group)
 
-        # 2. Capture & Calibration Group
-        cap_group = QGroupBox("Calibration Capture & Process")
+        # 2. Capture & Calibration Group (Directory & Info)
+        cap_group = QGroupBox("Calibration Directory & Info")
         cap_vbox = QVBoxLayout(cap_group)
+        cap_vbox.setContentsMargins(5, 5, 5, 5)
 
         # Select Dir Row
         dir_layout = QHBoxLayout()
@@ -195,48 +202,19 @@ class CalibUI(QMainWindow):
         dir_layout.addWidget(self.lbl_save_dir, 1)
         cap_vbox.addLayout(dir_layout)
 
-        # Control buttons
-        self.lbl_samples_count = QLabel("Samples: 0")
-        self.lbl_samples_count.setStyleSheet("font-weight: bold;")
-        cap_vbox.addWidget(self.lbl_samples_count)
-
-        btn_row = QHBoxLayout()
-        self.btn_capture = QPushButton("Capture")
-        #self.btn_capture.setMinimumHeight(40)
-        #self.btn_capture.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
-        self.btn_capture.clicked.connect(self.capture_sample)
-
-        self.btn_run_calib = QPushButton("Calibrate")
-        #self.btn_run_calib.setMinimumHeight(40)
-        #self.btn_run_calib.setStyleSheet("background-color: #E91E63; color: white; font-weight: bold;")
-        self.btn_run_calib.clicked.connect(self.run_calibration)
-
-        btn_row.addWidget(self.btn_capture)
-        btn_row.addWidget(self.btn_run_calib)
-        cap_vbox.addLayout(btn_row)
-
-        self.txt_calib_log = QTextEdit()
-        self.txt_calib_log.setReadOnly(True)
-        self.txt_calib_log.setLineWrapMode(QTextEdit.NoWrap)
-        # Patch append to prepend datetime and keep horizontal scrollbar at the left
-        _orig_append = self.txt_calib_log.append
-        def log_append(text):
-            _orig_append(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {text}")
-            self.txt_calib_log.horizontalScrollBar().setValue(0)
-        self.txt_calib_log.append = log_append
-        #self.txt_calib_log.setStyleSheet("background-color: #1e1e1e; color: #a9b7c6; font-family: monospace;")
-        cap_vbox.addWidget(self.txt_calib_log)
-
         right_layout.addWidget(cap_group)
 
-        # 3. Jogging Group
-        jog_group = QGroupBox("Robot Jogging (XYZ in mm, ABC in deg)")
-        jog_grid = QGridLayout(jog_group)
+        # 3. Jogging & Actions Group
+        jog_group = QGroupBox("Robot Jogging & Actions")
+        jog_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        jog_layout = QVBoxLayout(jog_group)
+        jog_layout.setContentsMargins(5, 5, 5, 5)
 
+        # Coordinates grid (X, Y, Z, A, B, C)
+        jog_grid = QGridLayout()
         self.jog_inputs = {}
         axes = ['X', 'Y', 'Z', 'A', 'B', 'C']
         
-        # Ranges: XYZ in mm [-2500, 2500], ABC in degrees [-360, 360]
         for idx, axis in enumerate(axes):
             lbl = QLabel(f"{axis}:")
             spin = QDoubleSpinBox()
@@ -254,9 +232,6 @@ class CalibUI(QMainWindow):
 
             btn_minus = QPushButton("-")
             btn_plus = QPushButton("+")
-            
-            #btn_minus.setFixedWidth(40)
-            #btn_plus.setFixedWidth(40)
             
             btn_minus.clicked.connect(lambda checked, a=axis: self.jog_step(a, -1))
             btn_plus.clicked.connect(lambda checked, a=axis: self.jog_step(a, 1))
@@ -279,22 +254,52 @@ class CalibUI(QMainWindow):
         self.spin_step_abc.setRange(0.1, 45.0)
         self.spin_step_abc.setValue(5.0)
         step_layout.addWidget(self.spin_step_abc)
+        
         jog_grid.addLayout(step_layout, 6, 0, 1, 4)
+        jog_layout.addLayout(jog_grid)
+        jog_layout.addStretch()
 
-        # Execute & Read buttons
-        exec_layout = QHBoxLayout()
+        # Row at bottom: The 4 Buttons (Capture, Calibrate, Read Current Pose, Move to Target Pose)
+        buttons_row = QHBoxLayout()
+        
+        self.btn_capture = QPushButton("Capture")
+        self.btn_capture.clicked.connect(self.capture_sample)
+        
+        self.btn_run_calib = QPushButton("Calibrate")
+        self.btn_run_calib.clicked.connect(self.run_calibration)
+        
         self.btn_read_pos = QPushButton("Read Current Pose")
         self.btn_read_pos.clicked.connect(self.read_robot_pose)
+        
         self.btn_move_to_jog = QPushButton("Move to Target Pose")
-        #self.btn_move_to_jog.setStyleSheet("background-color: #FF9800; color: white; font-weight: bold;")
         self.btn_move_to_jog.clicked.connect(self.move_to_jog_pose)
 
-        exec_layout.addWidget(self.btn_read_pos)
-        exec_layout.addWidget(self.btn_move_to_jog)
-        jog_grid.addLayout(exec_layout, 7, 0, 1, 4)
-
+        buttons_row.addWidget(self.btn_move_to_jog)
+        buttons_row.addWidget(self.btn_capture)
+        buttons_row.addWidget(self.btn_run_calib)
+        buttons_row.addWidget(self.btn_read_pos)
+        jog_layout.addLayout(buttons_row)
+        
         right_layout.addWidget(jog_group)
-        main_layout.addLayout(right_layout, 2)
+        
+        top_layout.addLayout(right_layout, 2)
+        
+        # Add top layout to main layout
+        main_layout.addLayout(top_layout, 0)
+
+        # Bottom Area: txt_calib_log (spanning entire width)
+        self.txt_calib_log = QTextEdit()
+        self.txt_calib_log.setReadOnly(True)
+        self.txt_calib_log.setLineWrapMode(QTextEdit.NoWrap)
+        # Patch append to prepend datetime and keep horizontal scrollbar at the left
+        _orig_append = self.txt_calib_log.append
+        def log_append(text):
+            _orig_append(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {text}")
+            self.txt_calib_log.horizontalScrollBar().setValue(0)
+        self.txt_calib_log.append = log_append
+        #self.txt_calib_log.setStyleSheet("background-color: #1e1e1e; color: #a9b7c6; font-family: monospace;")
+        
+        main_layout.addWidget(self.txt_calib_log, 1)
 
         tab.setLayout(main_layout)
         self.tabs.addTab(tab, "Calibrate")
@@ -498,8 +503,6 @@ class CalibUI(QMainWindow):
                 yaml.dump(self.cap_info, f, default_flow_style=False)
             self.txt_calib_log.append(f"Initialized new calibration save info at: {self.yaml_path}")
 
-        self.lbl_samples_count.setText(f"Samples: {len(self.cap_info.get('samples', []))}")
-
     def update_frame(self):
         # Keepalive querying to prevent connection dropouts
         if self.robot_connected and self.robot:
@@ -534,6 +537,14 @@ class CalibUI(QMainWindow):
             ret, corners = cv2.findChessboardCorners(gray, self.pattern_size, None)
             if ret:
                 cv2.drawChessboardCorners(display_frame, self.pattern_size, corners, ret)
+            
+            # Draw samples count overlay on the frame
+            if self.cap_info is not None:
+                count = len(self.cap_info.get('samples', []))
+                text = f"Samples: {count}"
+            else:
+                text = "Samples: -"
+            cv2.putText(display_frame, text, (15, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2, cv2.LINE_AA)
             self.render_image_to_label(display_frame, self.cap_video)
 
         elif active_tab == 1:
@@ -617,7 +628,6 @@ class CalibUI(QMainWindow):
         with open(self.yaml_path, 'w', encoding='utf-8') as f:
             yaml.dump(self.cap_info, f, default_flow_style=False)
 
-        self.lbl_samples_count.setText(f"Samples: {count}")
         self.txt_calib_log.append(f"[OK] Captured Sample {count}: {img_name}")
         self.txt_calib_log.append(f"     Pose: X:{pose.x:.1f} Y:{pose.y:.1f} Z:{pose.z:.1f} A:{pose.a:.4f} B:{pose.b:.4f} C:{pose.c:.4f}")
 
