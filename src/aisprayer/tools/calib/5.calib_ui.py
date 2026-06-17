@@ -139,7 +139,7 @@ class CalibUI(QMainWindow):
         # Status Line
         status_layout = QHBoxLayout()
         self.lbl_cam_status = QLabel("Camera: Disconnected")
-        self.lbl_cam_status.setStyleSheet("font-size: 14px; font-weight: bold; color: #f44336;")
+        self.lbl_cam_status.setStyleSheet("font-size: 12px; font-weight: bold; color: #f44336;")
         self.btn_reconnect_cam = QPushButton("Retry Camera")
         self.btn_reconnect_cam.setFixedWidth(100)
         self.btn_reconnect_cam.clicked.connect(self.start_camera)
@@ -159,24 +159,24 @@ class CalibUI(QMainWindow):
         conn_layout = QHBoxLayout(conn_group)
         conn_layout.setSpacing(5)
         self.txt_ip = QLineEdit(self.default_ip)
-        self.txt_ip.setFixedWidth(110)
+        self.txt_ip.setFixedWidth(90)
         self.txt_port = QLineEdit(self.default_port)
-        self.txt_port.setFixedWidth(50)
+        self.txt_port.setFixedWidth(40)
         self.btn_connect_robot = QPushButton("Connect Robot")
-        self.btn_connect_robot.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold;")
+        #self.btn_connect_robot.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold;")
         self.btn_connect_robot.clicked.connect(self.toggle_robot_connection)
         
         self.lbl_robot_status = QLabel("Robot: Disconnected")
-        self.lbl_robot_status.setStyleSheet("font-size: 14px; font-weight: bold; color: #f44336;")
+        self.lbl_robot_status.setStyleSheet("font-size: 12px; font-weight: bold; color: #f44336;")
 
         conn_layout.addWidget(QLabel("IP:"))
         conn_layout.addWidget(self.txt_ip)
-        conn_layout.addSpacing(10)
+        conn_layout.addSpacing(8)
         conn_layout.addWidget(QLabel("Port:"))
         conn_layout.addWidget(self.txt_port)
-        conn_layout.addSpacing(10)
+        conn_layout.addSpacing(30)
         conn_layout.addWidget(self.btn_connect_robot)
-        conn_layout.addSpacing(15)
+        conn_layout.addSpacing(10)
         conn_layout.addWidget(self.lbl_robot_status)
         conn_layout.addStretch()
         right_layout.addWidget(conn_group)
@@ -187,7 +187,7 @@ class CalibUI(QMainWindow):
 
         # Select Dir Row
         dir_layout = QHBoxLayout()
-        self.btn_sel_dir = QPushButton("Select Save Folder")
+        self.btn_sel_dir = QPushButton("Select Calib Dir")
         self.btn_sel_dir.clicked.connect(self.select_save_dir)
         self.lbl_save_dir = QLabel("Not Selected")
         self.lbl_save_dir.setWordWrap(True)
@@ -201,14 +201,14 @@ class CalibUI(QMainWindow):
         cap_vbox.addWidget(self.lbl_samples_count)
 
         btn_row = QHBoxLayout()
-        self.btn_capture = QPushButton("Capture Sample")
-        self.btn_capture.setMinimumHeight(40)
-        self.btn_capture.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        self.btn_capture = QPushButton("Capture")
+        #self.btn_capture.setMinimumHeight(40)
+        #self.btn_capture.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
         self.btn_capture.clicked.connect(self.capture_sample)
 
-        self.btn_run_calib = QPushButton("Run Calibration")
-        self.btn_run_calib.setMinimumHeight(40)
-        self.btn_run_calib.setStyleSheet("background-color: #E91E63; color: white; font-weight: bold;")
+        self.btn_run_calib = QPushButton("Calibrate")
+        #self.btn_run_calib.setMinimumHeight(40)
+        #self.btn_run_calib.setStyleSheet("background-color: #E91E63; color: white; font-weight: bold;")
         self.btn_run_calib.clicked.connect(self.run_calibration)
 
         btn_row.addWidget(self.btn_capture)
@@ -217,7 +217,14 @@ class CalibUI(QMainWindow):
 
         self.txt_calib_log = QTextEdit()
         self.txt_calib_log.setReadOnly(True)
-        self.txt_calib_log.setStyleSheet("background-color: #1e1e1e; color: #a9b7c6; font-family: monospace;")
+        self.txt_calib_log.setLineWrapMode(QTextEdit.NoWrap)
+        # Patch append to prepend datetime and keep horizontal scrollbar at the left
+        _orig_append = self.txt_calib_log.append
+        def log_append(text):
+            _orig_append(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {text}")
+            self.txt_calib_log.horizontalScrollBar().setValue(0)
+        self.txt_calib_log.append = log_append
+        #self.txt_calib_log.setStyleSheet("background-color: #1e1e1e; color: #a9b7c6; font-family: monospace;")
         cap_vbox.addWidget(self.txt_calib_log)
 
         right_layout.addWidget(cap_group)
@@ -248,8 +255,8 @@ class CalibUI(QMainWindow):
             btn_minus = QPushButton("-")
             btn_plus = QPushButton("+")
             
-            btn_minus.setFixedWidth(40)
-            btn_plus.setFixedWidth(40)
+            #btn_minus.setFixedWidth(40)
+            #btn_plus.setFixedWidth(40)
             
             btn_minus.clicked.connect(lambda checked, a=axis: self.jog_step(a, -1))
             btn_plus.clicked.connect(lambda checked, a=axis: self.jog_step(a, 1))
@@ -279,7 +286,7 @@ class CalibUI(QMainWindow):
         self.btn_read_pos = QPushButton("Read Current Pose")
         self.btn_read_pos.clicked.connect(self.read_robot_pose)
         self.btn_move_to_jog = QPushButton("Move to Target Pose")
-        self.btn_move_to_jog.setStyleSheet("background-color: #FF9800; color: white; font-weight: bold;")
+        #self.btn_move_to_jog.setStyleSheet("background-color: #FF9800; color: white; font-weight: bold;")
         self.btn_move_to_jog.clicked.connect(self.move_to_jog_pose)
 
         exec_layout.addWidget(self.btn_read_pos)
@@ -290,7 +297,7 @@ class CalibUI(QMainWindow):
         main_layout.addLayout(right_layout, 2)
 
         tab.setLayout(main_layout)
-        self.tabs.addTab(tab, "Capture & Calibrate")
+        self.tabs.addTab(tab, "Calibrate")
 
     def init_verify_tab(self):
         tab = QWidget()
@@ -387,7 +394,7 @@ class CalibUI(QMainWindow):
         except Exception as e:
             self.cam_connected = False
             self.lbl_cam_status.setText("Camera: Offline")
-            self.lbl_cam_status.setStyleSheet("font-size: 14px; font-weight: bold; color: #f44336;")
+            self.lbl_cam_status.setStyleSheet("font-size: 12px; font-weight: bold; color: #f44336;")
             print(f"Camera start failed: {e}")
 
     def toggle_robot_connection(self):
@@ -396,16 +403,16 @@ class CalibUI(QMainWindow):
             port = self.txt_port.text().strip()
 
             self.lbl_robot_status.setText("Robot: Connecting...")
-            self.lbl_robot_status.setStyleSheet("font-size: 14px; font-weight: bold; color: #FF9800;")
+            self.lbl_robot_status.setStyleSheet("font-size: 12px; font-weight: bold; color: #FF9800;")
             QApplication.processEvents()
 
             try:
                 self.robot = InexbotDriver(ip=ip, port=port)
-                if not self.robot.startup(timeout=10.0):
+                if not self.robot.startup(timeout=5.0):
                     QMessageBox.critical(self, "Error", "Robot startup failed! Make sure controller IP/Port are correct.")
                     self.robot = None
                     self.lbl_robot_status.setText("Robot: Disconnected")
-                    self.lbl_robot_status.setStyleSheet("font-size: 14px; font-weight: bold; color: #f44336;")
+                    self.lbl_robot_status.setStyleSheet("font-size: 12px; font-weight: bold; color: #f44336;")
                     return
 
                 self.robot_connected = True
@@ -413,7 +420,7 @@ class CalibUI(QMainWindow):
                 self.btn_connect_robot.setStyleSheet("background-color: #f44336; color: white; font-weight: bold;")
                 
                 self.lbl_robot_status.setText("Robot: Connected")
-                self.lbl_robot_status.setStyleSheet("font-size: 14px; font-weight: bold; color: #4CAF50;")
+                self.lbl_robot_status.setStyleSheet("font-size: 12px; font-weight: bold; color: #4CAF50;")
 
                 # Read current pose to populate jogging GUI
                 self.read_robot_pose()
@@ -421,7 +428,7 @@ class CalibUI(QMainWindow):
             except Exception as e:
                 self.robot = None
                 self.lbl_robot_status.setText("Robot: Disconnected")
-                self.lbl_robot_status.setStyleSheet("font-size: 14px; font-weight: bold; color: #f44336;")
+                self.lbl_robot_status.setStyleSheet("font-size: 12px; font-weight: bold; color: #f44336;")
                 QMessageBox.critical(self, "Error", f"Failed to connect to robot: {e}")
         else:
             self.disconnect_robot()
@@ -453,7 +460,7 @@ class CalibUI(QMainWindow):
         self.save_dir = d
         os.makedirs(self.save_dir, exist_ok=True)
         self.yaml_path = os.path.join(self.save_dir, "calibration_info.yaml")
-        self.lbl_save_dir.setText(os.path.basename(self.save_dir))
+        self.lbl_save_dir.setText(self.save_dir)
         
         # Load or initialize yaml configuration
         if os.path.exists(self.yaml_path):
@@ -964,12 +971,22 @@ class CalibUI(QMainWindow):
                 return
 
         # Check accessibility
-        if not self.robot.is_reachable(target_pose, "MOVL"):
-            QMessageBox.warning(self, "Unreachable", "The target jog pose is kinematics-unreachable.")
+        if not self.robot.is_reachable(target_pose, "MOVJ"):
+            QMessageBox.warning(self, "Unreachable", "The target jog pose is kinematics-unreachable (MOVJ).")
             return
 
-        # Send command non-blockingly
-        self.robot.move_l(target_pose, wait=False)
+        # Send command blocking
+        self.txt_calib_log.append(f"[Move] Target: X:{x:.2f} Y:{y:.2f} Z:{z:.2f} A:{self.jog_inputs['A'].value():.2f} B:{self.jog_inputs['B'].value():.2f} C:{self.jog_inputs['C'].value():.2f}")
+        self.robot.move_j(target_pose)
+        self.read_robot_pose()
+
+        actual_pose = self.robot.get_current_pose()
+        if actual_pose is not None:
+            self.txt_calib_log.append(f"[Move] Actual: X:{actual_pose.x:.2f} Y:{actual_pose.y:.2f} Z:{actual_pose.z:.2f} A:{np.degrees(actual_pose.a):.2f} B:{np.degrees(actual_pose.b):.2f} C:{np.degrees(actual_pose.c):.2f}")
+        else:
+            self.txt_calib_log.append("[Move] Failed to query actual reached pose.")
+
+
 
     def jog_step(self, axis, direction):
         if not self.robot_connected or not self.robot:
