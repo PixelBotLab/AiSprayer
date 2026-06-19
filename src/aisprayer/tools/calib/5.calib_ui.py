@@ -331,7 +331,10 @@ class CalibUI(QMainWindow):
 
     def init_verify_tab(self):
         tab = QWidget()
-        main_layout = QHBoxLayout(tab)
+        main_layout = QVBoxLayout(tab)
+
+        # Top area: Video/Left and Config/Right
+        top_layout = QHBoxLayout()
 
         # Left Column: Clickable Video View
         left_layout = QVBoxLayout()
@@ -342,7 +345,7 @@ class CalibUI(QMainWindow):
         self.lbl_ver_tip = QLabel("Instruction: Load a calibration file, click anywhere on the image to compute target pose.")
         self.lbl_ver_tip.setStyleSheet("color: #bbb; italic: true;")
         left_layout.addWidget(self.lbl_ver_tip)
-        main_layout.addLayout(left_layout, 3)
+        top_layout.addLayout(left_layout, 3)
 
         # Right Column: Config & Action
         right_layout = QVBoxLayout()
@@ -383,26 +386,62 @@ class CalibUI(QMainWindow):
         offset_layout.addWidget(self.spin_ver_offset)
         action_vbox.addLayout(offset_layout)
 
-        self.btn_ver_move = QPushButton("Move Robot (Perpendicular to Surface)")
-        self.btn_ver_move.setEnabled(False)
-        self.btn_ver_move.setMinimumHeight(50)
-        self.btn_ver_move.setStyleSheet("background-color: #9C27B0; color: white; font-weight: bold; font-size: 14px;")
+        self.btn_ver_move = QPushButton("Move Robot")
+        self.btn_ver_move.setEnabled(True)
+        #self.btn_ver_move.setMinimumHeight(50)
+        #self.btn_ver_move.setStyleSheet("background-color: #9C27B0; color: white; font-weight: bold; font-size: 14px;")
         self.btn_ver_move.clicked.connect(self.move_to_verification_pose)
         action_vbox.addWidget(self.btn_ver_move)
         action_group.setLayout(action_vbox)
         
         right_layout.addWidget(action_group)
         right_layout.addStretch()
-        main_layout.addLayout(right_layout, 1)
+        top_layout.addLayout(right_layout, 1)
+
+        main_layout.addLayout(top_layout, 0)
+
+        # Bottom Area: txt_verify_log (spanning entire width)
+        self.txt_verify_log = QTextEdit()
+        self.txt_verify_log.setReadOnly(True)
+        self.txt_verify_log.setLineWrapMode(QTextEdit.NoWrap)
+        
+        # Patch append to prepend datetime
+        _orig_append = self.txt_verify_log.append
+        def log_append(text):
+            _orig_append(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {text}")
+            self.txt_verify_log.horizontalScrollBar().setValue(0)
+        self.txt_verify_log.append = log_append
+        
+        main_layout.addWidget(self.txt_verify_log, 1)
 
         tab.setLayout(main_layout)
         self.tabs.addTab(tab, "Verify")
 
-        # Load default result file if exists
-        p_cfg = self.config.get("vision", {}).get("planner", {})
-        default_calib = get_abs_path(p_cfg.get("calib_path", "configs/calib/calibration_result.yaml"), PROJECT_ROOT)
-        if os.path.exists(default_calib):
-            self.load_calib_file(default_calib)
+        # Load default/latest result file if exists
+        latest_calib = None
+        latest_time = 0
+        calib_root = os.path.join(PROJECT_ROOT, "data", "calib")
+        if os.path.exists(calib_root):
+            for root, dirs, files in os.walk(calib_root):
+                for file in files:
+                    if file == "calibration_result.yaml":
+                        full_path = os.path.join(root, file)
+                        try:
+                            mtime = os.path.getmtime(full_path)
+                            if mtime > latest_time:
+                                latest_time = mtime
+                                latest_calib = full_path
+                        except Exception:
+                            pass
+
+        if not latest_calib:
+            p_cfg = self.config.get("vision", {}).get("planner", {})
+            default_calib = get_abs_path(p_cfg.get("calib_path", "configs/calib/calibration_result.yaml"), PROJECT_ROOT)
+            if os.path.exists(default_calib):
+                latest_calib = default_calib
+
+        if latest_calib:
+            self.load_calib_file(latest_calib)
 
     def start_camera(self):
         try:
@@ -1122,13 +1161,17 @@ class CalibUI(QMainWindow):
         try:
             with open(path, 'r', encoding='utf-8') as f:
                 self.calib_data = yaml.safe_load(f)
-            self.lbl_calib_path.setText(os.path.basename(path))
+            self.lbl_calib_path.setText(path)
             self.btn_ver_move.setEnabled(False)
             self.target_uv = None
             self.target_n_cam = None
             self.target_pose_data = None
+            if hasattr(self, 'txt_verify_log'):
+                self.txt_verify_log.append(f"[OK] Loaded calibration file: {path}")
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Could not load calibration file: {e}")
+            if hasattr(self, 'txt_verify_log'):
+                self.txt_verify_log.append(f"[-] Failed to load calibration file: {e}")
 
     def get_robust_depth(self, depth_map, u, v, max_r=5):
         h, w = depth_map.shape
@@ -1183,6 +1226,7 @@ class CalibUI(QMainWindow):
             return
 
         self.target_uv = (u, v)
+        self.txt_verify_log.append(f"[*] Clicked on image at pixel coordinate: U={u}, V={v}")
 
         # Depth value
         z_val = self.get_robust_depth(self.current_depth, u, v)
@@ -1191,6 +1235,7 @@ class CalibUI(QMainWindow):
             self.lbl_coord_base.setText("N/A")
             self.lbl_normal_base.setText("N/A")
             self.btn_ver_move.setEnabled(False)
+            self.txt_verify_log.append(f"  [!] Invalid depth value at pixel coordinate U={u}, V={v}")
             return
 
         K = np.array(self.calib_data["camera_params"]["intrinsic_matrix"])
@@ -1202,6 +1247,7 @@ class CalibUI(QMainWindow):
         y_val = (v - cy) * z_val / fy
         p_cam = np.array([x_val, y_val, z_val])
         self.lbl_coord_cam.setText(f"X:{x_val:.1f} Y:{y_val:.1f} Z:{z_val:.1f}")
+        self.txt_verify_log.append(f"  [+] Camera 3D point: X={x_val:.1f}, Y={y_val:.1f}, Z={z_val:.1f} mm")
 
         # Map to robot Base space
         T_bc = np.array(self.calib_data["T_base_camera"])
@@ -1210,6 +1256,7 @@ class CalibUI(QMainWindow):
 
         p_base = R_bc @ p_cam + t_bc
         self.lbl_coord_base.setText(f"X:{p_base[0]:.1f} Y:{p_base[1]:.1f} Z:{p_base[2]:.1f}")
+        self.txt_verify_log.append(f"  [+] Robot Base point: X={p_base[0]:.1f}, Y={p_base[1]:.1f}, Z={p_base[2]:.1f} mm")
 
         # Compute normal vector using neighborhood depth map
         n_cam = self.compute_local_normal(self.current_depth, u, v, K)
@@ -1217,6 +1264,7 @@ class CalibUI(QMainWindow):
             self.target_n_cam = n_cam
             n_base = R_bc @ n_cam
             self.lbl_normal_base.setText(f"X:{n_base[0]:.2f} Y:{n_base[1]:.2f} Z:{n_base[2]:.2f}")
+            self.txt_verify_log.append(f"  [+] Local normal vector (Base): [{n_base[0]:.2f}, {n_base[1]:.2f}, {n_base[2]:.2f}]")
 
             # Compute tool orientation perpendicular to plane (Z-axis points into surface: Z_tool = -n_base)
             z_tool = -n_base
@@ -1248,11 +1296,12 @@ class CalibUI(QMainWindow):
                 self.btn_ver_move.setEnabled(True)
             except Exception as e:
                 self.btn_ver_move.setEnabled(False)
-                print(f"Euler translation failed: {e}")
+                self.txt_verify_log.append(f"  [!] Euler translation failed: {e}")
         else:
             self.target_n_cam = None
             self.lbl_normal_base.setText("Normal estimation failed")
             self.btn_ver_move.setEnabled(False)
+            self.txt_verify_log.append(f"  [!] Failed to estimate surface normal vector")
 
     def compute_local_normal(self, depth_map, u, v, K):
         fx, fy = K[0, 0], K[1, 1]
@@ -1297,27 +1346,37 @@ class CalibUI(QMainWindow):
 
         target_pose = RobotPose(p_dest[0], p_dest[1], p_dest[2], a, b, c)
 
+        self.txt_verify_log.append(f"[*] Command robot to move to destination: X={p_dest[0]:.1f}, Y={p_dest[1]:.1f}, Z={p_dest[2]:.1f}, A={a:.3f}, B={b:.3f}, C={c:.3f} mm/deg with offset {offset}mm")
+
         # Check safety limits
         planner_cfg = self.config.get("vision", {}).get("planner", {})
         lim = planner_cfg.get("workspace_limits", {})
         if lim:
             if not (lim.get("x", [-9999, 9999])[0] <= p_dest[0] <= lim.get("x", [-9999, 9999])[1]):
-                QMessageBox.warning(self, "Safety Limit", f"Target destination X ({p_dest[0]:.1f}) is out of workspace limits.")
+                msg = f"Target destination X ({p_dest[0]:.1f}) is out of workspace limits."
+                QMessageBox.warning(self, "Safety Limit", msg)
+                self.txt_verify_log.append(f"  [!] Safety Limit: {msg}")
                 return
             if not (lim.get("y", [-9999, 9999])[0] <= p_dest[1] <= lim.get("y", [-9999, 9999])[1]):
-                QMessageBox.warning(self, "Safety Limit", f"Target destination Y ({p_dest[1]:.1f}) is out of workspace limits.")
+                msg = f"Target destination Y ({p_dest[1]:.1f}) is out of workspace limits."
+                QMessageBox.warning(self, "Safety Limit", msg)
+                self.txt_verify_log.append(f"  [!] Safety Limit: {msg}")
                 return
             if not (lim.get("z", [-9999, 9999])[0] <= p_dest[2] <= lim.get("z", [-9999, 9999])[1]):
-                QMessageBox.warning(self, "Safety Limit", f"Target destination Z ({p_dest[2]:.1f}) is out of workspace limits.")
+                msg = f"Target destination Z ({p_dest[2]:.1f}) is out of workspace limits."
+                QMessageBox.warning(self, "Safety Limit", msg)
+                self.txt_verify_log.append(f"  [!] Safety Limit: {msg}")
                 return
 
         # Check accessibility
         if not self.robot.is_reachable(target_pose, "MOVL"):
             QMessageBox.warning(self, "Unreachable", "The target safety position is out of the robot's physical reach.")
+            self.txt_verify_log.append(f"  [!] Unreachable: The target safety position is out of the robot's physical reach.")
             return
 
         # Execute non-blockingly
         self.robot.move_l(target_pose, wait=False)
+        self.txt_verify_log.append(f"  [OK] Sent MOVL command non-blockingly.")
 
     def refresh_samples_list(self):
         # Clear existing layout items
