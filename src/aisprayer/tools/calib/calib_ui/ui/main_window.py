@@ -461,7 +461,7 @@ class CalibMainWindow(QMainWindow):
                 
                 if len(points) > 1:
                     for i in range(len(points) - 1):
-                        cv2.arrowedLine(display_frame, points[i], points[i+1], (0, 0, 0), 2, tipLength=0.15)
+                        cv2.arrowedLine(display_frame, points[i], points[i+1], item_color, 2, tipLength=0.15)
                 
                 if points:
                     first_pt = points[0]
@@ -480,12 +480,12 @@ class CalibMainWindow(QMainWindow):
                 
                 if len(self.current_draw_points) > 1:
                     for i in range(len(self.current_draw_points) - 1):
-                        cv2.arrowedLine(display_frame, self.current_draw_points[i], self.current_draw_points[i+1], (0, 0, 0), 2, tipLength=0.15)
+                        cv2.arrowedLine(display_frame, self.current_draw_points[i], self.current_draw_points[i+1], temp_color, 2, tipLength=0.15)
 
                 # 鼠标移动时绘制到当前悬停点的虚拟线段及虚拟法向量箭头
                 if self.hover_pos is not None:
                     last_pt = self.current_draw_points[-1]
-                    virtual_color = (255, 255, 0) # 虚拟引导元素采用青色以示区分
+                    virtual_color = (0, 0, 255) # 虚拟引导元素采用红色
                     # 细线宽、虚线段表示
                     draw_dashed_line(display_frame, last_pt, self.hover_pos, virtual_color, thickness=1, gap=6)
                     
@@ -494,7 +494,7 @@ class CalibMainWindow(QMainWindow):
                         K = np.array(self.calib_data["camera_params"]["intrinsic_matrix"])
                         n_cam_h = compute_local_normal(self.current_depth, uh, vh, K)
                         if n_cam_h is not None:
-                            # 虚拟箭头采用较细的粗细度 1
+                            # 虚拟法线箭头也为红色，采用较细的粗细度 1
                             draw_point_normal(display_frame, uh, vh, n_cam_h, virtual_color, thickness=1)
                 
                 first_pt = self.current_draw_points[0]
