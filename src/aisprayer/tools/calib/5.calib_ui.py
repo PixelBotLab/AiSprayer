@@ -29,7 +29,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QTabWidget, QLabel, QPushButton, 
                              QLineEdit, QFileDialog, QMessageBox, QGroupBox, 
                              QFormLayout, QDoubleSpinBox, QTextEdit, QGridLayout,
-                             QSizePolicy, QScrollArea, QFrame, QProgressDialog)
+                             QSizePolicy, QScrollArea, QFrame, QProgressDialog, QProgressBar)
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QPoint
 from PyQt5.QtGui import QImage, QPixmap
 
@@ -114,6 +114,14 @@ class CalibUI(QMainWindow):
         self.target_uv = None
         self.target_n_cam = None
         self.target_pose_data = None
+
+        # Verify drawing & sequence execution state
+        self.verify_items = []
+        self.current_draw_points = []
+        self.current_draw_poses = []
+        self.exec_state = "idle"
+        self.exec_item_index = 0
+        self.exec_waypoint_index = 0
 
         # Initialize user interface
         self.init_ui()
@@ -342,9 +350,9 @@ class CalibUI(QMainWindow):
         self.ver_video.clicked_pos.connect(self.handle_verify_click)
         left_layout.addWidget(self.ver_video)
         
-        self.lbl_ver_tip = QLabel("Instruction: Load a calibration file, click anywhere on the image to compute target pose.")
-        self.lbl_ver_tip.setStyleSheet("color: #bbb; italic: true;")
-        left_layout.addWidget(self.lbl_ver_tip)
+       # self.lbl_ver_tip = QLabel("Instruction: Click image to draw points/polylines. Press 'Finish Current Segment' to finalize.")
+       # self.lbl_ver_tip.setStyleSheet("color: #bbb; italic: true;")
+       # left_layout.addWidget(self.lbl_ver_tip)
         top_layout.addLayout(left_layout, 3)
 
         # Right Column: Config & Action
@@ -374,6 +382,29 @@ class CalibUI(QMainWindow):
         coord_group.setLayout(coord_form)
         right_layout.addWidget(coord_group)
 
+        # Real-time Robot Pose Group
+        pose_group = QGroupBox("Real-time Robot Pose")
+        pose_grid = QGridLayout(pose_group)
+        self.lbl_real_x = QLabel("X: N/A")
+        self.lbl_real_y = QLabel("Y: N/A")
+        self.lbl_real_z = QLabel("Z: N/A")
+        self.lbl_real_a = QLabel("A: N/A")
+        self.lbl_real_b = QLabel("B: N/A")
+        self.lbl_real_c = QLabel("C: N/A")
+        
+        # Style them to look professional and clear
+        for lbl in [self.lbl_real_x, self.lbl_real_y, self.lbl_real_z, 
+                    self.lbl_real_a, self.lbl_real_b, self.lbl_real_c]:
+            lbl.setStyleSheet("font-family: monospace; font-size: 11px; font-weight: bold;")
+            
+        pose_grid.addWidget(self.lbl_real_x, 0, 0)
+        pose_grid.addWidget(self.lbl_real_y, 0, 1)
+        pose_grid.addWidget(self.lbl_real_z, 0, 2)
+        pose_grid.addWidget(self.lbl_real_a, 1, 0)
+        pose_grid.addWidget(self.lbl_real_b, 1, 1)
+        pose_grid.addWidget(self.lbl_real_c, 1, 2)
+        right_layout.addWidget(pose_group)
+
         # Action panel
         action_group = QGroupBox("Verification Movement")
         action_vbox = QVBoxLayout(action_group)
@@ -386,12 +417,33 @@ class CalibUI(QMainWindow):
         offset_layout.addWidget(self.spin_ver_offset)
         action_vbox.addLayout(offset_layout)
 
-        self.btn_ver_move = QPushButton("Move Robot")
-        self.btn_ver_move.setEnabled(True)
-        #self.btn_ver_move.setMinimumHeight(50)
-        #self.btn_ver_move.setStyleSheet("background-color: #9C27B0; color: white; font-weight: bold; font-size: 14px;")
+        # Draw segment/point controls
+        self.btn_finish_line = QPushButton("Finish Current Segment / Point")
+        #self.btn_finish_line.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        self.btn_finish_line.clicked.connect(self.finish_current_draw_item)
+        action_vbox.addWidget(self.btn_finish_line)
+
+        self.btn_clear_last = QPushButton("Clear Last Point")
+        self.btn_clear_last.clicked.connect(self.clear_last_point)
+        action_vbox.addWidget(self.btn_clear_last)
+
+        self.btn_clear_items = QPushButton("Clear All Draw Items")
+        #self.btn_clear_items.setStyleSheet("background-color: #f44336; color: white; font-weight: bold;")
+        self.btn_clear_items.clicked.connect(self.clear_draw_items)
+        action_vbox.addWidget(self.btn_clear_items)
+
+        self.btn_ver_move = QPushButton("Move Robot (Execute Route)")
+        self.btn_ver_move.setEnabled(False)
+        #self.btn_ver_move.setMinimumHeight(40)
+        #self.btn_ver_move.setStyleSheet("background-color: #9C27B0; color: white; font-weight: bold; font-size: 13px;")
         self.btn_ver_move.clicked.connect(self.move_to_verification_pose)
         action_vbox.addWidget(self.btn_ver_move)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setVisible(False)
+        action_vbox.addWidget(self.progress_bar)
         action_group.setLayout(action_vbox)
         
         right_layout.addWidget(action_group)
@@ -579,6 +631,32 @@ class CalibUI(QMainWindow):
                     pass
                 self.last_heartbeat_time = time.time()
 
+        # Route execution monitoring
+        if hasattr(self, 'exec_state') and self.exec_state == "moving":
+            if self.robot_connected and self.robot:
+                now = time.time()
+                if now - self.last_move_cmd_time > 0.8:
+                    if self.robot.is_robot_idle():
+                        if hasattr(self, 'completed_waypoints'):
+                            self.completed_waypoints += 1
+                        self.execute_next_verify_step()
+
+        # Query/Update real-time robot pose and progress (throttled to 150ms)
+        if self.robot_connected and self.robot:
+            now = time.time()
+            if not hasattr(self, 'last_pose_query_time') or now - self.last_pose_query_time > 0.15:
+                self.last_pose_query_time = now
+                self.update_realtime_pose_and_progress()
+        else:
+            # If disconnected, clear the coordinate panel to "N/A"
+            if hasattr(self, 'lbl_real_x') and self.lbl_real_x.text() != "X: N/A":
+                self.lbl_real_x.setText("X: N/A")
+                self.lbl_real_y.setText("Y: N/A")
+                self.lbl_real_z.setText("Z: N/A")
+                self.lbl_real_a.setText("A: N/A")
+                self.lbl_real_b.setText("B: N/A")
+                self.lbl_real_c.setText("C: N/A")
+
         # If a sample is selected and we are on the Calibrate tab, show its preview image
         active_tab = self.tabs.currentIndex()
         if active_tab == 0 and self.selected_sample_id is not None and self.preview_image is not None:
@@ -632,29 +710,69 @@ class CalibUI(QMainWindow):
         elif active_tab == 1:
             # Display verification screen
             display_frame = color.copy()
-            if self.target_uv and self.calib_data:
-                u, v = self.target_uv
-                cv2.drawMarker(display_frame, (u, v), (0, 255, 0), cv2.MARKER_CROSS, 20, 2)
 
-                # Draw projected 3D normal vector
-                if self.target_n_cam is not None:
+            def draw_point_normal(img, u, v, n_cam, color_norm):
+                if n_cam is not None and self.calib_data:
                     K = np.array(self.calib_data["camera_params"]["intrinsic_matrix"])
                     fx, fy = K[0, 0], K[1, 1]
                     cx, cy = K[0, 2], K[1, 2]
-
                     z_val = float(self.current_depth[v, u]) if self.current_depth is not None else 0.0
                     if z_val > 0:
                         x_val = (u - cx) * z_val / fx
                         y_val = (v - cy) * z_val / fy
-                        
                         p_cam_origin = np.array([x_val, y_val, z_val])
-                        p_cam_normal_tip = p_cam_origin + self.target_n_cam * 50.0  # 50 mm normal arrow
-                        
-                        # Project normal tip back to screen
+                        p_cam_normal_tip = p_cam_origin + n_cam * 50.0  # 50 mm normal arrow
                         if p_cam_normal_tip[2] > 0:
                             u_tip = int(fx * p_cam_normal_tip[0] / p_cam_normal_tip[2] + cx)
                             v_tip = int(fy * p_cam_normal_tip[1] / p_cam_normal_tip[2] + cy)
-                            cv2.arrowedLine(display_frame, (u, v), (u_tip, v_tip), (0, 0, 255), 3, tipLength=0.3)
+                            cv2.arrowedLine(img, (u, v), (u_tip, v_tip), color_norm, 2, tipLength=0.2)
+
+            # Draw all committed items (polylines/points)
+            for item in self.verify_items:
+                is_visited = (item.get("status") == "visited")
+                # Visited -> Blue (255, 0, 0), Pending -> Green (0, 255, 0)
+                item_color = (255, 0, 0) if is_visited else (0, 255, 0)
+                norm_color = (180, 50, 50) if is_visited else (0, 0, 255)
+                
+                points = item["points"]
+                poses = item["pose_data"]
+                
+                # Draw markers
+                for idx, pt in enumerate(points):
+                    cv2.circle(display_frame, pt, 5, item_color, -1)
+                    if idx < len(poses):
+                        draw_point_normal(display_frame, pt[0], pt[1], poses[idx]["n_cam"], norm_color)
+                
+                # Draw direction lines if it's a polyline
+                if len(points) > 1:
+                    for i in range(len(points) - 1):
+                        cv2.arrowedLine(display_frame, points[i], points[i+1], item_color, 2, tipLength=0.15)
+                
+                # Draw Item ID label next to the first point
+                if points:
+                    first_pt = points[0]
+                    cv2.putText(display_frame, f"#{item['id']}", (first_pt[0] + 8, first_pt[1] - 8),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+                    cv2.putText(display_frame, f"#{item['id']}", (first_pt[0] + 8, first_pt[1] - 8),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, item_color, 1, cv2.LINE_AA)
+
+            # Draw the active/temporary item currently being drawn
+            if self.current_draw_points:
+                temp_color = (0, 165, 255)  # Orange
+                temp_norm_color = (0, 0, 255)
+                for idx, pt in enumerate(self.current_draw_points):
+                    cv2.circle(display_frame, pt, 5, temp_color, -1)
+                    if idx < len(self.current_draw_poses):
+                        draw_point_normal(display_frame, pt[0], pt[1], self.current_draw_poses[idx]["n_cam"], temp_norm_color)
+                
+                if len(self.current_draw_points) > 1:
+                    for i in range(len(self.current_draw_points) - 1):
+                        cv2.arrowedLine(display_frame, self.current_draw_points[i], self.current_draw_points[i+1], temp_color, 2, tipLength=0.15)
+                
+                # Draw temporary label "Drawing..." next to first point
+                first_pt = self.current_draw_points[0]
+                cv2.putText(display_frame, "Drawing...", (first_pt[0] + 8, first_pt[1] - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, temp_color, 1, cv2.LINE_AA)
 
             self.render_image_to_label(display_frame, self.ver_video)
 
@@ -1192,6 +1310,214 @@ class CalibUI(QMainWindow):
                 return float(np.median(valid))
         return 0.0
 
+    def clear_last_point(self):
+        if self.current_draw_points:
+            # Pop from active drawing segment
+            pt = self.current_draw_points.pop()
+            self.current_draw_poses.pop()
+            self.txt_verify_log.append(f"[*] Cleared last point in current segment: U={pt[0]}, V={pt[1]}")
+            # Reset coordinate displays if segment becomes empty
+            if not self.current_draw_points:
+                self.lbl_coord_cam.setText("N/A")
+                self.lbl_coord_base.setText("N/A")
+                self.lbl_normal_base.setText("N/A")
+        elif self.verify_items:
+            # Pop from last committed item
+            last_item = self.verify_items[-1]
+            if last_item["points"]:
+                pt = last_item["points"].pop()
+                last_item["pose_data"].pop()
+                self.txt_verify_log.append(f"[*] Cleared last point from Item #{last_item['id']}: U={pt[0]}, V={pt[1]}")
+                # If item is empty, delete item entirely
+                if not last_item["points"]:
+                    self.verify_items.pop()
+                    self.txt_verify_log.append(f"[*] Item #{last_item['id']} has no points remaining, removed.")
+            else:
+                self.verify_items.pop()
+                self.txt_verify_log.append(f"[*] Removed empty Item #{last_item['id']}.")
+
+            # Update movement button state if no items left
+            if not self.verify_items:
+                self.btn_ver_move.setEnabled(False)
+                self.lbl_coord_cam.setText("N/A")
+                self.lbl_coord_base.setText("N/A")
+                self.lbl_normal_base.setText("N/A")
+        else:
+            self.txt_verify_log.append("[!] No points to clear.")
+
+    def finish_current_draw_item(self):
+        if not self.current_draw_points:
+            QMessageBox.warning(self, "Warning", "No points drawn in current segment yet.")
+            return
+
+        item_id = len(self.verify_items) + 1
+        item = {
+            "id": item_id,
+            "points": list(self.current_draw_points),
+            "pose_data": list(self.current_draw_poses),
+            "status": "pending"
+        }
+        self.verify_items.append(item)
+        
+        self.txt_verify_log.append(f"[OK] Finished Item #{item_id} (contains {len(self.current_draw_points)} points).")
+        
+        # Reset current drawing state
+        self.current_draw_points.clear()
+        self.current_draw_poses.clear()
+        
+        # Enable the execute route button since we have items
+        self.btn_ver_move.setEnabled(True)
+
+    def clear_draw_items(self):
+        self.verify_items.clear()
+        self.current_draw_points.clear()
+        self.current_draw_poses.clear()
+        self.lbl_coord_cam.setText("N/A")
+        self.lbl_coord_base.setText("N/A")
+        self.lbl_normal_base.setText("N/A")
+        self.exec_state = "idle"
+        self.btn_ver_move.setText("Move Robot (Execute Route)")
+        self.btn_ver_move.setEnabled(False)
+        self.txt_verify_log.append("[*] Cleared all drawn points and lines.")
+
+    def stop_verify_execution(self):
+        self.exec_state = "idle"
+        self.btn_ver_move.setText("Move Robot (Execute Route)")
+        self.btn_ver_move.setEnabled(True)
+        self.progress_bar.setVisible(False)
+        self.txt_verify_log.append("[!] Robot route execution stopped.")
+
+    def update_realtime_pose_and_progress(self):
+        if not self.robot_connected or not self.robot:
+            self.lbl_real_x.setText("X: N/A")
+            self.lbl_real_y.setText("Y: N/A")
+            self.lbl_real_z.setText("Z: N/A")
+            self.lbl_real_a.setText("A: N/A")
+            self.lbl_real_b.setText("B: N/A")
+            self.lbl_real_c.setText("C: N/A")
+            return
+            
+        try:
+            curr_pose = self.robot.get_current_pose()
+            if not curr_pose:
+                return
+            
+            # Check for invalid values from SDK
+            pose_list = curr_pose.to_list()
+            if any(v < -2500.0 for v in pose_list[:3]):
+                return
+                
+            # Update display labels
+            self.lbl_real_x.setText(f"X: {curr_pose.x:.2f}")
+            self.lbl_real_y.setText(f"Y: {curr_pose.y:.2f}")
+            self.lbl_real_z.setText(f"Z: {curr_pose.z:.2f}")
+            self.lbl_real_a.setText(f"A: {curr_pose.a:.4f}")
+            self.lbl_real_b.setText(f"B: {curr_pose.b:.4f}")
+            self.lbl_real_c.setText(f"C: {curr_pose.c:.4f}")
+            
+            # Update progress bar if moving
+            if hasattr(self, 'exec_state') and self.exec_state == "moving":
+                if hasattr(self, 'total_path_distance') and self.total_path_distance > 0:
+                    p_curr = np.array([curr_pose.x, curr_pose.y, curr_pose.z])
+                    # Retrieve flat index of current target waypoint
+                    flat_idx = self.waypoint_flat_map.get((self.exec_item_index, self.exec_waypoint_index - 1))
+                    if flat_idx is not None and flat_idx < len(self.flat_path_points):
+                        p_target = self.flat_path_points[flat_idx]
+                        s_len = self.segment_lengths[flat_idx - 1]
+                        d_completed_prior = self.cumulative_distances[flat_idx - 1]
+                        
+                        d_to_target = np.linalg.norm(p_target - p_curr)
+                        if s_len > 0:
+                            d_seg_progress = max(0.0, min(s_len, s_len - d_to_target))
+                        else:
+                            d_seg_progress = 0.0
+                            
+                        d_completed = d_completed_prior + d_seg_progress
+                        progress_percent = int((d_completed / self.total_path_distance) * 100)
+                        progress_percent = max(0, min(100, progress_percent))
+                        
+                        self.progress_bar.setValue(progress_percent)
+                        self.progress_bar.setFormat(f"Progress: %p% ({int(d_completed)}/{int(self.total_path_distance)} mm)")
+        except Exception:
+            pass
+
+    def execute_next_verify_step(self):
+        # Cooldown check
+        if hasattr(self, 'last_move_cmd_time') and time.time() - self.last_move_cmd_time < 0.8:
+            return
+
+        if self.exec_item_index >= len(self.verify_items):
+            # All items finished!
+            self.exec_state = "idle"
+            self.btn_ver_move.setText("Move Robot (Execute Route)")
+            self.btn_ver_move.setEnabled(True)
+            self.progress_bar.setValue(100)
+            self.progress_bar.setVisible(False)
+            self.txt_verify_log.append("[OK] All verify items executed successfully!")
+            return
+
+        current_item = self.verify_items[self.exec_item_index]
+        poses = current_item["pose_data"]
+
+        if self.exec_waypoint_index >= len(poses):
+            # Current item finished! Mark it as visited (for coloring)
+            current_item["status"] = "visited"
+            self.txt_verify_log.append(f"[OK] Item #{current_item['id']} finished.")
+            # Move to next item
+            self.exec_item_index += 1
+            self.exec_waypoint_index = 0
+            self.execute_next_verify_step()
+            return
+
+        # Move to the current waypoint of the current item
+        pose_info = poses[self.exec_waypoint_index]
+        offset = self.spin_ver_offset.value()
+        p_dest = pose_info["p_base"] + pose_info["n_base"] * offset
+        a = pose_info["a"]
+        b = pose_info["b"]
+        c = pose_info["c"]
+
+        target_pose = RobotPose(p_dest[0], p_dest[1], p_dest[2], a, b, c)
+
+        # Check safety limits
+        planner_cfg = self.config.get("vision", {}).get("planner", {})
+        lim = planner_cfg.get("workspace_limits", {})
+        if lim:
+            for axis, idx in [("x", 0), ("y", 1), ("z", 2)]:
+                val = p_dest[idx]
+                limits = lim.get(axis, [-9999, 9999])
+                if not (limits[0] <= val <= limits[1]):
+                    msg = f"Item #{current_item['id']} Pt #{self.exec_waypoint_index + 1} target destination {axis.upper()} ({val:.1f}) out of workspace limits."
+                    QMessageBox.warning(self, "Safety Limit", msg)
+                    self.txt_verify_log.append(f"  [!] Safety Limit: {msg}")
+                    self.stop_verify_execution()
+                    return
+
+        # Determine motion type (move_j for first waypoint of any item, move_l for others)
+        if self.exec_waypoint_index == 0:
+            move_mode = "MOVJ"
+        else:
+            move_mode = "MOVL"
+
+        # Check accessibility
+        if not self.robot.is_reachable(target_pose, move_mode):
+            msg = f"Item #{current_item['id']} Pt #{self.exec_waypoint_index + 1} target pose is kinematics-unreachable ({move_mode})."
+            QMessageBox.warning(self, "Unreachable", msg)
+            self.txt_verify_log.append(f"  [!] Unreachable: {msg}")
+            self.stop_verify_execution()
+            return
+
+        # Execute motion non-blockingly
+        self.txt_verify_log.append(f"[*] Moving ({move_mode}) to Item #{current_item['id']} Pt #{self.exec_waypoint_index + 1}: X={p_dest[0]:.1f}, Y={p_dest[1]:.1f}, Z={p_dest[2]:.1f}, A={a:.4f}, B={b:.4f}, C={c:.4f}")
+        if move_mode == "MOVJ":
+            self.robot.move_j(target_pose, wait=False)
+        else:
+            self.robot.move_l(target_pose, wait=False)
+        self.last_move_cmd_time = time.time()
+
+        # Advance waypoint index for next check
+        self.exec_waypoint_index += 1
+
     def handle_verify_click(self, pos):
         if not self.calib_data:
             QMessageBox.warning(self, "Warning", "Please load a calibration result file first.")
@@ -1225,16 +1551,12 @@ class CalibUI(QMainWindow):
         if not (0 <= u < W_native and 0 <= v < H_native):
             return
 
-        self.target_uv = (u, v)
-        self.txt_verify_log.append(f"[*] Clicked on image at pixel coordinate: U={u}, V={v}")
-
         # Depth value
         z_val = self.get_robust_depth(self.current_depth, u, v)
         if z_val <= 0:
             self.lbl_coord_cam.setText("Invalid Depth (0)")
             self.lbl_coord_base.setText("N/A")
             self.lbl_normal_base.setText("N/A")
-            self.btn_ver_move.setEnabled(False)
             self.txt_verify_log.append(f"  [!] Invalid depth value at pixel coordinate U={u}, V={v}")
             return
 
@@ -1246,8 +1568,6 @@ class CalibUI(QMainWindow):
         x_val = (u - cx) * z_val / fx
         y_val = (v - cy) * z_val / fy
         p_cam = np.array([x_val, y_val, z_val])
-        self.lbl_coord_cam.setText(f"X:{x_val:.1f} Y:{y_val:.1f} Z:{z_val:.1f}")
-        self.txt_verify_log.append(f"  [+] Camera 3D point: X={x_val:.1f}, Y={y_val:.1f}, Z={z_val:.1f} mm")
 
         # Map to robot Base space
         T_bc = np.array(self.calib_data["T_base_camera"])
@@ -1255,16 +1575,11 @@ class CalibUI(QMainWindow):
         t_bc = T_bc[:3, 3]
 
         p_base = R_bc @ p_cam + t_bc
-        self.lbl_coord_base.setText(f"X:{p_base[0]:.1f} Y:{p_base[1]:.1f} Z:{p_base[2]:.1f}")
-        self.txt_verify_log.append(f"  [+] Robot Base point: X={p_base[0]:.1f}, Y={p_base[1]:.1f}, Z={p_base[2]:.1f} mm")
 
         # Compute normal vector using neighborhood depth map
         n_cam = self.compute_local_normal(self.current_depth, u, v, K)
         if n_cam is not None:
-            self.target_n_cam = n_cam
             n_base = R_bc @ n_cam
-            self.lbl_normal_base.setText(f"X:{n_base[0]:.2f} Y:{n_base[1]:.2f} Z:{n_base[2]:.2f}")
-            self.txt_verify_log.append(f"  [+] Local normal vector (Base): [{n_base[0]:.2f}, {n_base[1]:.2f}, {n_base[2]:.2f}]")
 
             # Compute tool orientation perpendicular to plane (Z-axis points into surface: Z_tool = -n_base)
             z_tool = -n_base
@@ -1288,19 +1603,27 @@ class CalibUI(QMainWindow):
                 b = euler[1] / s_vec[1]
                 c = euler[2] / s_vec[2]
 
-                self.target_pose_data = {
+                pose_data = {
                     "p_base": p_base,
                     "n_base": n_base,
+                    "n_cam": n_cam,
                     "a": a, "b": b, "c": c
                 }
-                self.btn_ver_move.setEnabled(True)
+                
+                self.current_draw_points.append((u, v))
+                self.current_draw_poses.append(pose_data)
+                
+                # Show active point coordinates in labels
+                self.lbl_coord_cam.setText(f"X:{x_val:.1f} Y:{y_val:.1f} Z:{z_val:.1f}")
+                self.lbl_coord_base.setText(f"X:{p_base[0]:.1f} Y:{p_base[1]:.1f} Z:{p_base[2]:.1f}")
+                self.lbl_normal_base.setText(f"X:{n_base[0]:.2f} Y:{n_base[1]:.2f} Z:{n_base[2]:.2f}")
+                
+                self.txt_verify_log.append(f"[*] Added point to current segment: U={u}, V={v}. Base: X={p_base[0]:.1f}, Y={p_base[1]:.1f}, Z={p_base[2]:.1f}, A={a:.4f}, B={b:.4f}, C={c:.4f}")
+                
             except Exception as e:
-                self.btn_ver_move.setEnabled(False)
                 self.txt_verify_log.append(f"  [!] Euler translation failed: {e}")
         else:
-            self.target_n_cam = None
             self.lbl_normal_base.setText("Normal estimation failed")
-            self.btn_ver_move.setEnabled(False)
             self.txt_verify_log.append(f"  [!] Failed to estimate surface normal vector")
 
     def compute_local_normal(self, depth_map, u, v, K):
@@ -1335,48 +1658,70 @@ class CalibUI(QMainWindow):
         if not self.robot_connected or not self.robot:
             QMessageBox.warning(self, "Warning", "Robot is not connected. Connect the robot first.")
             return
-        if not self.target_pose_data:
+
+        # First, finish current drawing if there's any active segment
+        if self.current_draw_points:
+            self.finish_current_draw_item()
+
+        if not self.verify_items:
+            QMessageBox.warning(self, "Warning", "No routes or points defined to move.")
             return
 
+        # Start execution
+        self.exec_state = "moving"
+        self.exec_item_index = 0
+        self.exec_waypoint_index = 0
+        self.last_move_cmd_time = 0
+        self.total_waypoints = sum(len(item["pose_data"]) for item in self.verify_items)
+        self.completed_waypoints = 0
+        self.last_progress_query_time = 0
+
+        # Build flat path list for Cartesian distance progress tracking
+        self.flat_path_points = []
+        self.waypoint_flat_map = {}
+        
+        curr_pose = self.robot.get_current_pose()
+        if curr_pose:
+            p0 = np.array([curr_pose.x, curr_pose.y, curr_pose.z])
+        else:
+            p0 = np.array([0.0, 0.0, 0.0])
+            
+        self.flat_path_points.append(p0)
+        
         offset = self.spin_ver_offset.value()
-        p_dest = self.target_pose_data["p_base"] + self.target_pose_data["n_base"] * offset
-        a = self.target_pose_data["a"]
-        b = self.target_pose_data["b"]
-        c = self.target_pose_data["c"]
+        flat_idx = 1
+        for i_idx, item in enumerate(self.verify_items):
+            for w_idx, pose_info in enumerate(item["pose_data"]):
+                p_dest = pose_info["p_base"] + pose_info["n_base"] * offset
+                self.flat_path_points.append(p_dest)
+                self.waypoint_flat_map[(i_idx, w_idx)] = flat_idx
+                flat_idx += 1
+                
+        # Calculate lengths
+        self.segment_lengths = []
+        self.cumulative_distances = [0.0]
+        for i in range(1, len(self.flat_path_points)):
+            dist = np.linalg.norm(self.flat_path_points[i] - self.flat_path_points[i-1])
+            self.segment_lengths.append(dist)
+            self.cumulative_distances.append(self.cumulative_distances[-1] + dist)
+            
+        self.total_path_distance = self.cumulative_distances[-1]
 
-        target_pose = RobotPose(p_dest[0], p_dest[1], p_dest[2], a, b, c)
+        self.btn_ver_move.setEnabled(False)
+        self.btn_ver_move.setText("Moving...")
+        self.progress_bar.setValue(0)
+        if self.total_path_distance > 0:
+            self.progress_bar.setFormat(f"Progress: 0% (0/{int(self.total_path_distance)} mm)")
+        else:
+            self.progress_bar.setFormat("Progress: 100%")
+        self.progress_bar.setVisible(True)
+        self.txt_verify_log.append(f"[*] Starting robot route execution (Total Distance: {self.total_path_distance:.1f} mm)...")
+        
+        # Reset all items status to pending so we can visualize them changing color as we execute
+        for item in self.verify_items:
+            item["status"] = "pending"
 
-        self.txt_verify_log.append(f"[*] Command robot to move to destination: X={p_dest[0]:.1f}, Y={p_dest[1]:.1f}, Z={p_dest[2]:.1f}, A={a:.3f}, B={b:.3f}, C={c:.3f} mm/deg with offset {offset}mm")
-
-        # Check safety limits
-        planner_cfg = self.config.get("vision", {}).get("planner", {})
-        lim = planner_cfg.get("workspace_limits", {})
-        if lim:
-            if not (lim.get("x", [-9999, 9999])[0] <= p_dest[0] <= lim.get("x", [-9999, 9999])[1]):
-                msg = f"Target destination X ({p_dest[0]:.1f}) is out of workspace limits."
-                QMessageBox.warning(self, "Safety Limit", msg)
-                self.txt_verify_log.append(f"  [!] Safety Limit: {msg}")
-                return
-            if not (lim.get("y", [-9999, 9999])[0] <= p_dest[1] <= lim.get("y", [-9999, 9999])[1]):
-                msg = f"Target destination Y ({p_dest[1]:.1f}) is out of workspace limits."
-                QMessageBox.warning(self, "Safety Limit", msg)
-                self.txt_verify_log.append(f"  [!] Safety Limit: {msg}")
-                return
-            if not (lim.get("z", [-9999, 9999])[0] <= p_dest[2] <= lim.get("z", [-9999, 9999])[1]):
-                msg = f"Target destination Z ({p_dest[2]:.1f}) is out of workspace limits."
-                QMessageBox.warning(self, "Safety Limit", msg)
-                self.txt_verify_log.append(f"  [!] Safety Limit: {msg}")
-                return
-
-        # Check accessibility
-        if not self.robot.is_reachable(target_pose, "MOVL"):
-            QMessageBox.warning(self, "Unreachable", "The target safety position is out of the robot's physical reach.")
-            self.txt_verify_log.append(f"  [!] Unreachable: The target safety position is out of the robot's physical reach.")
-            return
-
-        # Execute non-blockingly
-        self.robot.move_l(target_pose, wait=False)
-        self.txt_verify_log.append(f"  [OK] Sent MOVL command non-blockingly.")
+        self.execute_next_verify_step()
 
     def refresh_samples_list(self):
         # Clear existing layout items
