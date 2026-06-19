@@ -29,7 +29,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QTabWidget, QLabel, QPushButton, 
                              QLineEdit, QFileDialog, QMessageBox, QGroupBox, 
                              QFormLayout, QDoubleSpinBox, QTextEdit, QGridLayout,
-                             QSizePolicy)
+                             QSizePolicy, QScrollArea, QFrame, QProgressDialog)
 from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QPoint
 from PyQt5.QtGui import QImage, QPixmap
 
@@ -44,6 +44,12 @@ from aisprayer.core.hardware.robot.inexbot_driver import InexbotDriver, RobotPos
 from aisprayer.core.hardware.camera.factory import get_camera
 from aisprayer.utils.config_helper import load_config, get_abs_path
 from aisprayer.utils.hardware_helper import verify_hardware_consistency
+
+class ClickableFrame(QFrame):
+    clicked = pyqtSignal()
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.clicked.emit()
 
 class ClickableLabel(QLabel):
     """A QLabel that emits custom clicked signal with relative coordinates."""
@@ -99,6 +105,10 @@ class CalibUI(QMainWindow):
         self.yaml_path = None
         self.cap_info = None
 
+        # Preview & selection state
+        self.selected_sample_id = None
+        self.preview_image = None
+
         # Verify state
         self.calib_data = None
         self.target_uv = None
@@ -140,29 +150,49 @@ class CalibUI(QMainWindow):
         self.cap_video.setStyleSheet("background-color: #000; border: 2px solid #222;")
         left_layout.addWidget(self.cap_video)
         
-        top_layout.addLayout(left_layout, 3)
+        top_layout.addLayout(left_layout, 10)
+
+        # Middle Column: Captured Samples list
+        self.samples_group = QGroupBox("Samples")
+        self.samples_group.setFixedWidth(150)
+        middle_vbox = QVBoxLayout(self.samples_group)
+        middle_vbox.setContentsMargins(5, 5, 5, 5)
+        
+        self.samples_scroll = QScrollArea()
+        self.samples_scroll.setWidgetResizable(True)
+        self.samples_scroll.setStyleSheet("QScrollArea { border: none; background-color: transparent; }")
+        
+        self.samples_content = QWidget()
+        self.samples_content.setStyleSheet("QWidget { background-color: transparent; }")
+        self.samples_layout = QVBoxLayout(self.samples_content)
+        self.samples_layout.setContentsMargins(0, 0, 0, 0)
+        self.samples_layout.setSpacing(5)
+        
+        self.samples_scroll.setWidget(self.samples_content)
+        middle_vbox.addWidget(self.samples_scroll)
+        
+        top_layout.addWidget(self.samples_group, 2)
 
         # Right Column: Controls Splitter
         right_layout = QVBoxLayout()
 
         # 0. Camera Status Group (above Robot Connection)
-        cam_group = QGroupBox("Camera Connection")
-        cam_layout = QHBoxLayout(cam_group)
+        self.cam_group = QGroupBox("Camera Connection: Disconnected")
+        self.cam_group.setStyleSheet("QGroupBox::title { color: #f44336; font-weight: bold; }")
+        cam_layout = QHBoxLayout(self.cam_group)
         cam_layout.setContentsMargins(5, 5, 5, 5)
-        self.lbl_cam_status = QLabel("Camera: Disconnected")
-        self.lbl_cam_status.setStyleSheet("font-size: 12px; font-weight: bold; color: #f44336;")
         self.btn_reconnect_cam = QPushButton("Retry Camera")
         self.btn_reconnect_cam.setFixedWidth(100)
         self.btn_reconnect_cam.clicked.connect(self.start_camera)
 
         cam_layout.addWidget(self.btn_reconnect_cam)
-        cam_layout.addWidget(self.lbl_cam_status)
         cam_layout.addStretch()
-        right_layout.addWidget(cam_group)
+        right_layout.addWidget(self.cam_group)
 
         # 1. Connection Group
-        conn_group = QGroupBox("Robot Connection")
-        conn_layout = QHBoxLayout(conn_group)
+        self.conn_group = QGroupBox("Robot Connection: Disconnected")
+        self.conn_group.setStyleSheet("QGroupBox::title { color: #f44336; font-weight: bold; }")
+        conn_layout = QHBoxLayout(self.conn_group)
         conn_layout.setContentsMargins(5, 5, 5, 5)
         conn_layout.setSpacing(5)
         self.txt_ip = QLineEdit(self.default_ip)
@@ -171,9 +201,6 @@ class CalibUI(QMainWindow):
         self.txt_port.setFixedWidth(40)
         self.btn_connect_robot = QPushButton("Connect Robot")
         self.btn_connect_robot.clicked.connect(self.toggle_robot_connection)
-        
-        self.lbl_robot_status = QLabel("Robot: Disconnected")
-        self.lbl_robot_status.setStyleSheet("font-size: 12px; font-weight: bold; color: #f44336;")
 
         conn_layout.addWidget(QLabel("IP:"))
         conn_layout.addWidget(self.txt_ip)
@@ -182,10 +209,8 @@ class CalibUI(QMainWindow):
         conn_layout.addWidget(self.txt_port)
         conn_layout.addSpacing(15)
         conn_layout.addWidget(self.btn_connect_robot)
-        conn_layout.addSpacing(10)
-        conn_layout.addWidget(self.lbl_robot_status)
         conn_layout.addStretch()
-        right_layout.addWidget(conn_group)
+        right_layout.addWidget(self.conn_group)
 
         # 2. Capture & Calibration Group (Directory & Info)
         cap_group = QGroupBox("Calibration Directory & Info")
@@ -259,8 +284,8 @@ class CalibUI(QMainWindow):
         jog_layout.addLayout(jog_grid)
         jog_layout.addStretch()
 
-        # Row at bottom: The 4 Buttons (Capture, Calibrate, Read Current Pose, Move to Target Pose)
-        buttons_row = QHBoxLayout()
+        # 2x2 grid of buttons to fit the narrower control panel
+        buttons_grid = QGridLayout()
         
         self.btn_capture = QPushButton("Capture")
         self.btn_capture.clicked.connect(self.capture_sample)
@@ -274,15 +299,15 @@ class CalibUI(QMainWindow):
         self.btn_move_to_jog = QPushButton("Move to Target Pose")
         self.btn_move_to_jog.clicked.connect(self.move_to_jog_pose)
 
-        buttons_row.addWidget(self.btn_move_to_jog)
-        buttons_row.addWidget(self.btn_capture)
-        buttons_row.addWidget(self.btn_run_calib)
-        buttons_row.addWidget(self.btn_read_pos)
-        jog_layout.addLayout(buttons_row)
+        buttons_grid.addWidget(self.btn_read_pos, 0, 0)
+        buttons_grid.addWidget(self.btn_move_to_jog, 0, 1)
+        buttons_grid.addWidget(self.btn_capture, 1, 0)
+        buttons_grid.addWidget(self.btn_run_calib, 1, 1)
+        jog_layout.addLayout(buttons_grid)
         
         right_layout.addWidget(jog_group)
         
-        top_layout.addLayout(right_layout, 2)
+        top_layout.addLayout(right_layout, 3)
         
         # Add top layout to main layout
         main_layout.addLayout(top_layout, 0)
@@ -381,16 +406,16 @@ class CalibUI(QMainWindow):
 
     def start_camera(self):
         try:
-            self.lbl_cam_status.setText("Camera: Connecting...")
-            self.lbl_cam_status.setStyleSheet("font-size: 14px; font-weight: bold; color: #FF9800;")
+            self.cam_group.setTitle("Camera Connection: Connecting...")
+            self.cam_group.setStyleSheet("QGroupBox::title { color: #FF9800; font-weight: bold; }")
             QApplication.processEvents()
 
             self.cam = get_camera(self.camera_model)
             self.cam.start()
             self.cam_connected = True
             
-            self.lbl_cam_status.setText("Camera: Connected")
-            self.lbl_cam_status.setStyleSheet("font-size: 14px; font-weight: bold; color: #4CAF50;")
+            self.cam_group.setTitle("Camera Connection: Connected")
+            self.cam_group.setStyleSheet("QGroupBox::title { color: #4CAF50; font-weight: bold; }")
             
             # Setup default output dir automatically if not chosen
             if not self.save_dir:
@@ -398,8 +423,8 @@ class CalibUI(QMainWindow):
                 self.setup_save_dir(os.path.join(self.default_output_dir, f"calib_{ts}"))
         except Exception as e:
             self.cam_connected = False
-            self.lbl_cam_status.setText("Camera: Offline")
-            self.lbl_cam_status.setStyleSheet("font-size: 12px; font-weight: bold; color: #f44336;")
+            self.cam_group.setTitle("Camera Connection: Offline")
+            self.cam_group.setStyleSheet("QGroupBox::title { color: #f44336; font-weight: bold; }")
             print(f"Camera start failed: {e}")
 
     def toggle_robot_connection(self):
@@ -407,8 +432,8 @@ class CalibUI(QMainWindow):
             ip = self.txt_ip.text().strip()
             port = self.txt_port.text().strip()
 
-            self.lbl_robot_status.setText("Robot: Connecting...")
-            self.lbl_robot_status.setStyleSheet("font-size: 12px; font-weight: bold; color: #FF9800;")
+            self.conn_group.setTitle("Robot Connection: Connecting...")
+            self.conn_group.setStyleSheet("QGroupBox::title { color: #FF9800; font-weight: bold; }")
             QApplication.processEvents()
 
             try:
@@ -416,24 +441,24 @@ class CalibUI(QMainWindow):
                 if not self.robot.startup(timeout=5.0):
                     QMessageBox.critical(self, "Error", "Robot startup failed! Make sure controller IP/Port are correct.")
                     self.robot = None
-                    self.lbl_robot_status.setText("Robot: Disconnected")
-                    self.lbl_robot_status.setStyleSheet("font-size: 12px; font-weight: bold; color: #f44336;")
+                    self.conn_group.setTitle("Robot Connection: Disconnected")
+                    self.conn_group.setStyleSheet("QGroupBox::title { color: #f44336; font-weight: bold; }")
                     return
 
                 self.robot_connected = True
                 self.btn_connect_robot.setText("Disconnect Robot")
                 self.btn_connect_robot.setStyleSheet("background-color: #f44336; color: white; font-weight: bold;")
                 
-                self.lbl_robot_status.setText("Robot: Connected")
-                self.lbl_robot_status.setStyleSheet("font-size: 12px; font-weight: bold; color: #4CAF50;")
+                self.conn_group.setTitle("Robot Connection: Connected")
+                self.conn_group.setStyleSheet("QGroupBox::title { color: #4CAF50; font-weight: bold; }")
 
                 # Read current pose to populate jogging GUI
                 self.read_robot_pose()
 
             except Exception as e:
                 self.robot = None
-                self.lbl_robot_status.setText("Robot: Disconnected")
-                self.lbl_robot_status.setStyleSheet("font-size: 12px; font-weight: bold; color: #f44336;")
+                self.conn_group.setTitle("Robot Connection: Disconnected")
+                self.conn_group.setStyleSheet("QGroupBox::title { color: #f44336; font-weight: bold; }")
                 QMessageBox.critical(self, "Error", f"Failed to connect to robot: {e}")
         else:
             self.disconnect_robot()
@@ -446,8 +471,8 @@ class CalibUI(QMainWindow):
         self.robot_connected = False
         self.btn_connect_robot.setText("Connect Robot")
         self.btn_connect_robot.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold;")
-        self.lbl_robot_status.setText("Robot: Disconnected")
-        self.lbl_robot_status.setStyleSheet("font-size: 14px; font-weight: bold; color: #f44336;")
+        self.conn_group.setTitle("Robot Connection: Disconnected")
+        self.conn_group.setStyleSheet("QGroupBox::title { color: #f44336; font-weight: bold; }")
 
     def select_save_dir(self):
         d = QFileDialog.getExistingDirectory(self, "Select Save Directory", PROJECT_ROOT)
@@ -502,6 +527,8 @@ class CalibUI(QMainWindow):
             with open(self.yaml_path, 'w', encoding='utf-8') as f:
                 yaml.dump(self.cap_info, f, default_flow_style=False)
             self.txt_calib_log.append(f"Initialized new calibration save info at: {self.yaml_path}")
+        
+        self.refresh_samples_list()
 
     def update_frame(self):
         # Keepalive querying to prevent connection dropouts
@@ -512,6 +539,22 @@ class CalibUI(QMainWindow):
                 except:
                     pass
                 self.last_heartbeat_time = time.time()
+
+        # If a sample is selected and we are on the Calibrate tab, show its preview image
+        active_tab = self.tabs.currentIndex()
+        if active_tab == 0 and self.selected_sample_id is not None and self.preview_image is not None:
+            display_frame = self.preview_image.copy()
+            gray = cv2.cvtColor(self.preview_image, cv2.COLOR_BGR2GRAY)
+            ret, corners = cv2.findChessboardCorners(gray, self.pattern_size, None)
+            if ret:
+                cv2.drawChessboardCorners(display_frame, self.pattern_size, corners, ret)
+            
+            cv2.putText(display_frame, f"PREVIEW - SAMPLE {self.selected_sample_id}", (15, 30), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 165, 255), 2, cv2.LINE_AA)
+            cv2.putText(display_frame, "Click item again to return to Live Video", (15, 60), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 165, 255), 1, cv2.LINE_AA)
+            self.render_image_to_label(display_frame, self.cap_video)
+            return
 
         if not self.cam_connected or not self.cam:
             # Render empty frame placeholder
@@ -630,6 +673,7 @@ class CalibUI(QMainWindow):
 
         self.txt_calib_log.append(f"[OK] Captured Sample {count}: {img_name}")
         self.txt_calib_log.append(f"     Pose: X:{pose.x:.1f} Y:{pose.y:.1f} Z:{pose.z:.1f} A:{pose.a:.4f} B:{pose.b:.4f} C:{pose.c:.4f}")
+        self.refresh_samples_list()
 
     def run_calibration(self):
         if not self.save_dir or not os.path.exists(self.yaml_path):
@@ -639,11 +683,18 @@ class CalibUI(QMainWindow):
         self.txt_calib_log.clear()
         self.txt_calib_log.append("====== Starting Calibration Process ======")
 
+        # Stop timer to avoid overwriting cap_video
+        timer_was_active = self.timer.isActive()
+        if timer_was_active:
+            self.timer.stop()
+
+        progress = None
         try:
             with open(self.yaml_path, 'r', encoding='utf-8') as f:
                 info = yaml.safe_load(f)
 
-            if len(info.get("samples", [])) < 3:
+            total_samples = len(info.get("samples", []))
+            if total_samples < 3:
                 self.txt_calib_log.append("[-] Calibration requires at least 3 samples.")
                 return
 
@@ -659,7 +710,22 @@ class CalibUI(QMainWindow):
             all_samples = []
             self.txt_calib_log.append("[*] Extracting corners and solving PnP...")
 
-            for s in info["samples"]:
+            progress = QProgressDialog("Loading calibration samples...", "Cancel", 0, total_samples, self)
+            progress.setWindowModality(Qt.WindowModal)
+            progress.setWindowTitle("Calibration Process")
+            progress.setMinimumDuration(0)
+            progress.setValue(0)
+            QApplication.processEvents()
+
+            for idx, s in enumerate(info["samples"]):
+                if progress.wasCanceled():
+                    self.txt_calib_log.append("[-] Calibration cancelled by user.")
+                    return
+
+                progress.setLabelText(f"Processing sample {idx+1}/{total_samples} (ID: {s['id']})...")
+                progress.setValue(idx)
+                QApplication.processEvents()
+
                 pose = s["robot_pose"]
                 if any(abs(v) > 2500 for v in [pose['x'], pose['y'], pose['z']]):
                     self.txt_calib_log.append(f"  [!] Skipped sample {s['id']} (invalid position)")
@@ -671,11 +737,13 @@ class CalibUI(QMainWindow):
                     self.txt_calib_log.append(f"  [!] Skipped sample {s['id']} (image load failed)")
                     continue
 
+                display_img = img.copy()
                 ret, corners = cv2.findChessboardCorners(img, pattern_size, None)
                 if ret:
                     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
                     corners = cv2.cornerSubPix(gray, corners, (5, 5), (-1, -1), criteria)
+                    cv2.drawChessboardCorners(display_img, pattern_size, corners, ret)
                     
                     _, rvec, tvec = cv2.solvePnP(objp, corners, K, D)
                     R_cb, _ = cv2.Rodrigues(rvec)
@@ -688,12 +756,28 @@ class CalibUI(QMainWindow):
                 else:
                     self.txt_calib_log.append(f"  [!] Failed to extract corners from sample {s['id']}")
 
+                # Overlay status text on image and display
+                status_text = f"Sample ID {s['id']}: {'SUCCESS' if ret else 'FAILED'}"
+                text_color = (0, 255, 0) if ret else (0, 0, 255)
+                cv2.putText(display_img, status_text, (15, 30), 
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, text_color, 2, cv2.LINE_AA)
+                self.render_image_to_label(display_img, self.cap_video)
+                
+                # Small sleep/delay to allow viewing corner detection
+                time.sleep(0.15)
+                QApplication.processEvents()
+
+            progress.setValue(total_samples)
+            progress.close()
+            progress = None
+
             if len(all_samples) < 3:
                 self.txt_calib_log.append("[-] Verification failed: insufficient valid chessboard corners found.")
                 return
 
             # Clean data (displacement check)
             self.txt_calib_log.append("[*] Cleaning data based on motion displacement...")
+            QApplication.processEvents()
             clean_thr = self.c_cfg.get("cleaning_threshold", 0.05)
             samples = self.clean_calibration_data(all_samples, threshold=clean_thr)
 
@@ -704,9 +788,11 @@ class CalibUI(QMainWindow):
             # Evaluate diversity
             diversity = self.evaluate_data_diversity(samples)
             self.txt_calib_log.append(f"[*] Diversity score: {diversity['score']:.1f} / 100")
+            QApplication.processEvents()
 
             # Optimization search
             self.txt_calib_log.append("[*] Searching for optimal camera extrinsics & chessboard offset...")
+            QApplication.processEvents()
             best_res = self.optimize_extrinsics_solve(samples)
             if not best_res:
                 self.txt_calib_log.append("[-] Optimization solver failed.")
@@ -738,7 +824,7 @@ class CalibUI(QMainWindow):
                     "samples_used": len(samples),
                     "optimization_config": {
                         "axis_order": order,
-                        "sign_vector": list(s_vec)
+                        "sign_vector": [int(x) for x in s_vec]
                     }
                 },
                 "camera_pose_base": {
@@ -764,6 +850,11 @@ class CalibUI(QMainWindow):
         except Exception as e:
             self.txt_calib_log.append(f"[-] Calibration crashed: {e}")
             QMessageBox.critical(self, "Error", f"Calibration execution failed: {e}")
+        finally:
+            if progress is not None:
+                progress.close()
+            if timer_was_active:
+                self.timer.start(30)
 
     def clean_calibration_data(self, all_samples, threshold=0.05):
         if not all_samples:
@@ -891,7 +982,7 @@ class CalibUI(QMainWindow):
                     mean_err = np.mean(t_errs)
                     if mean_err < best_err:
                         best_err = mean_err
-                        best_res = (R_base_cam, t_base_cam, t_off, mean_err, order, np.array(s_vec))
+                        best_res = (R_base_cam, t_base_cam, t_off, mean_err, order, s_vec)
                 except:
                     continue
         return best_res
@@ -1227,6 +1318,190 @@ class CalibUI(QMainWindow):
 
         # Execute non-blockingly
         self.robot.move_l(target_pose, wait=False)
+
+    def refresh_samples_list(self):
+        # Clear existing layout items
+        while self.samples_layout.count():
+            child = self.samples_layout.takeAt(0)
+            if child.widget():
+                child.widget().deleteLater()
+
+        if not self.cap_info or "samples" not in self.cap_info:
+            return
+            
+        samples = self.cap_info["samples"]
+        self.samples_group.setTitle(f"Samples ({len(samples)})")
+        
+        for s in samples:
+            item_widget = ClickableFrame()
+            item_widget.setFrameShape(QFrame.StyledPanel)
+            
+            is_selected = (self.selected_sample_id == s["id"])
+            if is_selected:
+                item_widget.setStyleSheet("""
+                    QFrame {
+                        background-color: #1a3322;
+                        border: 2px solid #4CAF50;
+                        border-radius: 4px;
+                        margin-bottom: 2px;
+                    }
+                """)
+            else:
+                item_widget.setStyleSheet("""
+                    QFrame {
+                        background-color: #2b2b2b;
+                        border: 1px solid #3c3f41;
+                        border-radius: 4px;
+                        margin-bottom: 2px;
+                    }
+                    QFrame:hover {
+                        background-color: #353535;
+                        border-color: #4b6eaf;
+                    }
+                """)
+            
+            v_layout = QVBoxLayout(item_widget)
+            v_layout.setContentsMargins(4, 4, 4, 4)
+            v_layout.setSpacing(4)
+            
+            # Top row: ID and Delete button
+            top_row = QHBoxLayout()
+            top_row.setContentsMargins(0, 0, 0, 0)
+            
+            lbl_id = QLabel(f"<b>#{s['id']}</b>")
+            lbl_id.setStyleSheet("color: #4CAF50; font-size: 11px;")
+            
+            btn_del = QPushButton("×")
+            btn_del.setFixedSize(16, 16)
+            btn_del.setStyleSheet("""
+                QPushButton {
+                    background-color: transparent;
+                    color: #777;
+                    border: none;
+                    font-size: 14px;
+                    font-weight: bold;
+                }
+                QPushButton:hover {
+                    color: #ef5350;
+                }
+            """)
+            btn_del.clicked.connect(lambda checked, sid=s["id"]: self.delete_sample(sid))
+            
+            top_row.addWidget(lbl_id)
+            top_row.addStretch()
+            top_row.addWidget(btn_del)
+            v_layout.addLayout(top_row)
+            
+            # Thumbnail label
+            lbl_thumb = QLabel()
+            lbl_thumb.setFixedSize(100, 62)
+            lbl_thumb.setAlignment(Qt.AlignCenter)
+            lbl_thumb.setStyleSheet("background-color: #000; border-radius: 2px;")
+            
+            img_path = os.path.join(self.save_dir, s["image_file"]) if self.save_dir else ""
+            if img_path and os.path.exists(img_path):
+                pix = QPixmap(img_path)
+                if not pix.isNull():
+                    lbl_thumb.setPixmap(pix.scaled(100, 62, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                else:
+                    lbl_thumb.setText("Error")
+            else:
+                lbl_thumb.setText("No Img")
+                lbl_thumb.setStyleSheet("color: #666; font-size: 10px; background-color: #111;")
+            
+            v_layout.addWidget(lbl_thumb, 0, Qt.AlignCenter)
+            
+            # Coordinates label
+            pose = s["robot_pose"]
+            lbl_info = QLabel()
+            lbl_info.setAlignment(Qt.AlignCenter)
+            lbl_info.setStyleSheet("color: #a9b7c6; font-family: monospace; font-size: 9px; line-height: 110%;")
+            lbl_info.setText(
+                f"X: {pose['x']:.1f}<br/>"
+                f"Y: {pose['y']:.1f}<br/>"
+                f"Z: {pose['z']:.1f}<br/>"
+                f"A: {pose['a']:.3f}<br/>"
+                f"B: {pose['b']:.3f}<br/>"
+                f"C: {pose['c']:.3f}"
+            )
+            v_layout.addWidget(lbl_info)
+            
+            # Click connection
+            item_widget.clicked.connect(lambda sid=s["id"]: self.handle_sample_select(sid))
+            
+            self.samples_layout.addWidget(item_widget)
+            
+        self.samples_layout.addStretch()
+
+    def handle_sample_select(self, sid):
+        if self.selected_sample_id == sid:
+            self.selected_sample_id = None
+            self.preview_image = None
+        else:
+            self.selected_sample_id = sid
+            # Cache the loaded preview image once
+            sample = next((s for s in self.cap_info["samples"] if s["id"] == sid), None)
+            if sample:
+                img_path = os.path.join(self.save_dir, sample["image_file"])
+                if os.path.exists(img_path):
+                    self.preview_image = cv2.imread(img_path)
+                else:
+                    self.preview_image = None
+            else:
+                self.preview_image = None
+                
+        self.refresh_samples_list()
+
+    def delete_sample(self, sid):
+        if not self.cap_info or "samples" not in self.cap_info:
+            return
+        
+        reply = QMessageBox.question(
+            self, 'Confirm Delete', 
+            f"Are you sure you want to delete Sample {sid}?",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No
+        )
+        
+        if reply == QMessageBox.Yes:
+            # If the deleted sample was the selected one, reset selection
+            if self.selected_sample_id == sid:
+                self.selected_sample_id = None
+                self.preview_image = None
+
+            samples = self.cap_info["samples"]
+            idx = next((i for i, s in enumerate(samples) if s["id"] == sid), -1)
+            if idx != -1:
+                s = samples[idx]
+                img_path = os.path.join(self.save_dir, s["image_file"])
+                if os.path.exists(img_path):
+                    try:
+                        os.remove(img_path)
+                    except Exception as e:
+                        print(f"Failed to delete image file: {e}")
+                
+                samples.pop(idx)
+                
+                for new_idx, s in enumerate(samples):
+                    old_id = s["id"]
+                    new_id = new_idx + 1
+                    s["id"] = new_id
+                    old_img_name = s["image_file"]
+                    new_img_name = f"image_{new_id:03d}.png"
+                    if old_img_name != new_img_name:
+                        old_img_path = os.path.join(self.save_dir, old_img_name)
+                        new_img_path = os.path.join(self.save_dir, new_img_name)
+                        if os.path.exists(old_img_path):
+                            try:
+                                os.rename(old_img_path, new_img_path)
+                                s["image_file"] = new_img_name
+                            except Exception as e:
+                                print(f"Failed to rename image file: {e}")
+                
+                with open(self.yaml_path, 'w', encoding='utf-8') as f:
+                    yaml.dump(self.cap_info, f, default_flow_style=False)
+                
+                self.txt_calib_log.append(f"[OK] Deleted Sample {sid} and updated remaining indices.")
+                self.refresh_samples_list()
 
     def closeEvent(self, event):
         self.disconnect_robot()
