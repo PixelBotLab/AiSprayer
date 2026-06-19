@@ -401,7 +401,7 @@ class CalibMainWindow(QMainWindow):
                         if p_cam_normal_tip[2] > 0:
                             u_tip = int(fx * p_cam_normal_tip[0] / p_cam_normal_tip[2] + cx)
                             v_tip = int(fy * p_cam_normal_tip[1] / p_cam_normal_tip[2] + cy)
-                            cv2.arrowedLine(img, (u, v), (u_tip, v_tip), color_norm, 2, tipLength=0.2)
+                            cv2.arrowedLine(img, (u_tip, v_tip), (u, v), color_norm, 2, tipLength=0.2)
 
             for item in self.verify_items:
                 is_visited = (item.get("status") == "visited")
