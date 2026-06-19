@@ -424,7 +424,7 @@ class CalibMainWindow(QMainWindow):
                         x_val = (u - cx) * z_val / fx
                         y_val = (v - cy) * z_val / fy
                         p_cam_origin = np.array([x_val, y_val, z_val])
-                        p_cam_normal_tip = p_cam_origin + n_cam * 50.0
+                        p_cam_normal_tip = p_cam_origin + n_cam * 150.0
                         if p_cam_normal_tip[2] > 0:
                             u_tip = int(fx * p_cam_normal_tip[0] / p_cam_normal_tip[2] + cx)
                             v_tip = int(fy * p_cam_normal_tip[1] / p_cam_normal_tip[2] + cy)
@@ -485,7 +485,7 @@ class CalibMainWindow(QMainWindow):
                 # 鼠标移动时绘制到当前悬停点的虚拟线段及虚拟法向量箭头
                 if self.hover_pos is not None:
                     last_pt = self.current_draw_points[-1]
-                    virtual_color = (0, 0, 255) # 虚拟引导元素采用红色
+                    virtual_color = (255, 255, 0) # 虚拟引导元素采用红色
                     # 细线宽、虚线段表示
                     draw_dashed_line(display_frame, last_pt, self.hover_pos, virtual_color, thickness=1, gap=6)
                     
