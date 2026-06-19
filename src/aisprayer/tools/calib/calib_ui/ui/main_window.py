@@ -107,6 +107,32 @@ class CalibMainWindow(QMainWindow):
 
         self.last_heartbeat_time = 0
 
+        # 默认加载最近的标定结果
+        latest_calib = None
+        latest_time = 0
+        calib_root = os.path.join(PROJECT_ROOT, "data", "calib")
+        if os.path.exists(calib_root):
+            for root, dirs, files in os.walk(calib_root):
+                for file in files:
+                    if file == "calibration_result.yaml":
+                        full_path = os.path.join(root, file)
+                        try:
+                            mtime = os.path.getmtime(full_path)
+                            if mtime > latest_time:
+                                latest_time = mtime
+                                latest_calib = full_path
+                        except Exception:
+                            pass
+
+        if not latest_calib:
+            p_cfg = self.config.get("vision", {}).get("planner", {})
+            default_calib = get_abs_path(p_cfg.get("calib_path", "configs/calib/calibration_result.yaml"), PROJECT_ROOT)
+            if os.path.exists(default_calib):
+                latest_calib = default_calib
+
+        if latest_calib:
+            self.load_calib_file(latest_calib)
+
     def init_ui(self):
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
