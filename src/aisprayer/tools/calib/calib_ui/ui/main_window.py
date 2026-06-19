@@ -414,7 +414,7 @@ class CalibMainWindow(QMainWindow):
         elif active_tab == 1:
             display_frame = color.copy()
 
-            def draw_point_normal(img, u, v, n_cam, color_norm):
+            def draw_point_normal(img, u, v, n_cam, color_norm, thickness=2):
                 if n_cam is not None and self.calib_data:
                     K = np.array(self.calib_data["camera_params"]["intrinsic_matrix"])
                     fx, fy = K[0, 0], K[1, 1]
@@ -428,7 +428,23 @@ class CalibMainWindow(QMainWindow):
                         if p_cam_normal_tip[2] > 0:
                             u_tip = int(fx * p_cam_normal_tip[0] / p_cam_normal_tip[2] + cx)
                             v_tip = int(fy * p_cam_normal_tip[1] / p_cam_normal_tip[2] + cy)
-                            cv2.arrowedLine(img, (u_tip, v_tip), (u, v), color_norm, 2, tipLength=0.4)
+                            cv2.arrowedLine(img, (u_tip, v_tip), (u, v), color_norm, thickness, tipLength=0.4)
+
+            def draw_dashed_line(img, pt1, pt2, color, thickness=1, gap=6):
+                dist = np.hypot(pt2[0] - pt1[0], pt2[1] - pt1[1])
+                if dist == 0:
+                    return
+                n_segments = int(dist / gap)
+                if n_segments <= 0:
+                    cv2.line(img, pt1, pt2, color, thickness, cv2.LINE_AA)
+                    return
+                pts_x = np.linspace(pt1[0], pt2[0], n_segments + 1)
+                pts_y = np.linspace(pt1[1], pt2[1], n_segments + 1)
+                for i in range(0, n_segments, 2):
+                    start = (int(pts_x[i]), int(pts_y[i]))
+                    end_idx = min(i + 1, n_segments)
+                    end = (int(pts_x[end_idx]), int(pts_y[end_idx]))
+                    cv2.line(img, start, end, color, thickness, cv2.LINE_AA)
 
             for item in self.verify_items:
                 is_visited = (item.get("status") == "visited")
@@ -441,11 +457,11 @@ class CalibMainWindow(QMainWindow):
                 for idx, pt in enumerate(points):
                     cv2.circle(display_frame, pt, 5, item_color, -1)
                     if idx < len(poses):
-                        draw_point_normal(display_frame, pt[0], pt[1], poses[idx]["n_cam"], norm_color)
+                        draw_point_normal(display_frame, pt[0], pt[1], poses[idx]["n_cam"], norm_color, thickness=2)
                 
                 if len(points) > 1:
                     for i in range(len(points) - 1):
-                        cv2.arrowedLine(display_frame, points[i], points[i+1], item_color, 2, tipLength=0.15)
+                        cv2.arrowedLine(display_frame, points[i], points[i+1], (0, 0, 0), 2, tipLength=0.15)
                 
                 if points:
                     first_pt = points[0]
@@ -460,24 +476,26 @@ class CalibMainWindow(QMainWindow):
                 for idx, pt in enumerate(self.current_draw_points):
                     cv2.circle(display_frame, pt, 5, temp_color, -1)
                     if idx < len(self.current_draw_poses):
-                        draw_point_normal(display_frame, pt[0], pt[1], self.current_draw_poses[idx]["n_cam"], temp_norm_color)
+                        draw_point_normal(display_frame, pt[0], pt[1], self.current_draw_poses[idx]["n_cam"], temp_norm_color, thickness=2)
                 
                 if len(self.current_draw_points) > 1:
                     for i in range(len(self.current_draw_points) - 1):
-                        cv2.arrowedLine(display_frame, self.current_draw_points[i], self.current_draw_points[i+1], temp_color, 2, tipLength=0.15)
+                        cv2.arrowedLine(display_frame, self.current_draw_points[i], self.current_draw_points[i+1], (0, 0, 0), 2, tipLength=0.15)
 
                 # 鼠标移动时绘制到当前悬停点的虚拟线段及虚拟法向量箭头
                 if self.hover_pos is not None:
                     last_pt = self.current_draw_points[-1]
                     virtual_color = (255, 255, 0) # 虚拟引导元素采用青色以示区分
-                    cv2.line(display_frame, last_pt, self.hover_pos, virtual_color, 2, cv2.LINE_AA)
+                    # 细线宽、虚线段表示
+                    draw_dashed_line(display_frame, last_pt, self.hover_pos, virtual_color, thickness=1, gap=6)
                     
                     uh, vh = self.hover_pos
                     if self.current_depth is not None and self.calib_data:
                         K = np.array(self.calib_data["camera_params"]["intrinsic_matrix"])
                         n_cam_h = compute_local_normal(self.current_depth, uh, vh, K)
                         if n_cam_h is not None:
-                            draw_point_normal(display_frame, uh, vh, n_cam_h, virtual_color)
+                            # 虚拟箭头采用较细的粗细度 1
+                            draw_point_normal(display_frame, uh, vh, n_cam_h, virtual_color, thickness=1)
                 
                 first_pt = self.current_draw_points[0]
                 cv2.putText(display_frame, "Drawing...", (first_pt[0] + 8, first_pt[1] - 8),
