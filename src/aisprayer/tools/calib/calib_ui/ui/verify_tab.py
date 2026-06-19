@@ -22,6 +22,8 @@ class VerifyTab(QWidget):
         left_layout = QVBoxLayout()
         self.ver_video = ClickableLabel()
         self.ver_video.clicked_pos.connect(self.main_win.handle_verify_click)
+        self.ver_video.right_clicked.connect(lambda: self.main_win.finish_current_draw_item(warn_if_empty=False))
+        self.ver_video.mouse_moved.connect(self.main_win.handle_verify_hover)
         left_layout.addWidget(self.ver_video)
         
         top_layout.addLayout(left_layout, 3)
@@ -90,7 +92,7 @@ class VerifyTab(QWidget):
 
         # Draw segment/point controls
         self.btn_finish_line = QPushButton("Finish Current Segment / Point")
-        self.btn_finish_line.clicked.connect(self.main_win.finish_current_draw_item)
+        self.btn_finish_line.clicked.connect(lambda: self.main_win.finish_current_draw_item(warn_if_empty=True))
         action_vbox.addWidget(self.btn_finish_line)
 
         self.btn_clear_last = QPushButton("Clear Last Point")

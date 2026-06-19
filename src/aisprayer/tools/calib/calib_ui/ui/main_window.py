@@ -90,6 +90,7 @@ class CalibMainWindow(QMainWindow):
         self.verify_items = []
         self.current_draw_points = []
         self.current_draw_poses = []
+        self.hover_pos = None
         
         self.executor = VerificationRouteExecutor(self.robot, self.config)
 
@@ -401,7 +402,7 @@ class CalibMainWindow(QMainWindow):
                         if p_cam_normal_tip[2] > 0:
                             u_tip = int(fx * p_cam_normal_tip[0] / p_cam_normal_tip[2] + cx)
                             v_tip = int(fy * p_cam_normal_tip[1] / p_cam_normal_tip[2] + cy)
-                            cv2.arrowedLine(img, (u_tip, v_tip), (u, v), color_norm, 2, tipLength=0.2)
+                            cv2.arrowedLine(img, (u_tip, v_tip), (u, v), color_norm, 2, tipLength=0.4)
 
             for item in self.verify_items:
                 is_visited = (item.get("status") == "visited")
@@ -438,6 +439,19 @@ class CalibMainWindow(QMainWindow):
                 if len(self.current_draw_points) > 1:
                     for i in range(len(self.current_draw_points) - 1):
                         cv2.arrowedLine(display_frame, self.current_draw_points[i], self.current_draw_points[i+1], temp_color, 2, tipLength=0.15)
+
+                # 鼠标移动时绘制到当前悬停点的虚拟线段及虚拟法向量箭头
+                if self.hover_pos is not None:
+                    last_pt = self.current_draw_points[-1]
+                    virtual_color = (255, 255, 0) # 虚拟引导元素采用青色以示区分
+                    cv2.line(display_frame, last_pt, self.hover_pos, virtual_color, 2, cv2.LINE_AA)
+                    
+                    uh, vh = self.hover_pos
+                    if self.current_depth is not None and self.calib_data:
+                        K = np.array(self.calib_data["camera_params"]["intrinsic_matrix"])
+                        n_cam_h = compute_local_normal(self.current_depth, uh, vh, K)
+                        if n_cam_h is not None:
+                            draw_point_normal(display_frame, uh, vh, n_cam_h, virtual_color)
                 
                 first_pt = self.current_draw_points[0]
                 cv2.putText(display_frame, "Drawing...", (first_pt[0] + 8, first_pt[1] - 8),
@@ -875,9 +889,10 @@ class CalibMainWindow(QMainWindow):
         else:
             self.txt_verify_log.append("[!] No points to clear.")
 
-    def finish_current_draw_item(self):
+    def finish_current_draw_item(self, warn_if_empty=True):
         if not self.current_draw_points:
-            QMessageBox.warning(self, "Warning", "No points drawn in current segment yet.")
+            if warn_if_empty:
+                QMessageBox.warning(self, "Warning", "No points drawn in current segment yet.")
             return
 
         item_id = len(self.verify_items) + 1
@@ -893,6 +908,7 @@ class CalibMainWindow(QMainWindow):
         
         self.current_draw_points.clear()
         self.current_draw_poses.clear()
+        self.hover_pos = None
         
         if self.calib_data:
             self.btn_ver_move.setEnabled(True)
@@ -1125,6 +1141,39 @@ class CalibMainWindow(QMainWindow):
         else:
             self.lbl_normal_base.setText("Normal estimation failed")
             self.txt_verify_log.append(f"  [!] Failed to estimate surface normal vector")
+
+    def handle_verify_hover(self, pos):
+        """
+        处理验证页面视频预览区域的鼠标移动事件。
+        如果当前正在绘制折线段（即 `self.current_draw_points` 不为空），
+        则将鼠标在 QLabel 上的当前坐标转换为相机原生像素坐标，用于绘制虚拟引导线与虚拟法向量。
+        """
+        if not self.current_draw_points or self.current_color is None:
+            self.hover_pos = None
+            return
+
+        H_native, W_native = self.current_color.shape[:2]
+
+        lw = self.ver_video.width()
+        lh = self.ver_video.height()
+
+        scale = min(lw / W_native, lh / H_native)
+        sw = W_native * scale
+        sh = H_native * scale
+
+        ox = (lw - sw) / 2
+        oy = (lh - sh) / 2
+
+        click_x = pos.x() - ox
+        click_y = pos.y() - oy
+
+        u = int(click_x / scale)
+        v = int(click_y / scale)
+
+        if 0 <= u < W_native and 0 <= v < H_native:
+            self.hover_pos = (u, v)
+        else:
+            self.hover_pos = None
 
     def move_to_verification_pose(self):
         if not self.robot_connected or not self.robot:

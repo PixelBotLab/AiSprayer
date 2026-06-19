@@ -1,0 +1,29 @@
+board_params:
+  cols: 9
+  pattern_size_inner:
+  - 8
+  - 11
+  rows: 12
+  square_size_mm: 15.0
+camera_params:
+  camera_model: orbbec
+  distortion_coeffs:
+  - -0.03204389661550522
+  - 0.034532126039266586
+  - 0.0003080253954976797
+  - 0.00034928417881019413
+  - -0.01199629157781601
+  height: 800
+  intrinsic_matrix:
+  - - 611.683837890625
+    - 0.0
+    - 643.4285278320312
+  - - 0.0
+    - 611.6983642578125
+    - 405.1534118652344
+  - - 0.0
+    - 0.0
+    - 1.0
+  width: 1280
+samples: []
+version: '1.0'
