@@ -41,6 +41,11 @@ class CalibMainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("AI Sprayer - Robotic Calibration GUI")
         self.resize(1200, 750)
+        
+        # Save baseline font size for responsive scaling
+        self.default_font_size = self.font().pointSize()
+        if self.default_font_size <= 0:
+            self.default_font_size = 9
 
         # Load global configuration
         self.config_path = os.path.join(PROJECT_ROOT, "configs/aisprayer_config.yaml")
@@ -1261,3 +1266,21 @@ class CalibMainWindow(QMainWindow):
             try: self.cam.stop()
             except: pass
         event.accept()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Calculate scale factor relative to baseline window size 1200x750
+        scale_x = self.width() / 1200.0
+        scale_y = self.height() / 750.0
+        scale = min(scale_x, scale_y)
+        
+        # Determine new font size
+        new_size = max(8, int(self.default_font_size * scale))
+        font = self.font()
+        font.setPointSize(new_size)
+        self.setFont(font)
+        
+        # Apply font size recursively to tabs and layout contents
+        self.tabs.setFont(font)
+        self.calibrate_tab.setFont(font)
+        self.verify_tab.setFont(font)

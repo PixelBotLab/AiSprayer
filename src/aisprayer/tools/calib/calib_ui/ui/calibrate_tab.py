@@ -268,7 +268,7 @@ class CalibrateTab(QWidget):
             top_row.setContentsMargins(0, 0, 0, 0)
             
             lbl_id = QLabel(f"<b>#{s['id']}</b>")
-            lbl_id.setStyleSheet("color: #4CAF50; font-size: 11px;")
+            lbl_id.setStyleSheet("color: #4CAF50;")
             
             btn_del = QPushButton("×")
             btn_del.setFixedSize(16, 16)

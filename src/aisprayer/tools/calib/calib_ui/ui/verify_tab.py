@@ -76,7 +76,7 @@ class VerifyTab(QWidget):
         # Style them to look professional and clear
         for lbl in [self.lbl_real_x, self.lbl_real_y, self.lbl_real_z, 
                     self.lbl_real_a, self.lbl_real_b, self.lbl_real_c]:
-            lbl.setStyleSheet("font-family: monospace; font-size: 11px; font-weight: bold;")
+            lbl.setStyleSheet("font-family: monospace; font-weight: bold;")
             
         pose_grid.addWidget(self.lbl_real_x, 0, 0)
         pose_grid.addWidget(self.lbl_real_y, 0, 1)
