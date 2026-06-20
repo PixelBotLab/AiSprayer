@@ -110,3 +110,31 @@ def calculate_tool_orientation(n_base, order="ZYX", sign_vector=(1, 1, 1)):
     b = euler[1] / sign_vector[1]
     c = euler[2] / sign_vector[2]
     return a, b, c
+
+def calculate_tool_orientation_with_roll(n_base, roll_rad, order="ZYX", sign_vector=(1, 1, 1)):
+    """
+    基于工作表面法向量以及一个额外的工具滚转角（Roll）计算机器人末端姿态欧拉角。
+    在保持 Z_tool 轴与负法向量对齐的前提下，使工具绕自身的 Z_tool 轴旋转 roll_rad 弧度。
+    这能有效地通过手腕旋转来改变关节位姿，从而避开奇异点和关节限位。
+    """
+    z_tool = -n_base
+    if abs(np.dot([0.0, 1.0, 0.0], z_tool)) < 0.98:
+        x_tool = np.cross([0.0, 1.0, 0.0], z_tool)
+    else:
+        x_tool = np.cross([1.0, 0.0, 0.0], z_tool)
+    x_tool /= np.linalg.norm(x_tool)
+    y_tool = np.cross(z_tool, x_tool)
+
+    # 绕局部 Z 轴旋转 roll_rad: R_bt' = R_bt * R_z(roll_rad)
+    cos_theta = np.cos(roll_rad)
+    sin_theta = np.sin(roll_rad)
+    x_tool_new = cos_theta * x_tool + sin_theta * y_tool
+    y_tool_new = -sin_theta * x_tool + cos_theta * y_tool
+
+    R_bt = np.column_stack([x_tool_new, y_tool_new, z_tool])
+    euler = R_tool.from_matrix(R_bt).as_euler(order, degrees=False)
+    a = euler[0] / sign_vector[0]
+    b = euler[1] / sign_vector[1]
+    c = euler[2] / sign_vector[2]
+    return a, b, c
+

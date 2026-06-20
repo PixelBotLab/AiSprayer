@@ -33,7 +33,7 @@ class CalibrateTab(QWidget):
 
         # Middle Column: Captured Samples list
         self.samples_group = QGroupBox("Samples")
-        self.samples_group.setFixedWidth(190)
+        self.samples_group.setFixedWidth(380)
         middle_vbox = QVBoxLayout(self.samples_group)
         middle_vbox.setContentsMargins(5, 5, 5, 5)
         
@@ -69,7 +69,7 @@ class CalibrateTab(QWidget):
         cam_layout = QHBoxLayout(self.cam_group)
         cam_layout.setContentsMargins(5, 5, 5, 5)
         self.btn_reconnect_cam = QPushButton("Retry Camera")
-        self.btn_reconnect_cam.setFixedWidth(100)
+        self.btn_reconnect_cam.setFixedWidth(300)
         self.btn_reconnect_cam.clicked.connect(self.main_win.start_camera)
 
         cam_layout.addWidget(self.btn_reconnect_cam)
@@ -83,9 +83,9 @@ class CalibrateTab(QWidget):
         conn_layout.setContentsMargins(5, 5, 5, 5)
         conn_layout.setSpacing(5)
         self.txt_ip = QLineEdit(self.main_win.default_ip)
-        self.txt_ip.setFixedWidth(90)
+        self.txt_ip.setFixedWidth(300)
         self.txt_port = QLineEdit(self.main_win.default_port)
-        self.txt_port.setFixedWidth(40)
+        self.txt_port.setFixedWidth(100)
         self.btn_connect_robot = QPushButton("Connect Robot")
         self.btn_connect_robot.clicked.connect(self.main_win.toggle_robot_connection)
 
@@ -124,6 +124,10 @@ class CalibrateTab(QWidget):
 
         # Coordinates grid (X, Y, Z, A, B, C)
         jog_grid = QGridLayout()
+        jog_grid.setColumnStretch(0, 0)
+        jog_grid.setColumnStretch(1, 3)
+        jog_grid.setColumnStretch(2, 1)
+        jog_grid.setColumnStretch(3, 1)
         self.jog_inputs = {}
         axes = ['X', 'Y', 'Z', 'A', 'B', 'C']
         
@@ -140,13 +144,10 @@ class CalibrateTab(QWidget):
                 spin.setSuffix(" °")
             
             spin.setDecimals(2)
-            spin.setFixedWidth(90)
             self.jog_inputs[axis] = spin
 
             btn_minus = QPushButton("-")
             btn_plus = QPushButton("+")
-            btn_minus.setFixedWidth(35)
-            btn_plus.setFixedWidth(35)
             
             btn_minus.clicked.connect(lambda checked, a=axis: self.main_win.jog_step(a, -1))
             btn_plus.clicked.connect(lambda checked, a=axis: self.main_win.jog_step(a, 1))
@@ -161,15 +162,13 @@ class CalibrateTab(QWidget):
         step_layout.addWidget(QLabel("Step XYZ (mm):"))
         self.spin_step_xyz = QDoubleSpinBox()
         self.spin_step_xyz.setRange(0.1, 200.0)
-        self.spin_step_xyz.setValue(10.0)
-        self.spin_step_xyz.setFixedWidth(65)
+        self.spin_step_xyz.setValue(50.0)
         step_layout.addWidget(self.spin_step_xyz)
 
         step_layout.addWidget(QLabel("Step ABC (°):"))
         self.spin_step_abc = QDoubleSpinBox()
         self.spin_step_abc.setRange(0.1, 45.0)
-        self.spin_step_abc.setValue(5.0)
-        self.spin_step_abc.setFixedWidth(65)
+        self.spin_step_abc.setValue(10.0)
         step_layout.addWidget(self.spin_step_abc)
         
         jog_grid.addLayout(step_layout, 6, 0, 1, 4)
@@ -293,7 +292,7 @@ class CalibrateTab(QWidget):
             
             # Thumbnail label
             lbl_thumb = QLabel()
-            lbl_thumb.setFixedSize(140, 88)
+            lbl_thumb.setFixedSize(320, 240)
             lbl_thumb.setAlignment(Qt.AlignCenter)
             lbl_thumb.setStyleSheet("background-color: #000; border-radius: 2px;")
             
@@ -301,7 +300,7 @@ class CalibrateTab(QWidget):
             if img_path and os.path.exists(img_path):
                 pix = QPixmap(img_path)
                 if not pix.isNull():
-                    lbl_thumb.setPixmap(pix.scaled(140, 88, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                    lbl_thumb.setPixmap(pix.scaled(320, 240, Qt.KeepAspectRatio, Qt.SmoothTransformation))
                 else:
                     lbl_thumb.setText("Error")
             else:
@@ -314,7 +313,7 @@ class CalibrateTab(QWidget):
             pose = s["robot_pose"]
             lbl_info = QLabel()
             lbl_info.setAlignment(Qt.AlignCenter)
-            lbl_info.setStyleSheet("color: #a9b7c6; font-family: monospace; font-size: 9px; line-height: 110%;")
+            lbl_info.setStyleSheet("color: #a9b7c6; font-family: monospace; font-size: 12px; line-height: 120%;")
             lbl_info.setText(
                 f"X:{pose['x']:.1f} Y:{pose['y']:.1f} Z:{pose['z']:.1f}<br/>"
                 f"A:{pose['a']:.3f} B:{pose['b']:.3f} C:{pose['c']:.3f}"

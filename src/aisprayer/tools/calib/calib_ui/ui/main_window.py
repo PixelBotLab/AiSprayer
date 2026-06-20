@@ -29,7 +29,8 @@ from aisprayer.tools.calib.calib_ui.core.calib_solver import (
     optimize_extrinsics_solve, calculate_rotation_error
 )
 from aisprayer.tools.calib.calib_ui.core.geometry_utils import (
-    get_robust_depth, compute_local_normal, calculate_tool_orientation
+    get_robust_depth, compute_local_normal, calculate_tool_orientation,
+    calculate_tool_orientation_with_roll
 )
 from aisprayer.tools.calib.calib_ui.core.route_executor import VerificationRouteExecutor
 
@@ -40,12 +41,7 @@ class CalibMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("AI Sprayer - Robotic Calibration GUI")
-        self.resize(1200, 750)
-        
-        # Save baseline font size for responsive scaling
-        self.default_font_size = self.font().pointSize()
-        if self.default_font_size <= 0:
-            self.default_font_size = 9
+        self.resize(3000, 2100)
 
         # Load global configuration
         self.config_path = os.path.join(PROJECT_ROOT, "configs/aisprayer_config.yaml")
@@ -180,6 +176,19 @@ class CalibMainWindow(QMainWindow):
         self.lbl_real_c = self.verify_tab.lbl_real_c
         self.spin_ver_offset = self.verify_tab.spin_ver_offset
         self.btn_ver_move = self.verify_tab.btn_ver_move
+        self.btn_go_home = self.verify_tab.btn_go_home
+        self.spin_safe_x = self.verify_tab.spin_safe_x
+        self.spin_safe_y = self.verify_tab.spin_safe_y
+        self.spin_safe_z = self.verify_tab.spin_safe_z
+        self.spin_safe_a = self.verify_tab.spin_safe_a
+        self.spin_safe_b = self.verify_tab.spin_safe_b
+        self.spin_safe_c = self.verify_tab.spin_safe_c
+        self.btn_move_safe = self.verify_tab.btn_move_safe
+        self.slider_speed = self.verify_tab.slider_speed
+        self.slider_movl_speed = self.verify_tab.slider_movl_speed
+        self.spin_tool_num = self.verify_tab.spin_tool_num
+        self.slider_acc = self.verify_tab.slider_acc
+        self.slider_dec = self.verify_tab.slider_dec
         self.progress_bar = self.verify_tab.progress_bar
         self.txt_verify_log = self.verify_tab.txt_verify_log
 
@@ -248,6 +257,10 @@ class CalibMainWindow(QMainWindow):
                 
                 self.conn_group.setTitle("Robot: Connected")
                 self.conn_group.setStyleSheet("QGroupBox::title { color: #4CAF50; font-weight: bold; }")
+
+                # Sync speed setting from UI to robot
+                self.change_robot_speed(self.slider_speed.value())
+                self.change_robot_tool_number(self.spin_tool_num.value())
  
                 # 读取当前机械臂的物理姿态填充到 UI 面板
                 self.read_robot_pose()
@@ -1069,20 +1082,67 @@ class CalibMainWindow(QMainWindow):
             move_mode = "MOVL"
 
         if not self.robot.is_reachable(target_pose, move_mode):
-            msg = f"Item #{current_item['id']} Pt #{self.executor.exec_waypoint_index + 1} target pose is kinematics-unreachable ({move_mode})."
-            QMessageBox.warning(self, "Unreachable", msg)
-            self.txt_verify_log.append(f"  [!] Unreachable: {msg}")
-            self.stop_verify_execution()
-            return
+            self.txt_verify_log.append(f"  [*] Target pose unreachable ({move_mode}), trying to adjust roll to find a reachable pose...")
+            adjusted_pose = self.try_adjust_unreachable_pose(target_pose, pose_info, move_mode)
+            if adjusted_pose is not None:
+                target_pose = adjusted_pose
+                a = target_pose.a
+                b = target_pose.b
+                c = target_pose.c
+            else:
+                msg = f"Item #{current_item['id']} Pt #{self.executor.exec_waypoint_index + 1} target pose is kinematics-unreachable ({move_mode}) even after roll adjustment."
+                QMessageBox.warning(self, "Unreachable", msg)
+                self.txt_verify_log.append(f"  [!] Unreachable: {msg}")
+                self.stop_verify_execution()
+                return
 
-        self.txt_verify_log.append(f"[*] Moving ({move_mode}) to Item #{current_item['id']} Pt #{self.executor.exec_waypoint_index + 1}: X={p_dest[0]:.1f}, Y={p_dest[1]:.1f}, Z={p_dest[2]:.1f}, A={a:.4f}, B={b:.4f}, C={c:.4f}")
+        acc = float(self.slider_acc.value())
+        dec = float(self.slider_dec.value())
+        tool_num = int(self.spin_tool_num.value())
+
         if move_mode == "MOVJ":
-            self.robot.move_j(target_pose, wait=False)
+            self.txt_verify_log.append(f"[*] Moving ({move_mode}) to Item #{current_item['id']} Pt #{self.executor.exec_waypoint_index + 1}: X={p_dest[0]:.1f}, Y={p_dest[1]:.1f}, Z={p_dest[2]:.1f}, A={a:.4f}, B={b:.4f}, C={c:.4f} (Acc: {acc:.0f}%, Dec: {dec:.0f}%, Tool: {tool_num})")
+            self.robot.move_j(target_pose, acc=acc, dec=dec, tool_num=tool_num, wait=False)
         else:
-            self.robot.move_l(target_pose, wait=False)
+            movl_speed = float(self.slider_movl_speed.value())
+            self.txt_verify_log.append(f"[*] Moving ({move_mode}) to Item #{current_item['id']} Pt #{self.executor.exec_waypoint_index + 1}: X={p_dest[0]:.1f}, Y={p_dest[1]:.1f}, Z={p_dest[2]:.1f}, A={a:.4f}, B={b:.4f}, C={c:.4f} (Speed: {movl_speed:.1f} mm/s, Acc: {acc:.0f}%, Dec: {dec:.0f}%, Tool: {tool_num})")
+            self.robot.move_l(target_pose, velocity=movl_speed, acc=acc, dec=dec, tool_num=tool_num, wait=False)
         self.executor.last_move_cmd_time = time.time()
 
         self.executor.exec_waypoint_index += 1
+
+    def try_adjust_unreachable_pose(self, target_pose, pose_info, move_mode):
+        """
+        当目标位姿在运行中不可达时，尝试通过调整工具绕 Z 轴的滚转角（Roll）来寻找一个可达的姿态。
+        在保持 Z 轴（即喷涂法线方向）完全对齐的前提下，在 [-45°, 45°] 范围内以 5° 为步长搜索。
+        """
+        if "n_base" not in pose_info:
+            return None
+
+        n_base = pose_info["n_base"]
+        p_dest = np.array([target_pose.x, target_pose.y, target_pose.z])
+
+        opt_cfg = self.calib_data.get("metadata", {}).get("optimization_config", {})
+        order = opt_cfg.get("axis_order", "ZYX")
+        s_vec = opt_cfg.get("sign_vector", [1, 1, 1])
+
+        # 优先搜索接近 0 的小旋转偏置
+        search_angles_deg = []
+        for angle in range(5, 46, 5):
+            search_angles_deg.append(float(angle))
+            search_angles_deg.append(float(-angle))
+
+        for deg in search_angles_deg:
+            roll_rad = np.radians(deg)
+            a_new, b_new, c_new = calculate_tool_orientation_with_roll(n_base, roll_rad, order, s_vec)
+            candidate_pose = RobotPose(p_dest[0], p_dest[1], p_dest[2], a_new, b_new, c_new)
+            
+            if self.robot.is_reachable(candidate_pose, move_mode):
+                self.txt_verify_log.append(f"  [+] Found reachable pose by rotating roll {deg}° around tool Z-axis.")
+                return candidate_pose
+
+        return None
+
 
     def handle_verify_click(self, pos):
         """
@@ -1260,27 +1320,87 @@ class CalibMainWindow(QMainWindow):
         
         self.execute_next_verify_step()
 
+    def move_to_safe_pose(self):
+        if not self.robot_connected or not self.robot:
+            QMessageBox.warning(self, "Warning", "Robot is not connected. Connect the robot first.")
+            return
+
+        x = self.spin_safe_x.value()
+        y = self.spin_safe_y.value()
+        z = self.spin_safe_z.value()
+        a = np.radians(self.spin_safe_a.value())
+        b = np.radians(self.spin_safe_b.value())
+        c = np.radians(self.spin_safe_c.value())
+
+        target_pose = RobotPose(x, y, z, a, b, c)
+
+        planner_cfg = self.config.get("vision", {}).get("planner", {})
+        lim = planner_cfg.get("workspace_limits", {})
+        if lim:
+            if not (lim.get("x", [-9999, 9999])[0] <= x <= lim.get("x", [-9999, 9999])[1]):
+                QMessageBox.warning(self, "Out of Workspace", f"Safe Pose Target X ({x}) exceeds safety limits.")
+                return
+            if not (lim.get("y", [-9999, 9999])[0] <= y <= lim.get("y", [-9999, 9999])[1]):
+                QMessageBox.warning(self, "Out of Workspace", f"Safe Pose Target Y ({y}) exceeds safety limits.")
+                return
+            if not (lim.get("z", [-9999, 9999])[0] <= z <= lim.get("z", [-9999, 9999])[1]):
+                QMessageBox.warning(self, "Out of Workspace", f"Safe Pose Target Z ({z}) exceeds safety limits.")
+                return
+
+        if not self.robot.is_reachable(target_pose, "MOVJ"):
+            QMessageBox.warning(self, "Unreachable", "The target safe pose is kinematics-unreachable (MOVJ).")
+            return
+
+        acc = float(self.slider_acc.value())
+        dec = float(self.slider_dec.value())
+        tool_num = int(self.spin_tool_num.value())
+
+        self.txt_verify_log.append(f"[*] Moving robot to safe position: X:{x:.2f} Y:{y:.2f} Z:{z:.2f} A:{self.spin_safe_a.value():.2f} B:{self.spin_safe_b.value():.2f} C:{self.spin_safe_c.value():.2f} (Acc: {acc:.0f}%, Dec: {dec:.0f}%, Tool: {tool_num})")
+        self.robot.move_j(target_pose, acc=acc, dec=dec, tool_num=tool_num)
+        self.read_robot_pose()
+
+        actual_pose = self.robot.get_current_pose()
+        if actual_pose is not None:
+            self.txt_verify_log.append(f"[OK] Reached safe position: X:{actual_pose.x:.2f} Y:{actual_pose.y:.2f} Z:{actual_pose.z:.2f} A:{np.degrees(actual_pose.a):.2f} B:{np.degrees(actual_pose.b):.2f} C:{np.degrees(actual_pose.c):.2f}")
+        else:
+            self.txt_verify_log.append("[-] Failed to query actual reached pose.")
+
+    def change_robot_tool_number(self, tool_num):
+        if not self.robot_connected or not self.robot:
+            return
+        try:
+            self.robot.set_tool_number(tool_num)
+            self.txt_verify_log.append(f"[*] Set robot tool number to {tool_num}")
+        except Exception as e:
+            self.txt_verify_log.append(f"[-] Failed to set robot tool number: {e}")
+
+    def change_robot_speed(self, speed_val):
+        if not self.robot_connected or not self.robot:
+            return
+        try:
+            self.robot.set_global_speed(speed_val)
+            self.txt_verify_log.append(f"[*] Set robot global speed to {speed_val}%")
+        except Exception as e:
+            self.txt_verify_log.append(f"[-] Failed to set robot global speed: {e}")
+
+    def robot_go_home(self):
+        if not self.robot_connected or not self.robot:
+            QMessageBox.warning(self, "Warning", "Robot is not connected. Connect the robot first.")
+            return
+
+        try:
+            self.txt_verify_log.append("[*] Moving robot to home position...")
+            ret = self.robot.go_home()
+            if ret == 0:
+                self.txt_verify_log.append("[OK] Go Home command sent successfully.")
+            else:
+                self.txt_verify_log.append(f"[-] Go Home command failed with code: {ret}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to move to home position: {e}")
+
     def closeEvent(self, event):
         self.disconnect_robot()
         if self.cam:
             try: self.cam.stop()
             except: pass
         event.accept()
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        # Calculate scale factor relative to baseline window size 1200x750
-        scale_x = self.width() / 1200.0
-        scale_y = self.height() / 750.0
-        scale = min(scale_x, scale_y)
-        
-        # Determine new font size
-        new_size = max(8, int(self.default_font_size * scale))
-        font = self.font()
-        font.setPointSize(new_size)
-        self.setFont(font)
-        
-        # Apply font size recursively to tabs and layout contents
-        self.tabs.setFont(font)
-        self.calibrate_tab.setFont(font)
-        self.verify_tab.setFont(font)

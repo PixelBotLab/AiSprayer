@@ -337,6 +337,44 @@ class InexbotDriver:
             logger.warning(f"[startup] print_system_info failed: {e}")
         return True
 
+    def set_global_speed(self, speed: int) -> bool:
+        """
+        设置全局速度百分比，范围 (0, 100]
+        """
+        if self.fd < 0:
+            logger.warning("[set_global_speed] Robot is not connected")
+            return False
+        
+        speed = max(1, min(100, int(speed)))
+        with self._sdk_lock:
+            ret = nrc.set_speed(self.fd, speed)
+        if ret == nrc.SUCCESS:
+            self.global_speed = speed
+            logger.info("Set global speed to %d%%", speed)
+            return True
+        else:
+            logger.error("Failed to set global speed to %d%%, code: %d", speed, ret)
+            return False
+
+    def set_tool_number(self, tool_num: int) -> bool:
+        """
+        设置当前激活的工具编号。
+        """
+        if self.fd < 0:
+            logger.warning("[set_tool_number] Robot is not connected")
+            return False
+        
+        tool_num = max(0, int(tool_num))
+        with self._sdk_lock:
+            ret = nrc.set_tool_hand_number(self.fd, tool_num)
+        if ret == nrc.SUCCESS:
+            self.tool_num = tool_num
+            logger.info("Set tool number to %d", tool_num)
+            return True
+        else:
+            logger.error("Failed to set tool number to %d, code: %d", tool_num, ret)
+            return False
+
     def shutdown(self) -> None:
         """
         关闭机器人连接，断开控制器。

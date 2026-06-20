@@ -2,7 +2,8 @@
 from datetime import datetime
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QPushButton, QGroupBox, QFormLayout, QGridLayout, 
-                             QDoubleSpinBox, QProgressBar, QTextEdit, QScrollArea, QFrame)
+                             QDoubleSpinBox, QProgressBar, QTextEdit, QScrollArea, QFrame,
+                             QSpinBox, QSlider)
 from PyQt5.QtCore import Qt
 from aisprayer.tools.calib.calib_ui.ui.widgets import ClickableLabel
 
@@ -86,35 +87,187 @@ class VerifyTab(QWidget):
         pose_grid.addWidget(self.lbl_real_c, 1, 2)
         right_layout.addWidget(pose_group)
 
+        # Safe Position Group
+        safe_group = QGroupBox("Safe Position")
+        safe_grid = QGridLayout(safe_group)
+        
+        self.spin_safe_x = QDoubleSpinBox()
+        self.spin_safe_x.setRange(-2500.0, 2500.0)
+        self.spin_safe_x.setValue(500.0)
+        self.spin_safe_x.setSuffix(" mm")
+        self.spin_safe_x.setDecimals(2)
+        
+        self.spin_safe_y = QDoubleSpinBox()
+        self.spin_safe_y.setRange(-2500.0, 2500.0)
+        self.spin_safe_y.setValue(-300.0)
+        self.spin_safe_y.setSuffix(" mm")
+        self.spin_safe_y.setDecimals(2)
+        
+        self.spin_safe_z = QDoubleSpinBox()
+        self.spin_safe_z.setRange(-2500.0, 2500.0)
+        self.spin_safe_z.setValue(1250.0)
+        self.spin_safe_z.setSuffix(" mm")
+        self.spin_safe_z.setDecimals(2)
+        
+        self.spin_safe_a = QDoubleSpinBox()
+        self.spin_safe_a.setRange(-360.0, 360.0)
+        self.spin_safe_a.setValue(180.0)
+        self.spin_safe_a.setSuffix(" °")
+        self.spin_safe_a.setDecimals(2)
+        
+        self.spin_safe_b = QDoubleSpinBox()
+        self.spin_safe_b.setRange(-360.0, 360.0)
+        self.spin_safe_b.setValue(80.0)
+        self.spin_safe_b.setSuffix(" °")
+        self.spin_safe_b.setDecimals(2)
+        
+        self.spin_safe_c = QDoubleSpinBox()
+        self.spin_safe_c.setRange(-360.0, 360.0)
+        self.spin_safe_c.setValue(0.0)
+        self.spin_safe_c.setSuffix(" °")
+        self.spin_safe_c.setDecimals(2)
+        
+        safe_grid.addWidget(QLabel("X:"), 0, 0)
+        safe_grid.addWidget(self.spin_safe_x, 0, 1)
+        safe_grid.addWidget(QLabel("A:"), 0, 2)
+        safe_grid.addWidget(self.spin_safe_a, 0, 3)
+        
+        safe_grid.addWidget(QLabel("Y:"), 1, 0)
+        safe_grid.addWidget(self.spin_safe_y, 1, 1)
+        safe_grid.addWidget(QLabel("B:"), 1, 2)
+        safe_grid.addWidget(self.spin_safe_b, 1, 3)
+        
+        safe_grid.addWidget(QLabel("Z:"), 2, 0)
+        safe_grid.addWidget(self.spin_safe_z, 2, 1)
+        safe_grid.addWidget(QLabel("C:"), 2, 2)
+        safe_grid.addWidget(self.spin_safe_c, 2, 3)
+        
+        # Predefined positions movement row inside Safe Position group box
+        move_btn_layout = QHBoxLayout()
+        self.btn_go_home = QPushButton("Go Home (Move to Home)")
+        self.btn_go_home.clicked.connect(self.main_win.robot_go_home)
+        
+        self.btn_move_safe = QPushButton("Go to Safe Position")
+        self.btn_move_safe.clicked.connect(self.main_win.move_to_safe_pose)
+        
+        move_btn_layout.addWidget(self.btn_go_home)
+        move_btn_layout.addWidget(self.btn_move_safe)
+        safe_grid.addLayout(move_btn_layout, 3, 0, 1, 4)
+        
+        right_layout.addWidget(safe_group)
+
         # Action panel
         action_group = QGroupBox("Verification Move")
         action_vbox = QVBoxLayout(action_group)
         
-        offset_layout = QHBoxLayout()
-        offset_layout.addWidget(QLabel("Normal Offset (mm):"))
+        # Offset and Tool Number row
+        config_row_layout = QHBoxLayout()
+        config_row_layout.addWidget(QLabel("Normal Offset:"))
         self.spin_ver_offset = QDoubleSpinBox()
         self.spin_ver_offset.setRange(-500.0, 500.0)
-        self.spin_ver_offset.setValue(100.0)
-        offset_layout.addWidget(self.spin_ver_offset)
-        action_vbox.addLayout(offset_layout)
+        self.spin_ver_offset.setValue(200.0)
+        self.spin_ver_offset.setSuffix(" mm")
+        config_row_layout.addWidget(self.spin_ver_offset)
+        
+        config_row_layout.addSpacing(15)
+        
+        config_row_layout.addWidget(QLabel("Tool Number:"))
+        self.spin_tool_num = QSpinBox()
+        self.spin_tool_num.setRange(0, 15)
+        self.spin_tool_num.setValue(0)
+        self.spin_tool_num.valueChanged.connect(self.main_win.change_robot_tool_number)
+        config_row_layout.addWidget(self.spin_tool_num)
+        action_vbox.addLayout(config_row_layout)
 
-        # Draw segment/point controls
-        self.btn_finish_line = QPushButton("Finish Current Segment / Point")
-        self.btn_finish_line.clicked.connect(lambda: self.main_win.finish_current_draw_item(warn_if_empty=True))
-        action_vbox.addWidget(self.btn_finish_line)
+        # Sliders grid layout for aligned starting points
+        sliders_grid = QGridLayout()
+        sliders_grid.setColumnStretch(0, 0)
+        sliders_grid.setColumnStretch(1, 1)
+        sliders_grid.setColumnStretch(2, 0)
+        
+        # Row 0: Global Speed
+        lbl_global_speed = QLabel("Global Speed:")
+        self.slider_speed = QSlider(Qt.Horizontal)
+        self.slider_speed.setRange(1, 100)
+        self.slider_speed.setValue(80)
+        self.lbl_speed_val = QLabel("80 %")
+        self.lbl_speed_val.setFixedWidth(65)
+        
+        def on_speed_changed(val):
+            self.lbl_speed_val.setText(f"{val} %")
+            self.main_win.change_robot_speed(val)
+            
+        self.slider_speed.valueChanged.connect(on_speed_changed)
+        
+        sliders_grid.addWidget(lbl_global_speed, 0, 0)
+        sliders_grid.addWidget(self.slider_speed, 0, 1)
+        sliders_grid.addWidget(self.lbl_speed_val, 0, 2)
+        
+        # Row 1: MOVL Speed
+        lbl_movl_speed = QLabel("MOVL Speed:")
+        self.slider_movl_speed = QSlider(Qt.Horizontal)
+        self.slider_movl_speed.setRange(10, 1000)
+        self.slider_movl_speed.setValue(500)
+        self.lbl_movl_speed_val = QLabel("500 mm/s")
+        self.lbl_movl_speed_val.setFixedWidth(65)
+        self.slider_movl_speed.valueChanged.connect(lambda val: self.lbl_movl_speed_val.setText(f"{val} mm/s"))
+        
+        sliders_grid.addWidget(lbl_movl_speed, 1, 0)
+        sliders_grid.addWidget(self.slider_movl_speed, 1, 1)
+        sliders_grid.addWidget(self.lbl_movl_speed_val, 1, 2)
+        
+        # Row 2: Acc
+        lbl_acc = QLabel("Acc:")
+        self.slider_acc = QSlider(Qt.Horizontal)
+        self.slider_acc.setRange(1, 100)
+        self.slider_acc.setValue(80)
+        self.lbl_acc_val = QLabel("80 %")
+        self.lbl_acc_val.setFixedWidth(65)
+        self.slider_acc.valueChanged.connect(lambda val: self.lbl_acc_val.setText(f"{val} %"))
+        
+        sliders_grid.addWidget(lbl_acc, 2, 0)
+        sliders_grid.addWidget(self.slider_acc, 2, 1)
+        sliders_grid.addWidget(self.lbl_acc_val, 2, 2)
+        
+        # Row 3: Dec
+        lbl_dec = QLabel("Dec:")
+        self.slider_dec = QSlider(Qt.Horizontal)
+        self.slider_dec.setRange(1, 100)
+        self.slider_dec.setValue(80)
+        self.lbl_dec_val = QLabel("80 %")
+        self.lbl_dec_val.setFixedWidth(65)
+        self.slider_dec.valueChanged.connect(lambda val: self.lbl_dec_val.setText(f"{val} %"))
+        
+        sliders_grid.addWidget(lbl_dec, 3, 0)
+        sliders_grid.addWidget(self.slider_dec, 3, 1)
+        sliders_grid.addWidget(self.lbl_dec_val, 3, 2)
+        
+        action_vbox.addLayout(sliders_grid)
 
+        # Draw segment/point & verification route execution controls (2x2 Grid)
+        verify_buttons_grid = QGridLayout()
+        
         self.btn_clear_last = QPushButton("Clear Last Point")
         self.btn_clear_last.clicked.connect(self.main_win.clear_last_point)
-        action_vbox.addWidget(self.btn_clear_last)
-
+        
         self.btn_clear_items = QPushButton("Clear All Draw Items")
         self.btn_clear_items.clicked.connect(self.main_win.clear_draw_items)
-        action_vbox.addWidget(self.btn_clear_items)
-
+        
+        self.btn_finish_line = QPushButton("Finish Current Segment / Point")
+        self.btn_finish_line.clicked.connect(lambda: self.main_win.finish_current_draw_item(warn_if_empty=True))
+        
         self.btn_ver_move = QPushButton("Move Robot (Execute Route)")
         self.btn_ver_move.setEnabled(False)
         self.btn_ver_move.clicked.connect(self.main_win.move_to_verification_pose)
-        action_vbox.addWidget(self.btn_ver_move)
+        
+        verify_buttons_grid.addWidget(self.btn_clear_last, 0, 0)
+        verify_buttons_grid.addWidget(self.btn_clear_items, 0, 1)
+        verify_buttons_grid.addWidget(self.btn_finish_line, 1, 0)
+        verify_buttons_grid.addWidget(self.btn_ver_move, 1, 1)
+        
+        action_vbox.addLayout(verify_buttons_grid)
+
+
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 100)
