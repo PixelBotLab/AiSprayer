@@ -43,17 +43,17 @@ if [ "$CURRENT_ENV" != "inexbot" ]; then
     echo "[*] Please run 'conda activate inexbot' first if you see import/library errors."
 fi
 
-# Resolve the exact Python executable from active Conda environment
+# Resolve the exact Python executable from active Conda environment or default path
 PYTHON_EXE="python3"
 if [ -n "$CONDA_PREFIX" ] && [ -f "$CONDA_PREFIX/bin/python" ]; then
     PYTHON_EXE="$CONDA_PREFIX/bin/python"
+elif [ -f "/home/zhanlu/miniconda3/envs/inexbot/bin/python" ]; then
+    PYTHON_EXE="/home/zhanlu/miniconda3/envs/inexbot/bin/python"
 fi
 
 # 3. Locate site-packages directory to gather camera SDK binaries
 SITE_PACKAGES=$($PYTHON_EXE -c "import site; print(site.getsitepackages()[0])")
 echo "[*] site-packages path: $SITE_PACKAGES"
-
-PYINSTALLER_BIN="pyinstaller"
 
 if [ "$LITE_BUILD" = true ]; then
     echo "[*] Lite build mode enabled. Setting up a temporary virtual environment (without MKL)..."
@@ -86,15 +86,15 @@ if [ "$LITE_BUILD" = true ]; then
         echo "[*] Using existing build_venv."
     fi
     
-    PYINSTALLER_BIN="build_venv/bin/pyinstaller"
+    PYTHON_EXE="build_venv/bin/python"
     # Update site packages path to use the one inside build_venv for the camera assets copy
     SITE_PACKAGES=$(find build_venv/lib -maxdepth 2 -name "site-packages" | head -n 1)
 else
-    # 4. Check if pyinstaller is installed in host env
-    if ! command -v pyinstaller &> /dev/null; then
-        echo "[!] PyInstaller is not installed in the current environment."
+    # 4. Check if pyinstaller is installed in the resolved environment
+    if ! $PYTHON_EXE -c "import PyInstaller" &> /dev/null; then
+        echo "[!] PyInstaller is not installed in the resolved environment ($PYTHON_EXE)."
         echo "[*] Attempting to install pyinstaller via pip..."
-        pip install pyinstaller
+        $PYTHON_EXE -m pip install pyinstaller
         echo "[*] PyInstaller installed successfully."
     fi
 fi
@@ -128,7 +128,7 @@ fi
 
 # 6. Run PyInstaller
 echo "[*] Packaging calib_ui..."
-$PYINSTALLER_BIN --onefile \
+$PYTHON_EXE -m PyInstaller --onefile \
     --name=calib_ui \
     --paths=src \
     --add-binary="${NRC_SO_SRC}:${NRC_SO_DEST}" \
