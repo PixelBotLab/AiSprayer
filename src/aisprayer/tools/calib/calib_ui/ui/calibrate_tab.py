@@ -7,7 +7,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QFrame, QMessageBox)
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPixmap
-from aisprayer.tools.calib.calib_ui.ui.widgets import ClickableFrame
+from aisprayer.tools.calib.calib_ui.ui.widgets import ClickableFrame, AspectLabel
 
 class CalibrateTab(QWidget):
     def __init__(self, main_win):
@@ -23,13 +23,13 @@ class CalibrateTab(QWidget):
 
         # Left Column: Camera View
         left_layout = QVBoxLayout()
-        self.cap_video = QLabel()
+        self.cap_video = AspectLabel()
         self.cap_video.setMinimumSize(400, 225)
         self.cap_video.setAlignment(Qt.AlignCenter)
         self.cap_video.setStyleSheet("background-color: #000; border: 2px solid #222;")
         left_layout.addWidget(self.cap_video)
         
-        top_layout.addLayout(left_layout, 10)
+        top_layout.addLayout(left_layout, 2)
 
         # Middle Column: Captured Samples list
         self.samples_group = QGroupBox("Samples")
@@ -50,13 +50,21 @@ class CalibrateTab(QWidget):
         self.samples_scroll.setWidget(self.samples_content)
         middle_vbox.addWidget(self.samples_scroll)
         
-        top_layout.addWidget(self.samples_group, 2)
+        top_layout.addWidget(self.samples_group, 0)
 
-        # Right Column: Controls Splitter
-        right_layout = QVBoxLayout()
+        # Right Column: Scroll Area for Controls
+        self.controls_scroll = QScrollArea()
+        self.controls_scroll.setWidgetResizable(True)
+        self.controls_scroll.setFrameShape(QFrame.NoFrame)
+        self.controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        controls_widget = QWidget()
+        right_layout = QVBoxLayout(controls_widget)
+        right_layout.setContentsMargins(0, 0, 5, 0)
+        right_layout.setSpacing(10)
 
         # 0. Camera Status Group (above Robot Connection)
-        self.cam_group = QGroupBox("Camera Connection: Disconnected")
+        self.cam_group = QGroupBox("Camera: Disconnected")
         self.cam_group.setStyleSheet("QGroupBox::title { color: #f44336; font-weight: bold; }")
         cam_layout = QHBoxLayout(self.cam_group)
         cam_layout.setContentsMargins(5, 5, 5, 5)
@@ -69,7 +77,7 @@ class CalibrateTab(QWidget):
         right_layout.addWidget(self.cam_group)
 
         # 1. Connection Group
-        self.conn_group = QGroupBox("Robot Connection: Disconnected")
+        self.conn_group = QGroupBox("Robot: Disconnected")
         self.conn_group.setStyleSheet("QGroupBox::title { color: #f44336; font-weight: bold; }")
         conn_layout = QHBoxLayout(self.conn_group)
         conn_layout.setContentsMargins(5, 5, 5, 5)
@@ -92,7 +100,7 @@ class CalibrateTab(QWidget):
         right_layout.addWidget(self.conn_group)
 
         # 2. Capture & Calibration Group (Directory & Info)
-        cap_group = QGroupBox("Calibration Directory & Info")
+        cap_group = QGroupBox("Calib Directory")
         cap_vbox = QVBoxLayout(cap_group)
         cap_vbox.setContentsMargins(5, 5, 5, 5)
 
@@ -109,7 +117,7 @@ class CalibrateTab(QWidget):
         right_layout.addWidget(cap_group)
 
         # 3. Jogging & Actions Group
-        jog_group = QGroupBox("Robot Jogging & Actions")
+        jog_group = QGroupBox("Robot Jogging")
         jog_group.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         jog_layout = QVBoxLayout(jog_group)
         jog_layout.setContentsMargins(5, 5, 5, 5)
@@ -132,10 +140,13 @@ class CalibrateTab(QWidget):
                 spin.setSuffix(" °")
             
             spin.setDecimals(2)
+            spin.setFixedWidth(90)
             self.jog_inputs[axis] = spin
 
             btn_minus = QPushButton("-")
             btn_plus = QPushButton("+")
+            btn_minus.setFixedWidth(35)
+            btn_plus.setFixedWidth(35)
             
             btn_minus.clicked.connect(lambda checked, a=axis: self.main_win.jog_step(a, -1))
             btn_plus.clicked.connect(lambda checked, a=axis: self.main_win.jog_step(a, 1))
@@ -151,12 +162,14 @@ class CalibrateTab(QWidget):
         self.spin_step_xyz = QDoubleSpinBox()
         self.spin_step_xyz.setRange(0.1, 200.0)
         self.spin_step_xyz.setValue(10.0)
+        self.spin_step_xyz.setFixedWidth(65)
         step_layout.addWidget(self.spin_step_xyz)
 
         step_layout.addWidget(QLabel("Step ABC (°):"))
         self.spin_step_abc = QDoubleSpinBox()
         self.spin_step_abc.setRange(0.1, 45.0)
         self.spin_step_abc.setValue(5.0)
+        self.spin_step_abc.setFixedWidth(65)
         step_layout.addWidget(self.spin_step_abc)
         
         jog_grid.addLayout(step_layout, 6, 0, 1, 4)
@@ -186,7 +199,9 @@ class CalibrateTab(QWidget):
         
         right_layout.addWidget(jog_group)
         
-        top_layout.addLayout(right_layout, 3)
+        self.controls_scroll.setWidget(controls_widget)
+        
+        top_layout.addWidget(self.controls_scroll, 1)
         main_layout.addLayout(top_layout, 0)
 
         # Bottom Area: txt_calib_log (spanning entire width)

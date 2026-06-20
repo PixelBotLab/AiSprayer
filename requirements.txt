@@ -1,27 +1,13 @@
 # ==========================================
-# AiSprayer 项目依赖配置文件 (基于 inexbot 环境)
+# AiSprayer 依赖（兼容旧命令 pip install -r requirements.txt）
 # ==========================================
+#
+# 推荐按场景使用拆分文件（见 README「环境」）：
+#   视觉开发 (Python 3.10+) : requirements-common.txt + requirements-vision.txt
+#   机械臂联调 (Python 3.8) : requirements-common.txt + requirements-robot.txt
+#
+# 本文件等价于「common + vision」，适用于 Python 3.10+ 单机全功能开发。
+# Python 3.8 请勿直接安装本文件（scipy/torch 等无合适 wheel）。
 
-# --- 核心数据处理与系统依赖 ---
-numpy==1.24.3
-opencv-python==4.13.0.92
-PyYAML==6.0.3
-scipy==1.10.1
-requests==2.32.3
-matplotlib==3.7.5
-
-# --- 3D 点云处理 (关键) ---
-open3d==0.19.0
-
-# --- 深度学习推理 (关键点与分割) ---
-torch==2.4.1
-torchvision==0.19.1
-ultralytics==8.4.46
-safetensors==0.5.3
-
-# --- 硬件驱动 (相机) ---
-pyrealsense2==2.55.1.6486
-
-# --- 其他可能需要的依赖 ---
-# pillow
-# tqdm
+-r requirements-common.txt
+-r requirements-vision.txt

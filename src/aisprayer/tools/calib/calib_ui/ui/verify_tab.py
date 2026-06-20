@@ -2,7 +2,7 @@
 from datetime import datetime
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QPushButton, QGroupBox, QFormLayout, QGridLayout, 
-                             QDoubleSpinBox, QProgressBar, QTextEdit)
+                             QDoubleSpinBox, QProgressBar, QTextEdit, QScrollArea, QFrame)
 from PyQt5.QtCore import Qt
 from aisprayer.tools.calib.calib_ui.ui.widgets import ClickableLabel
 
@@ -26,13 +26,21 @@ class VerifyTab(QWidget):
         self.ver_video.mouse_moved.connect(self.main_win.handle_verify_hover)
         left_layout.addWidget(self.ver_video)
         
-        top_layout.addLayout(left_layout, 3)
+        top_layout.addLayout(left_layout, 2)
 
-        # Right Column: Config & Action
-        right_layout = QVBoxLayout()
+        # Right Column: Scroll Area for Controls
+        self.controls_scroll = QScrollArea()
+        self.controls_scroll.setWidgetResizable(True)
+        self.controls_scroll.setFrameShape(QFrame.NoFrame)
+        self.controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        
+        controls_widget = QWidget()
+        right_layout = QVBoxLayout(controls_widget)
+        right_layout.setContentsMargins(0, 0, 5, 0)
+        right_layout.setSpacing(10)
 
         # Load file
-        file_group = QGroupBox("Load Calibration Matrix")
+        file_group = QGroupBox("Load Calibration")
         file_vbox = QVBoxLayout(file_group)
         self.lbl_calib_path = QLabel("Calibration File: Not Loaded")
         self.lbl_calib_path.setWordWrap(True)
@@ -44,7 +52,7 @@ class VerifyTab(QWidget):
         right_layout.addWidget(file_group)
 
         # Coordinates info
-        coord_group = QGroupBox("Target Coords & Surface Normal")
+        coord_group = QGroupBox("Target Coordinates")
         coord_form = QFormLayout(coord_group)
         self.lbl_coord_cam = QLabel("N/A")
         self.lbl_coord_base = QLabel("N/A")
@@ -56,7 +64,7 @@ class VerifyTab(QWidget):
         right_layout.addWidget(coord_group)
 
         # Real-time Robot Pose Group
-        pose_group = QGroupBox("Real-time Robot Pose")
+        pose_group = QGroupBox("Robot Pose")
         pose_grid = QGridLayout(pose_group)
         self.lbl_real_x = QLabel("X: N/A")
         self.lbl_real_y = QLabel("Y: N/A")
@@ -79,11 +87,11 @@ class VerifyTab(QWidget):
         right_layout.addWidget(pose_group)
 
         # Action panel
-        action_group = QGroupBox("Verification Movement")
+        action_group = QGroupBox("Verification Move")
         action_vbox = QVBoxLayout(action_group)
         
         offset_layout = QHBoxLayout()
-        offset_layout.addWidget(QLabel("Offset (Z-axis normal distance, mm):"))
+        offset_layout.addWidget(QLabel("Normal Offset (mm):"))
         self.spin_ver_offset = QDoubleSpinBox()
         self.spin_ver_offset.setRange(-500.0, 500.0)
         self.spin_ver_offset.setValue(100.0)
@@ -117,7 +125,10 @@ class VerifyTab(QWidget):
         
         right_layout.addWidget(action_group)
         right_layout.addStretch()
-        top_layout.addLayout(right_layout, 1)
+        
+        self.controls_scroll.setWidget(controls_widget)
+        
+        top_layout.addWidget(self.controls_scroll, 1)
         main_layout.addLayout(top_layout, 0)
 
         # Bottom Area: txt_verify_log (spanning entire width)

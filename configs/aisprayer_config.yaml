@@ -7,6 +7,7 @@ hardware:
   robot:
     ip: "192.168.2.14"          # 机械臂控制器 IP
     port: 6001                  # 机械臂控制端口 (默认 6001)
+    global_speed_percent: 50    # 示教/远程/运行全局速度百分比 (startup 时 set_speed)
 
 # 2. 视觉与规划层配置 (Vision & Planning)
 vision:
@@ -41,6 +42,9 @@ calib:
     cols: 9                     # 标定板列数 (节点数)
     square_size_mm: 15.0        # 棋盘格格子大小 (mm)
   
+  # RootPoint 安全点位数据库路径
+  root_points_path: "data/calib/root_points.yaml"
+
   # 自动对准参数 (Aligner)
   align:
     safe_pose: [460.0, 125.0, 1077.0, -3.141, 0.0, 0.0]  # 安全过渡点 [X, Y, Z, A, B, C]

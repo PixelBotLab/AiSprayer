@@ -1,4 +1,6 @@
+import inexbot_demo_sdk  # noqa: F401 — 将官方 Python SDK 加入 sys.path
 import nrc_interface as aa
+import os
 import sys
 from PyQt5.QtWidgets import QApplication
 from Widget import WidgetApp  # 从 test1.py 导入 WidgetApp 类
@@ -71,8 +73,9 @@ def test(socketFd):
 
 
 def test_7000(socketFd):
-    print('开启测试7000.....')
-    socket_7000 =  aa.connect_robot("192.168.1.13", "7000")
+    # 官方示例曾用控制器 7000 端口走实时/伺服数据；此处改为与主程序相同的 6001，避免多网段或未开放 7000 时连不上。
+    print("开启伺服测试（端口 6001，原示例为 7000）.....")
+    socket_7000 = aa.connect_robot("192.168.2.14", "6001")
     servomovepara = aa.ServoMovePara()
     pos = aa.VectorVectorDouble()
     time = aa.VectorDouble()
@@ -301,7 +304,10 @@ def error_or_warning_message_handler(msg_type,msg,msg_code):
     print(f"Cte Msg:Type: {msg_type}, Code: {msg_code}, Msg: {msg}")
 
 if __name__ == "__main__":
-    socketFd = connect("192.168.1.13", "6001")
+    robot_ip = os.environ.get("INEXBOT_IP", "192.168.2.14").strip()
+    robot_port = os.environ.get("INEXBOT_PORT", "6001").strip()
+    print("连接目标:", robot_ip, robot_port)
+    socketFd = connect(robot_ip, robot_port)
     if socketFd > 0:
         # aa.recv_message(socketFd, python_callback)
         # time.sleep(1)
@@ -321,6 +327,6 @@ if __name__ == "__main__":
 
         # 进入应用程序主循环
         sys.exit(app.exec_())
-        
-    #等待线程结束
-    thread.join()
+    else:
+        print("连接失败：socketFd =", socketFd, "（请检查控制器 IP/端口与网络）")
+        sys.exit(1)

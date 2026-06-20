@@ -40,7 +40,7 @@ class CalibMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("AI Sprayer - Robotic Calibration GUI")
-        self.resize(1400, 900)
+        self.resize(1200, 750)
 
         # Load global configuration
         self.config_path = os.path.join(PROJECT_ROOT, "configs/aisprayer_config.yaml")
@@ -136,6 +136,7 @@ class CalibMainWindow(QMainWindow):
     def init_ui(self):
         self.tabs = QTabWidget()
         self.setCentralWidget(self.tabs)
+        self.statusBar().showMessage("Ready")
 
         self.calibrate_tab = CalibrateTab(self)
         self.verify_tab = VerifyTab(self)
@@ -186,7 +187,7 @@ class CalibMainWindow(QMainWindow):
           3. 若当前未选择数据保存路径，则默认创建一个以当前日期命名的标定样本目录。
         """
         try:
-            self.cam_group.setTitle("Camera Connection: Connecting...")
+            self.cam_group.setTitle("Camera: Connecting...")
             self.cam_group.setStyleSheet("QGroupBox::title { color: #FF9800; font-weight: bold; }")
             QApplication.processEvents()
 
@@ -195,7 +196,7 @@ class CalibMainWindow(QMainWindow):
             self.cam.start()
             self.cam_connected = True
             
-            self.cam_group.setTitle("Camera Connection: Connected")
+            self.cam_group.setTitle("Camera: Connected")
             self.cam_group.setStyleSheet("QGroupBox::title { color: #4CAF50; font-weight: bold; }")
             
             if not self.save_dir:
@@ -203,7 +204,7 @@ class CalibMainWindow(QMainWindow):
                 self.setup_save_dir(os.path.join(self.default_output_dir, f"calib_{ts}"))
         except Exception as e:
             self.cam_connected = False
-            self.cam_group.setTitle("Camera Connection: Offline")
+            self.cam_group.setTitle("Camera: Offline")
             self.cam_group.setStyleSheet("QGroupBox::title { color: #f44336; font-weight: bold; }")
             print(f"Camera start failed: {e}")
 
@@ -232,28 +233,28 @@ class CalibMainWindow(QMainWindow):
                     QMessageBox.critical(self, "Error", "Robot startup failed! Make sure controller IP/Port are correct.")
                     self.robot = None
                     self.executor.robot = None
-                    self.conn_group.setTitle("Robot Connection: Disconnected")
+                    self.conn_group.setTitle("Robot: Disconnected")
                     self.conn_group.setStyleSheet("QGroupBox::title { color: #f44336; font-weight: bold; }")
                     return
-
+ 
                 self.robot_connected = True
                 self.btn_connect_robot.setText("Disconnect Robot")
                 self.btn_connect_robot.setStyleSheet("background-color: #f44336; color: white; font-weight: bold;")
                 
-                self.conn_group.setTitle("Robot Connection: Connected")
+                self.conn_group.setTitle("Robot: Connected")
                 self.conn_group.setStyleSheet("QGroupBox::title { color: #4CAF50; font-weight: bold; }")
-
+ 
                 # 读取当前机械臂的物理姿态填充到 UI 面板
                 self.read_robot_pose()
             except Exception as e:
                 self.robot = None
                 self.executor.robot = None
-                self.conn_group.setTitle("Robot Connection: Disconnected")
+                self.conn_group.setTitle("Robot: Disconnected")
                 self.conn_group.setStyleSheet("QGroupBox::title { color: #f44336; font-weight: bold; }")
                 QMessageBox.critical(self, "Error", f"Failed to connect to robot: {e}")
         else:
             self.disconnect_robot()
-
+ 
     def disconnect_robot(self):
         """断开机器人连接，重置内部状态及 UI 文字样式。"""
         if self.robot:
@@ -264,7 +265,7 @@ class CalibMainWindow(QMainWindow):
         self.robot_connected = False
         self.btn_connect_robot.setText("Connect Robot")
         self.btn_connect_robot.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold;")
-        self.conn_group.setTitle("Robot Connection: Disconnected")
+        self.conn_group.setTitle("Robot: Disconnected")
         self.conn_group.setStyleSheet("QGroupBox::title { color: #f44336; font-weight: bold; }")
 
     def select_save_dir(self):
@@ -505,6 +506,12 @@ class CalibMainWindow(QMainWindow):
 
     def render_image_to_label(self, frame, label):
         h, w, c = frame.shape
+        if hasattr(label, 'aspect_ratio'):
+            new_ratio = h / w
+            if abs(label.aspect_ratio - new_ratio) > 0.001:
+                label.aspect_ratio = new_ratio
+                label.updateGeometry()
+        
         bytes_per_line = 3 * w
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         qimg = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)

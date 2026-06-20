@@ -6,7 +6,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
-            "args": ["--ip", "127.0.0.1"],
+            "args": ["--ip", "192.168.2.14"],
             "console": "integratedTerminal",
             "python": "/home/zhanlu/miniconda3/envs/inexbot/bin/python",
             "cwd": "${workspaceFolder}"
