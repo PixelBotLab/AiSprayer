@@ -1,0 +1,44 @@
+<?xml version="1.0" ?>
+<!-- =================================================================================== -->
+<!-- 本文件由 AiSprayer 自动生成，基于 m530_r6.urdf.xml 提供机器人语义信息 (SRDF)        -->
+<!-- 用于 Tesseract / MoveIt 运动规划                                                    -->
+<!-- =================================================================================== -->
+<robot name="m530_r6">
+    <!-- GROUPS: 代表一个用于规划的关节与连杆集合 -->
+    <group name="manipulator">
+        <!-- 通过 base_link 到 spray_nozzle_link 的运动学链来定义规划组 -->
+        <chain base_link="base_link" tip_link="spray_nozzle_link" />
+    </group>
+
+    <!-- GROUP STATES: 定义一些预设的关键姿态 -->
+    <group_state name="home" group="manipulator">
+        <joint name="joint_1" value="0" />
+        <joint name="joint_2" value="0" />
+        <joint name="joint_3" value="0" />
+        <joint name="joint_4" value="0" />
+        <joint name="joint_5" value="0" />
+        <joint name="joint_6" value="0" />
+    </group_state>
+
+    <!-- DISABLE COLLISIONS: 定义允许碰撞矩阵 (ACM) 
+         关闭物理上相连（相邻）或永远不可能发生碰撞的连杆间的干涉检查，极大地提升规划速度 -->
+    
+    <!-- 相邻连杆 (Adjacent) -->
+    <disable_collisions link1="base_link" link2="link_1" reason="Adjacent" />
+    <disable_collisions link1="link_1" link2="link_2" reason="Adjacent" />
+    <disable_collisions link1="link_2" link2="link_3" reason="Adjacent" />
+    <disable_collisions link1="link_3" link2="link_4" reason="Adjacent" />
+    <disable_collisions link1="link_4" link2="link_5" reason="Adjacent" />
+    <disable_collisions link1="link_5" link2="link_6" reason="Adjacent" />
+    <disable_collisions link1="link_6" link2="spray_nozzle_link" reason="Adjacent" />
+    
+    <!-- 其他必定不会碰撞的连杆组合 (Never) -->
+    <disable_collisions link1="base_link" link2="link_2" reason="Never" />
+    <disable_collisions link1="link_1" link2="link_3" reason="Never" />
+    <disable_collisions link1="link_3" link2="link_5" reason="Never" />
+    <disable_collisions link1="link_3" link2="link_6" reason="Never" />
+    <disable_collisions link1="link_3" link2="spray_nozzle_link" reason="Never" />
+    <disable_collisions link1="link_4" link2="link_6" reason="Never" />
+    <disable_collisions link1="link_4" link2="spray_nozzle_link" reason="Never" />
+    <disable_collisions link1="link_5" link2="spray_nozzle_link" reason="Never" />
+</robot>

@@ -1,5 +1,5 @@
 <?xml version="1.0"?>
-<robot name="m530_r6">
+<robot name="m530_r6" tesseract:make_convex="true" xmlns:tesseract="https://tesseract-robotics.com">
 
   <!-- ================= 材质定义 ================= -->
   <material name="silver"><color rgba="0.7 0.7 0.7 1"/></material>
@@ -10,9 +10,16 @@
 
   <!-- World 固定点 -->
   <link name="base_link">
+    <inertial>
+      <mass value="10.0"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.1" ixy="0" ixz="0" iyy="0.1" iyz="0" izz="0.1"/>
+    </inertial>
     <visual>
       <geometry><cylinder length="0.05" radius="0.2"/></geometry>
-      <material name="black"/>
+      <material name="black">
+        <color rgba="0.1 0.1 0.1 1"/>
+      </material>
     </visual>
   </link>
 
@@ -26,11 +33,18 @@
   </joint>
 
   <link name="link_1">
+    <inertial>
+      <mass value="1.0"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/>
+    </inertial>
     <visual>
       <!-- L1 杆长 = 218mm -->
       <origin xyz="0 0 0.109" rpy="0 0 0"/>
       <geometry><cylinder length="0.218" radius="0.12"/></geometry>
-      <material name="silver"/>
+      <material name="silver">
+        <color rgba="0.7 0.7 0.7 1"/>
+      </material>
     </visual>
   </link>
 
@@ -45,11 +59,18 @@
   </joint>
 
   <link name="link_2">
+    <inertial>
+      <mass value="1.0"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/>
+    </inertial>
     <visual>
       <!-- L2 杆长 = 965mm -->
       <origin xyz="0 0 0.4825" rpy="0 0 0"/>
       <geometry><box size="0.12 0.12 0.965"/></geometry>
-      <material name="blue"/>
+      <material name="blue">
+        <color rgba="0.0 0.5 0.8 1"/>
+      </material>
     </visual>
   </link>
 
@@ -64,10 +85,17 @@
   </joint>
 
   <link name="link_3">
+    <inertial>
+      <mass value="1.0"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/>
+    </inertial>
     <visual>
       <origin xyz="0.06 0 0" rpy="0 1.5708 0"/>
       <geometry><cylinder length="0.12" radius="0.08"/></geometry>
-      <material name="silver"/>
+      <material name="silver">
+        <color rgba="0.7 0.7 0.7 1"/>
+      </material>
     </visual>
   </link>
 
@@ -82,11 +110,18 @@
   </joint>
 
   <link name="link_4">
+    <inertial>
+      <mass value="1.0"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/>
+    </inertial>
     <visual>
       <!-- L4 杆长 = 871mm -->
       <origin xyz="0.4355 0 0" rpy="0 1.5708 0"/>
       <geometry><box size="0.08 0.08 0.871"/></geometry>
-      <material name="blue"/>
+      <material name="blue">
+        <color rgba="0.0 0.5 0.8 1"/>
+      </material>
     </visual>
   </link>
 
@@ -101,9 +136,16 @@
   </joint>
 
   <link name="link_5">
+    <inertial>
+      <mass value="1.0"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/>
+    </inertial>
     <visual>
       <geometry><sphere radius="0.06"/></geometry>
-      <material name="silver"/>
+      <material name="silver">
+        <color rgba="0.7 0.7 0.7 1"/>
+      </material>
     </visual>
   </link>
 
@@ -118,10 +160,17 @@
   </joint>
 
   <link name="link_6">
+    <inertial>
+      <mass value="1.0"/>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <inertia ixx="0.01" ixy="0" ixz="0" iyy="0.01" iyz="0" izz="0.01"/>
+    </inertial>
     <visual>
       <origin xyz="0.005 0 0" rpy="0 1.5708 0"/>
       <geometry><cylinder length="0.01" radius="0.04"/></geometry>
-      <material name="black"/>
+      <material name="black">
+        <color rgba="0.1 0.1 0.1 1"/>
+      </material>
     </visual>
   </link>
 

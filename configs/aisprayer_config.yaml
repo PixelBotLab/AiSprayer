@@ -8,6 +8,10 @@ hardware:
     ip: "192.168.2.14"          # 机械臂控制器 IP
     port: 6001                  # 机械臂控制端口 (默认 6001)
     global_speed_percent: 50    # 示教/远程/运行全局速度百分比 (startup 时 set_speed)
+    robot_urdf: "configs/m530_r6.urdf.xml"
+    robot_srdf: "configs/m530_r6.srdf.xml"
+    robot_tcp: "spray_nozzle_link"
+    robot_group: "manipulator"
 
 # 2. 视觉与规划层配置 (Vision & Planning)
 vision:

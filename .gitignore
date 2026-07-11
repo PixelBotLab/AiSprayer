@@ -47,6 +47,8 @@ models/*
 
 *.cache/
 
+deps/
+tmp/
 # 模型文件 (可选：如果模型很大不建议进 Git，可以保持忽略)
 # models/*.pt
 # models/*.onnx
