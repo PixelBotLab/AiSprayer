@@ -179,7 +179,9 @@
   <joint name="tool_joint" type="fixed">
     <parent link="link_6"/>
     <child link="spray_nozzle_link"/>
-    <origin xyz="0.05 0 0" rpy="0 0 0"/> <!-- 假设喷头伸出 5cm -->
+    <!-- 沿 X 轴伸出 5cm。同时绕 Y 轴旋转 -90 度 (-1.5707963)，
+         使得 spray_nozzle_link 的 Z 轴朝向正前方 (喷涂方向) -->
+    <origin xyz="0.05 0 0" rpy="0 -1.57079632679 0"/>
   </joint>
 
 </robot>

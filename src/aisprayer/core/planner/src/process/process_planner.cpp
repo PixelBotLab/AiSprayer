@@ -611,6 +611,7 @@ void appendPaths(const noether::ToolPaths& paths,
       {
         Eigen::Isometry3d tcp_pose = surface_pose;
         tcp_pose.translate(Eigen::Vector3d(0.0, 0.0, standoff));
+        // 标准约定：生成的目标位姿 Z 轴垂直指向喷涂表面。
         tcp_pose.rotate(Eigen::AngleAxisd(kPi, Eigen::Vector3d::UnitX()));
         stroke.surface_poses.push_back(surface_pose);
         stroke.tcp_poses.push_back(tcp_pose);
