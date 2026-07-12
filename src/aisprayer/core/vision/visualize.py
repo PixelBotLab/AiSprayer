@@ -219,12 +219,22 @@ def main():
     def load_path(json_path):
         with open(json_path, "r") as f:
             data = json.load(f)
-        positions = np.array([[p["x"], p["y"], p["z"]] for p in data])
-        quats = np.array([[p["qx"], p["qy"], p["qz"], p["qw"]] for p in data])
+        
+        # 兼容新的包含 mesh_info 的字典结构
+        if isinstance(data, dict) and "surface_points" in data:
+            points_data = data["surface_points"]
+            mesh_info = data.get("mesh_info", [])
+            for info in mesh_info:
+                print(f"[PCA Info] mesh: {info.get('mesh_source')}, PCA angle: {info.get('pca_angle_deg'):.2f} deg")
+        else:
+            points_data = data
+            
+        positions = np.array([[p["x"], p["y"], p["z"]] for p in points_data])
+        quats = np.array([[p["qx"], p["qy"], p["qz"], p["qw"]] for p in points_data])
         n = len(positions)
         is_freespace = np.zeros(max(0, n - 1), dtype=bool)
         for i in range(n - 1):
-            if data[i + 1].get("segment_start", False):
+            if points_data[i + 1].get("segment_start", False):
                 is_freespace[i] = True
         return positions, quats, is_freespace
 
@@ -342,49 +352,129 @@ def main():
     def build_freespace_connections(positions, is_freespace, radius=0.0005, color=(0.8, 0.8, 0.0), dash_len=0.005, gap_len=0.005):
         freespace_mesh = o3d.geometry.TriangleMesh()
         n = positions.shape[0]
+        
+        current_group = []
         for i in range(n - 1):
             if is_freespace[i]:
-                A = positions[i]
-                B = positions[i + 1]
-                dist = np.linalg.norm(B - A)
-                if dist < 1e-6:
-                    continue
-                direction = (B - A) / dist
+                current_group.append(i)
+            
+            # If group ends (next is not freespace, or it's the last segment)
+            if (not is_freespace[i] or i == n - 2) and len(current_group) > 0:
+                pts = [positions[current_group[0]]]
+                for idx in current_group:
+                    pts.append(positions[idx + 1])
+                pts = np.array(pts)
                 
-                # 绘制虚线段
-                current_dist = 0.0
-                while current_dist < dist:
-                    start_pt = A + direction * current_dist
-                    end_dist = min(current_dist + dash_len, dist)
-                    end_pt = A + direction * end_dist
-                    cyl = create_cylinder_between_points(start_pt, end_pt, radius=radius, color=color)
-                    if cyl is not None:
-                        freespace_mesh += cyl
-                    current_dist += dash_len + gap_len
-                    
-                # 在末尾添加一个箭头表示方向
-                end_pt = B
-                arrow_len = min(0.015, dist / 2.0)
-                if arrow_len > 0.001:
-                    arrow = o3d.geometry.TriangleMesh.create_arrow(
-                        cylinder_radius=radius*1.5, cone_radius=radius*3.5,
-                        cylinder_height=arrow_len*0.5, cone_height=arrow_len*0.5, resolution=8
-                    )
-                    arrow.paint_uniform_color(color)
-                    z_axis = np.array([0.0, 0.0, 1.0])
-                    rotation_axis = np.cross(z_axis, direction)
-                    norm_rotation_axis = np.linalg.norm(rotation_axis)
-                    if norm_rotation_axis > 1e-6:
-                        rotation_axis /= norm_rotation_axis
-                        angle = np.arccos(np.clip(np.dot(z_axis, direction), -1.0, 1.0))
-                        rot = R.from_rotvec(rotation_axis * angle).as_matrix()
-                    else:
-                        rot = -np.eye(3) if np.dot(z_axis, direction) < 0 else np.eye(3)
-                    arrow.rotate(rot, center=[0, 0, 0])
-                    arrow.translate(end_pt - direction * arrow_len)
-                    freespace_mesh += arrow
+                dists = np.linalg.norm(pts[1:] - pts[:-1], axis=1)
+                cum_dists = np.insert(np.cumsum(dists), 0, 0.0)
+                total_dist = cum_dists[-1]
+                
+                if total_dist > 1e-6:
+                    # 沿着曲线均匀绘制虚线
+                    current_dist = 0.0
+                    while current_dist < total_dist:
+                        start_dist = current_dist
+                        end_dist = min(current_dist + dash_len, total_dist)
+                        
+                        start_pt = np.array([np.interp(start_dist, cum_dists, pts[:, 0]), 
+                                             np.interp(start_dist, cum_dists, pts[:, 1]), 
+                                             np.interp(start_dist, cum_dists, pts[:, 2])])
+                        end_pt = np.array([np.interp(end_dist, cum_dists, pts[:, 0]), 
+                                           np.interp(end_dist, cum_dists, pts[:, 1]), 
+                                           np.interp(end_dist, cum_dists, pts[:, 2])])
+                        
+                        cyl = create_cylinder_between_points(start_pt, end_pt, radius=radius, color=color)
+                        if cyl is not None:
+                            freespace_mesh += cyl
+                            
+                        current_dist += dash_len + gap_len
+                        
+                    # 在整段 FREESPACE 曲线的末尾添加一个箭头
+                    direction = pts[-1] - pts[-2]
+                    last_dist = np.linalg.norm(direction)
+                    if last_dist > 1e-6:
+                        direction /= last_dist
+                        arrow_len = min(0.015, total_dist / 2.0)
+                        if arrow_len > 0.001:
+                            arrow = o3d.geometry.TriangleMesh.create_arrow(
+                                cylinder_radius=radius*1.5, cone_radius=radius*3.5,
+                                cylinder_height=arrow_len*0.5, cone_height=arrow_len*0.5, resolution=8
+                            )
+                            arrow.paint_uniform_color(color)
+                            z_axis = np.array([0.0, 0.0, 1.0])
+                            rotation_axis = np.cross(z_axis, direction)
+                            norm_rotation_axis = np.linalg.norm(rotation_axis)
+                            if norm_rotation_axis > 1e-6:
+                                rotation_axis /= norm_rotation_axis
+                                angle = np.arccos(np.clip(np.dot(z_axis, direction), -1.0, 1.0))
+                                rot = R.from_rotvec(rotation_axis * angle).as_matrix()
+                            else:
+                                rot = -np.eye(3) if np.dot(z_axis, direction) < 0 else np.eye(3)
+                            arrow.rotate(rot, center=[0, 0, 0])
+                            arrow.translate(pts[-1] - direction * arrow_len)
+                            freespace_mesh += arrow
+                            
+                current_group = []
                     
         return freespace_mesh
+
+    def create_text_mesh(text, position, scale=0.015, color=[1.0, 1.0, 1.0]):
+        segments = [
+            [(0, 2), (1, 2)], # 0: top
+            [(1, 2), (1, 1)], # 1: top right
+            [(1, 1), (1, 0)], # 2: bot right
+            [(0, 0), (1, 0)], # 3: bot
+            [(0, 0), (0, 1)], # 4: bot left
+            [(0, 1), (0, 2)], # 5: top left
+            [(0, 1), (1, 1)], # 6: middle
+        ]
+        digits = {
+            '0': [0, 1, 2, 3, 4, 5],
+            '1': [1, 2],
+            '2': [0, 1, 6, 4, 3],
+            '3': [0, 1, 6, 2, 3],
+            '4': [5, 6, 1, 2],
+            '5': [0, 5, 6, 2, 3],
+            '6': [0, 5, 4, 3, 2, 6],
+            '7': [0, 1, 2],
+            '8': [0, 1, 2, 3, 4, 5, 6],
+            '9': [0, 1, 2, 3, 5, 6],
+        }
+        
+        mesh = o3d.geometry.TriangleMesh()
+        offset_x = 0
+        for char in text:
+            if char in digits:
+                for seg_idx in digits[char]:
+                    p1, p2 = segments[seg_idx]
+                    A = position + np.array([offset_x + p1[0]*scale, p1[1]*scale, 0])
+                    B = position + np.array([offset_x + p2[0]*scale, p2[1]*scale, 0])
+                    cyl = create_cylinder_between_points(A, B, radius=scale*0.08, color=color)
+                    if cyl:
+                        mesh += cyl
+            offset_x += scale * 1.5
+        return mesh
+
+    def build_stroke_numbers(positions, is_freespace, scale=0.008, color=(1.0, 0.0, 0.0)):
+        mesh = o3d.geometry.TriangleMesh()
+        n = positions.shape[0]
+        stroke_idx = 1
+        
+        for i in range(n - 1):
+            if not is_freespace[i]:
+                is_start = False
+                if i == 0:
+                    is_start = True
+                elif is_freespace[i - 1]:
+                    is_start = True
+                
+                if is_start:
+                    pos = positions[i] + np.array([0.005, 0.005, 0.005])
+                    num_mesh = create_text_mesh(str(stroke_idx), pos, scale=scale, color=color)
+                    mesh += num_mesh
+                    stroke_idx += 1
+                    
+        return mesh
 
     def build_waypoint_cloud(positions, color=(0.05, 0.05, 0.05)):
         pcd = o3d.geometry.PointCloud()
@@ -426,8 +516,10 @@ def main():
                 end_marker.paint_uniform_color([1.0, 0.0, 1.0])
                 
                 arrows = build_waypoint_arrows(positions, quats, stride=5, size=0.03)
+                stroke_numbers = build_stroke_numbers(positions, p_freespace, scale=0.008, color=(1.0, 0.0, 0.0))
+                path_freespace = build_freespace_connections(positions, p_freespace, radius=0.0008, color=(0.8, 0.8, 0.0))
                 
-                geometries.extend([path_tube, waypoint_pcd, start_marker, end_marker, arrows])
+                geometries.extend([path_tube, waypoint_pcd, start_marker, end_marker, arrows, stroke_numbers, path_freespace])
         except Exception as e:
             print(f"[!] 渲染表面路径失败: {e}")
         
@@ -453,7 +545,9 @@ def main():
                 traj_end_marker.translate(t_pos[-1])
                 traj_end_marker.paint_uniform_color([1.0, 0.0, 1.0])
                 
-                geometries.extend([traj_tube, traj_freespace, traj_pcd, traj_arrows, traj_start_marker, traj_end_marker])
+                traj_stroke_numbers = build_stroke_numbers(t_pos, t_freespace, scale=0.008, color=(1.0, 0.0, 0.0))
+                
+                geometries.extend([traj_tube, traj_freespace, traj_pcd, traj_arrows, traj_start_marker, traj_end_marker, traj_stroke_numbers])
         except Exception as e:
             print(f"[!] 渲染 TCP 轨迹失败: {e}")
 
