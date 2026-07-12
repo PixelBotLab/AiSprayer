@@ -43,57 +43,27 @@ set(CMAKE_BUILD_WITH_INSTALL_RPATH TRUE)
 set(CMAKE_INSTALL_RPATH "${CMAKE_SOURCE_DIR}/deps/install/lib")
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
 
-add_library(planner_common STATIC
-    src/common/types.cpp
-    src/common/thread_pool.cpp
+add_executable(aisprayer_planner
+    src/main.cpp
+    src/process_planner.cpp
+    src/motion_planner.cpp
+    src/planner_utils.cpp
+    src/thread_pool.cpp
 )
 
-target_include_directories(planner_common PUBLIC
-    ${CMAKE_SOURCE_DIR}/include
-)
-
-target_link_libraries(planner_common PUBLIC
-    Threads::Threads
-)
-
-add_library(planner_process STATIC
-    src/process/process_planner.cpp
-)
-
-target_include_directories(planner_process PUBLIC
+target_include_directories(aisprayer_planner PUBLIC
     ${CMAKE_SOURCE_DIR}/include
     ${PCL_INCLUDE_DIRS}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-target_link_libraries(planner_process PUBLIC
-    planner_common
+target_link_libraries(aisprayer_planner PUBLIC
+    Threads::Threads
     nlohmann_json::nlohmann_json
     yaml-cpp::yaml-cpp
+    cxxopts::cxxopts
     noether::noether_tpp
     ${PCL_LIBRARIES}
-)
-
-add_executable(process_planner
-    src/process/process_main.cpp
-)
-
-target_link_libraries(process_planner PRIVATE
-    planner_process
-    cxxopts::cxxopts
-)
-
-add_library(planner_motion STATIC
-    src/motion/motion_planner.cpp
-)
-
-target_include_directories(planner_motion PUBLIC
-    ${CMAKE_SOURCE_DIR}/include
-)
-
-target_link_libraries(planner_motion PUBLIC
-    planner_common
-    nlohmann_json::nlohmann_json
-    yaml-cpp::yaml-cpp
     tesseract::environment
     tesseract::common
     tesseract::command_language
@@ -101,13 +71,4 @@ target_link_libraries(planner_motion PUBLIC
     tesseract::motion_planners_trajopt
     qpOASES
     osqp
-)
-
-add_executable(motion_planner
-    src/motion/motion_main.cpp
-)
-
-target_link_libraries(motion_planner PRIVATE
-    planner_motion
-    cxxopts::cxxopts
 )

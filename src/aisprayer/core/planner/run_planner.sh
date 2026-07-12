@@ -37,18 +37,17 @@ if [ "$#" -eq 0 ]; then
         MESH_PATH="$PROJECT_ROOT/data/1.obj"
     fi
 
-    "$BUILD_DIR/process_planner" \
+    "$BUILD_DIR/aisprayer_planner" \
         --mesh "$MESH_PATH" \
-        --outdir "$TEST_DIR" \
+        --output "$TEST_DIR/trajectory.json" \
         --distance 0.20 \
         --row-spacing 0.04 \
         --point-spacing 0.01 \
-        --calibration "$PROJECT_ROOT/configs/calib/calibration_result.yaml"
-    "$BUILD_DIR/motion_planner" \
-        --input "$TEST_DIR/tcp_targets.json" \
+        --calibration "$PROJECT_ROOT/configs/calib/calibration_result.yaml" \
+        --motion \
+        --orientation-tolerance 15 \
         --urdf "$PROJECT_ROOT/configs/m530_r6.urdf.xml" \
         --srdf "$PROJECT_ROOT/configs/m530_r6.srdf.xml" \
-        --outdir "$TEST_DIR" \
         --group manipulator \
         --tcp spray_nozzle_link \
         --threads 6 
@@ -60,12 +59,13 @@ fi
 
 if [ "$1" = "--process-only" ]; then
     shift
-    exec "$BUILD_DIR/process_planner" "$@"
+    exec "$BUILD_DIR/aisprayer_planner" "$@"
 fi
 
 if [ "$1" = "--motion-only" ]; then
     shift
-    exec "$BUILD_DIR/motion_planner" "$@"
+    echo "Warning: aisprayer_planner requires --mesh for motion planning now since they are unified." >&2
+    exec "$BUILD_DIR/aisprayer_planner" --motion "$@"
 fi
 
 # Preserve the previous unified CLI for supported full-pipeline arguments while
@@ -115,8 +115,7 @@ while [ "$#" -gt 0 ]; do
         --outdir|-o)
             require_value "$@"
             OUTDIR="$2"
-            PROCESS_ARGS+=("--outdir" "$2")
-            MOTION_ARGS+=("--outdir" "$2")
+            PROCESS_ARGS+=("--output" "$2/trajectory.json")
             shift 2
             ;;
         --urdf|--srdf|--group|--tcp|--base-link|--position-tolerance|--orientation-tolerance|--angle-unit|--threads)
@@ -154,9 +153,8 @@ if [ "$RASTER_ORDER_SPECIFIED" = false ]; then
     PROCESS_ARGS+=("--calibration" "$PROJECT_ROOT/configs/calib/calibration_result.yaml")
 fi
 
-"$BUILD_DIR/process_planner" "${PROCESS_ARGS[@]}"
 if [ "$PROCESS_ONLY" = true ]; then
-    exit 0
+    exec "$BUILD_DIR/aisprayer_planner" "${PROCESS_ARGS[@]}"
 fi
 
-exec "$BUILD_DIR/motion_planner" --input "$OUTDIR/tcp_targets.json" "${MOTION_ARGS[@]}"
+exec "$BUILD_DIR/aisprayer_planner" "${PROCESS_ARGS[@]}" --motion "${MOTION_ARGS[@]}"

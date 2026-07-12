@@ -210,8 +210,11 @@ def main():
     # =========================================================
     # 追加显示路径和 TCP 轨迹（内置渲染逻辑）
     # =========================================================
-    path_json = os.path.join(output_dir, "path_surface.json")
-    traj_json = os.path.join(output_dir, "trajectory.json")
+    unified_json = os.path.join(output_dir, "trajectory.json")
+    if not os.path.exists(unified_json):
+        unified_json = os.path.join(output_dir, "process_targets.json")
+    if not os.path.exists(unified_json):
+        unified_json = os.path.join(output_dir, "path_surface.json")
     
     import json
     from scipy.spatial.transform import Rotation as R
@@ -220,8 +223,25 @@ def main():
         with open(json_path, "r") as f:
             data = json.load(f)
         
-        # 兼容新的包含 mesh_info 的字典结构
-        if isinstance(data, dict) and "surface_points" in data:
+        # 兼容新的 process_targets.json 格式 (包含 strokes 和 mesh_info)
+        if isinstance(data, dict) and "strokes" in data:
+            points_data = []
+            mesh_info = data.get("mesh_info", [])
+            for info in mesh_info:
+                print(f"[PCA Info] mesh: {info.get('mesh_source')}, PCA angle: {info.get('pca_angle_correction_deg', info.get('pca_angle_deg', 0)):.2f} deg")
+            for stroke in data["strokes"]:
+                for p in stroke["points"]:
+                    points_data.append({
+                        "x": p.get("surface_x", p["x"]),
+                        "y": p.get("surface_y", p["y"]),
+                        "z": p.get("surface_z", p["z"]),
+                        "qx": p.get("surface_qx", p.get("qx")),
+                        "qy": p.get("surface_qy", p.get("qy")),
+                        "qz": p.get("surface_qz", p.get("qz")),
+                        "qw": p.get("surface_qw", p.get("qw")),
+                        "segment_start": p.get("segment_start", False)
+                    })
+        elif isinstance(data, dict) and "surface_points" in data:
             points_data = data["surface_points"]
             mesh_info = data.get("mesh_info", [])
             for info in mesh_info:
@@ -245,11 +265,18 @@ def main():
         if not data:
             return np.empty((0, 3)), np.empty((0, 4)), np.empty(0, dtype=bool)
 
-        if all(key in data[0] for key in ("x", "y", "z", "qx", "qy", "qz", "qw")):
+        if isinstance(data, list) and all(key in data[0] for key in ("x", "y", "z", "qx", "qy", "qz", "qw")):
             positions = np.array([[p["x"], p["y"], p["z"]] for p in data])
             quats = np.array([[p["qx"], p["qy"], p["qz"], p["qw"]] for p in data])
-        elif "joint_positions" not in data[0]:
-            raise ValueError("轨迹点既不包含 TCP 位姿，也不包含 joint_positions")
+        elif isinstance(data, list) and "joint_positions" not in data[0]:
+            return np.empty((0, 3)), np.empty((0, 4)), np.empty(0, dtype=bool)
+        elif isinstance(data, dict) and "strokes" in data:
+            # 新版格式，联合了 process 和 motion 的信息
+            pass
+        elif isinstance(data, list):
+            pass
+        else:
+            return np.empty((0, 3)), np.empty((0, 4)), np.empty(0, dtype=bool)
         if not urdf_path or not os.path.exists(urdf_path):
             raise ValueError(f"无法找到用于 TCP 正运动学的 URDF: {urdf_path}")
 
@@ -275,7 +302,22 @@ def main():
                 raise ValueError(f"URDF 中未找到 TCP 链接: {tcp_name}")
 
             positions, quats = [], []
-            for point in data:
+            point_list = []
+            if isinstance(data, dict) and "trajectory" in data:
+                point_list = data["trajectory"]
+            elif isinstance(data, dict) and "strokes" in data:
+                for stroke in data["strokes"]:
+                    for point in stroke.get("points", []):
+                        if "joint_positions" in point and point.get("status") == "SUCCESS":
+                            point_list.append(point)
+                for transition in data.get("transitions", []):
+                    for point in transition:
+                        if "joint_positions" in point:
+                            point_list.append(point)
+            else:
+                point_list = data
+
+            for point in point_list:
                 joints = point["joint_positions"]
                 if len(joints) != len(active_joints):
                     raise ValueError(
@@ -298,8 +340,8 @@ def main():
         n = len(positions)
         is_freespace = np.zeros(max(0, n - 1), dtype=bool)
         for i in range(n - 1):
-            p1 = data[i]
-            p2 = data[i + 1]
+            p1 = point_list[i]
+            p2 = point_list[i + 1]
             if p2.get("segment_start", False):
                 is_freespace[i] = True
             elif p1.get("motion_type") == "FREESPACE" or p2.get("motion_type") == "FREESPACE":
@@ -499,11 +541,41 @@ def main():
             arrows += arrow
         return arrows
         
-    if os.path.exists(path_json):
-        print(f"[*] 找到表面路径文件，正在渲染: {path_json}")
+    def load_raw_tcp_targets(json_path):
+        with open(json_path, "r") as f:
+            data = json.load(f)
+        
+        points_data = []
+        if isinstance(data, dict) and "strokes" in data:
+            for stroke in data["strokes"]:
+                for p in stroke["points"]:
+                    points_data.append({
+                        "x": p["x"], "y": p["y"], "z": p["z"],
+                        "qx": p["qx"], "qy": p["qy"], "qz": p["qz"], "qw": p["qw"],
+                        "segment_start": p.get("segment_start", False)
+                    })
+        elif isinstance(data, dict) and "surface_points" in data:
+            points_data = data["tcp_points"] if "tcp_points" in data else data["surface_points"]
+        else:
+            points_data = data
+            
+        positions = np.array([[p["x"], p["y"], p["z"]] for p in points_data])
+        quats = np.array([[p["qx"], p["qy"], p["qz"], p["qw"]] for p in points_data])
+        n = len(positions)
+        is_freespace = np.zeros(max(0, n - 1), dtype=bool)
+        for i in range(n - 1):
+            if points_data[i + 1].get("segment_start", False):
+                is_freespace[i] = True
+        return positions, quats, is_freespace
+
+    if os.path.exists(unified_json):
+        print(f"[*] 找到统一规划数据文件，正在渲染: {unified_json}")
+        
+        # 1. 渲染表面数据 (Surface Data)
         try:
-            positions, quats, p_freespace = load_path(path_json)
+            positions, quats, p_freespace = load_path(unified_json)
             if len(positions) > 0:
+                print(f"  --> 渲染: [Surface Data] 表面投影路径 ({len(positions)} 个点)")
                 path_tube = build_path_tube(positions, p_freespace, radius=0.0015)
                 waypoint_pcd = build_waypoint_cloud(positions)
                 
@@ -522,13 +594,21 @@ def main():
                 geometries.extend([path_tube, waypoint_pcd, start_marker, end_marker, arrows, stroke_numbers, path_freespace])
         except Exception as e:
             print(f"[!] 渲染表面路径失败: {e}")
-        
-    if os.path.exists(traj_json):
-        print(f"[*] 找到 TCP 轨迹文件，正在渲染: {traj_json}")
+            
+        # 2. 渲染 TCP 数据 (Raw TCP or Kinematic TCP)
         try:
+            # 首先尝试加载包含运动学信息的轨迹 (Motion Data)
             t_pos, t_quats, t_freespace = load_tcp_trajectory(
-                traj_json, sprayer_config.urdf_path, "spray_nozzle_link"
+                unified_json, sprayer_config.urdf_path, "spray_nozzle_link"
             )
+            if len(t_pos) > 0:
+                print(f"  --> 渲染: [Motion Data] 基于关节运动学正解的真实 TCP 轨迹与过渡段 ({len(t_pos)} 个点)")
+            else:
+                # 降级：如果不存在 joint_positions，则仅显示基础 TCP 数据
+                t_pos, t_quats, t_freespace = load_raw_tcp_targets(unified_json)
+                if len(t_pos) > 0:
+                    print(f"  --> 渲染: [TCP Data] 原始工艺规划 TCP 目标路径，不包含机器臂过渡段 ({len(t_pos)} 个点)")
+
             if len(t_pos) > 0:
                 traj_tube = build_path_tube(
                     t_pos, t_freespace, radius=0.0011, start_color=(0.0, 0.85, 0.85), end_color=(0.0, 0.35, 0.15)
@@ -549,7 +629,7 @@ def main():
                 
                 geometries.extend([traj_tube, traj_freespace, traj_pcd, traj_arrows, traj_start_marker, traj_end_marker, traj_stroke_numbers])
         except Exception as e:
-            print(f"[!] 渲染 TCP 轨迹失败: {e}")
+            print(f"[!] 渲染 TCP/Motion 轨迹失败: {e}")
 
     print("\n[*] 打开交互式 3D 渲染窗口 (Open3D GUI)...")
     o3d.visualization.draw_geometries(
@@ -574,7 +654,22 @@ def render_robot_trajectory(urdf_path, trajectory_path, tcp_name="spray_nozzle_l
         return
 
     with open(trajectory_path, "r") as f:
-        traj_data = json.load(f)
+        data = json.load(f)
+
+    if isinstance(data, dict) and "trajectory" in data:
+        traj_data = data["trajectory"]
+    elif isinstance(data, dict) and "strokes" in data:
+        traj_data = []
+        for stroke in data["strokes"]:
+            for point in stroke.get("points", []):
+                if "joint_positions" in point and point.get("status") == "SUCCESS":
+                    traj_data.append(point)
+        for transition in data.get("transitions", []):
+            for point in transition:
+                if "joint_positions" in point:
+                    traj_data.append(point)
+    else:
+        traj_data = data
 
     if not traj_data or "joint_positions" not in traj_data[0]:
         print(f"[!] 轨迹 JSON 不包含 joint_positions: {trajectory_path}")
