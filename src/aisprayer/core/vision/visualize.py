@@ -223,6 +223,72 @@ def main():
         quats = np.array([[p["qx"], p["qy"], p["qz"], p["qw"]] for p in data])
         segment_starts = np.array([p.get("segment_start", False) for p in data], dtype=bool)
         return positions, quats, segment_starts
+
+    def load_tcp_trajectory(json_path, urdf_path, tcp_name):
+        """加载旧版 TCP 位姿轨迹，或通过 URDF 对关节轨迹执行正运动学。"""
+        with open(json_path, "r") as f:
+            data = json.load(f)
+        if not data:
+            return np.empty((0, 3)), np.empty((0, 4)), np.empty(0, dtype=bool)
+
+        if all(key in data[0] for key in ("x", "y", "z", "qx", "qy", "qz", "qw")):
+            positions = np.array([[p["x"], p["y"], p["z"]] for p in data])
+            quats = np.array([[p["qx"], p["qy"], p["qz"], p["qw"]] for p in data])
+            segment_starts = np.array([p.get("segment_start", False) for p in data], dtype=bool)
+            return positions, quats, segment_starts
+
+        if "joint_positions" not in data[0]:
+            raise ValueError("轨迹点既不包含 TCP 位姿，也不包含 joint_positions")
+        if not urdf_path or not os.path.exists(urdf_path):
+            raise ValueError(f"无法找到用于 TCP 正运动学的 URDF: {urdf_path}")
+
+        import pybullet as p
+
+        client_id = p.connect(p.DIRECT)
+        try:
+            robot_id = p.loadURDF(urdf_path, useFixedBase=True, physicsClientId=client_id)
+            active_joints = [
+                index
+                for index in range(p.getNumJoints(robot_id, physicsClientId=client_id))
+                if p.getJointInfo(robot_id, index, physicsClientId=client_id)[2] == p.JOINT_REVOLUTE
+            ]
+            tcp_link_index = next(
+                (
+                    index
+                    for index in range(p.getNumJoints(robot_id, physicsClientId=client_id))
+                    if p.getJointInfo(robot_id, index, physicsClientId=client_id)[12].decode("utf-8") == tcp_name
+                ),
+                None,
+            )
+            if tcp_link_index is None:
+                raise ValueError(f"URDF 中未找到 TCP 链接: {tcp_name}")
+
+            positions, quats = [], []
+            for point in data:
+                joints = point["joint_positions"]
+                if len(joints) != len(active_joints):
+                    raise ValueError(
+                        f"关节数不匹配：轨迹为 {len(joints)}，URDF 活动关节为 {len(active_joints)}"
+                    )
+                unit = point.get("angle_unit", "deg")
+                if unit not in ("deg", "rad"):
+                    raise ValueError(f"不支持的关节角单位: {unit}")
+                scale = np.pi / 180.0 if unit == "deg" else 1.0
+                for joint_index, value in zip(active_joints, joints):
+                    p.resetJointState(robot_id, joint_index, value * scale, physicsClientId=client_id)
+                tcp_state = p.getLinkState(
+                    robot_id, tcp_link_index, computeForwardKinematics=True, physicsClientId=client_id
+                )
+                positions.append(tcp_state[4])
+                quats.append(tcp_state[5])
+        finally:
+            p.disconnect(client_id)
+
+        return (
+            np.asarray(positions),
+            np.asarray(quats),
+            np.array([point.get("segment_start", False) for point in data], dtype=bool),
+        )
         
     def create_cylinder_between_points(A, B, radius=0.0015, color=[0, 0, 1]):
         direction = (B - A).astype(np.float64)
@@ -310,7 +376,9 @@ def main():
     if os.path.exists(traj_json):
         print(f"[*] 找到 TCP 轨迹文件，正在渲染: {traj_json}")
         try:
-            t_pos, t_quats, t_starts = load_path(traj_json)
+            t_pos, t_quats, t_starts = load_tcp_trajectory(
+                traj_json, sprayer_config.urdf_path, "spray_nozzle_link"
+            )
             if len(t_pos) > 0:
                 traj_tube = build_path_tube(
                     t_pos, t_starts, radius=0.0011, start_color=(0.0, 0.85, 0.85), end_color=(0.0, 0.35, 0.15)

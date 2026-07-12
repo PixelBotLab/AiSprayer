@@ -10,7 +10,7 @@ BUILD_DIR="$PLANNER_DIR/build"
 DEPS_LIB_DIR="$PLANNER_DIR/deps/install/lib"
 
 echo "======================================"
-echo " Building Trajectory Planner..."
+echo " Building Process and Motion Planners..."
 echo "======================================"
 
 # Create build directory if it doesn't exist
@@ -23,39 +23,128 @@ make -j$(nproc)
 
 echo ""
 echo "======================================"
-echo " Running Trajectory Planner..."
+echo " Running Refactored Planner Pipeline..."
 echo "======================================"
 
 # Set library path for runtime
 export LD_LIBRARY_PATH="$DEPS_LIB_DIR:$LD_LIBRARY_PATH"
 
-# Set default arguments if none are provided
 if [ "$#" -eq 0 ]; then
-    echo "No arguments provided. Running with default test arguments."
-    
-    # Check if the run directory exists to provide a valid test path
     TEST_DIR="$PROJECT_ROOT/data/runs/0/output"
-    MESH_ARGS=""
     if [ -f "$TEST_DIR/1.obj" ] && [ -f "$TEST_DIR/2.obj" ]; then
-        MESH_ARGS="--mesh $TEST_DIR/1.obj,$TEST_DIR/2.obj"
+        MESH_PATH="$TEST_DIR/1.obj,$TEST_DIR/2.obj"
     else
-        # Fallback if specific run output doesn't exist
-        MESH_ARGS="--mesh $PROJECT_ROOT/data/1.obj"
+        MESH_PATH="$PROJECT_ROOT/data/1.obj"
     fi
-    
-    "$BUILD_DIR/planner" \
+
+    "$BUILD_DIR/process_planner" \
+        --mesh "$MESH_PATH" \
+        --outdir "$TEST_DIR" \
+        --distance 0.20 \
+        --row-spacing 0.04 \
+        --point-spacing 0.01
+    "$BUILD_DIR/motion_planner" \
+        --input "$TEST_DIR/tcp_targets.json" \
         --urdf "$PROJECT_ROOT/configs/m530_r6.urdf.xml" \
         --srdf "$PROJECT_ROOT/configs/m530_r6.srdf.xml" \
-        $MESH_ARGS \
         --outdir "$TEST_DIR" \
         --group manipulator \
         --tcp spray_nozzle_link \
-        --distance 0.20 \
-        --row_spacing 0.04 \
-        --point_spacing 0.01 \
-        --kdl-only
-else
-    # Run with user-provided arguments
-    echo "Running with custom arguments: $@"
-    "$BUILD_DIR/planner" "$@"
+        --threads 6
+    exit 0
 fi
+
+if [ "$1" = "--process-only" ]; then
+    shift
+    exec "$BUILD_DIR/process_planner" "$@"
+fi
+
+if [ "$1" = "--motion-only" ]; then
+    shift
+    exec "$BUILD_DIR/motion_planner" "$@"
+fi
+
+# Preserve the previous unified CLI for supported full-pipeline arguments while
+# translating the old underscore spellings to the two new programs.
+PROCESS_ARGS=()
+MOTION_ARGS=()
+OUTDIR=""
+PROCESS_ONLY=false
+
+require_value() {
+    if [ "$#" -lt 2 ]; then
+        echo "Missing value for $1" >&2
+        exit 2
+    fi
+}
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --mesh|-m|--distance|--direction|--image-horizontal|--seam-dedup-distance|--straight-lines)
+            if [ "$1" = "--straight-lines" ]; then
+                PROCESS_ARGS+=("$1")
+                shift
+            else
+                require_value "$@"
+                PROCESS_ARGS+=("$1" "$2")
+                shift 2
+            fi
+            ;;
+        --row_spacing)
+            require_value "$@"
+            PROCESS_ARGS+=("--row-spacing" "$2")
+            shift 2
+            ;;
+        --row-spacing|--point-spacing|--point_spacing|-r|-p)
+            require_value "$@"
+            if [ "$1" = "--point_spacing" ]; then
+                PROCESS_ARGS+=("--point-spacing" "$2")
+            else
+                PROCESS_ARGS+=("$1" "$2")
+            fi
+            shift 2
+            ;;
+        --outdir|-o)
+            require_value "$@"
+            OUTDIR="$2"
+            PROCESS_ARGS+=("--outdir" "$2")
+            MOTION_ARGS+=("--outdir" "$2")
+            shift 2
+            ;;
+        --urdf|--srdf|--group|--tcp|--base-link|--position-tolerance|--angle-unit|--threads)
+            require_value "$@"
+            MOTION_ARGS+=("$1" "$2")
+            shift 2
+            ;;
+        --angle_unit)
+            require_value "$@"
+            MOTION_ARGS+=("--angle-unit" "$2")
+            shift 2
+            ;;
+        --noether-only)
+            PROCESS_ONLY=true
+            shift
+            ;;
+        --kdl-only)
+            echo "--kdl-only is mapped to motion_planner --ik-only with KDL." >&2
+            MOTION_ARGS+=("--ik-only")
+            shift
+            ;;
+        *)
+            echo "Unsupported legacy argument: $1" >&2
+            exit 2
+            ;;
+    esac
+done
+
+if [ -z "$OUTDIR" ]; then
+    echo "Legacy full-pipeline mode requires --outdir." >&2
+    exit 2
+fi
+
+"$BUILD_DIR/process_planner" "${PROCESS_ARGS[@]}"
+if [ "$PROCESS_ONLY" = true ]; then
+    exit 0
+fi
+
+exec "$BUILD_DIR/motion_planner" --input "$OUTDIR/tcp_targets.json" "${MOTION_ARGS[@]}"
