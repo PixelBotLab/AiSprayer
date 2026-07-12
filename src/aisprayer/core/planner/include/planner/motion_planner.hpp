@@ -24,6 +24,7 @@ struct MotionPlannerConfig
   std::string angle_unit{ "deg" };
   std::size_t thread_count{ 6 };
   double position_tolerance{ 0.005 };
+  double orientation_tolerance{ 15.0 };
   bool ik_only{ false };
 
 };

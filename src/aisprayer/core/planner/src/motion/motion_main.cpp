@@ -45,6 +45,9 @@ int main(int argc, char** argv)
         ("position-tolerance",
          "Cartesian position tolerance in metres",
          cxxopts::value<double>()->default_value("0.005"))
+        ("orientation-tolerance",
+         "Cartesian orientation tolerance in degrees",
+         cxxopts::value<double>()->default_value("15.0"))
         ("angle-unit", "Joint output unit: deg or rad", cxxopts::value<std::string>()->default_value("deg"))
         ("threads", "Positive worker count", cxxopts::value<std::string>()->default_value("6"))
         ("ik-only", "Validate TCP targets with KDL and write reachable joint seeds without TrajOpt",
@@ -77,6 +80,7 @@ int main(int argc, char** argv)
     config.tcp_frame = arguments["tcp"].as<std::string>();
     config.base_link = arguments["base-link"].as<std::string>();
     config.position_tolerance = arguments["position-tolerance"].as<double>();
+    config.orientation_tolerance = arguments["orientation-tolerance"].as<double>();
     config.angle_unit = arguments["angle-unit"].as<std::string>();
     config.thread_count = parseThreadCount(arguments["threads"].as<std::string>());
     config.ik_only = arguments["ik-only"].as<bool>();

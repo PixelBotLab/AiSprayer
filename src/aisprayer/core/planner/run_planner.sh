@@ -119,7 +119,7 @@ while [ "$#" -gt 0 ]; do
             MOTION_ARGS+=("--outdir" "$2")
             shift 2
             ;;
-        --urdf|--srdf|--group|--tcp|--base-link|--position-tolerance|--angle-unit|--threads)
+        --urdf|--srdf|--group|--tcp|--base-link|--position-tolerance|--orientation-tolerance|--angle-unit|--threads)
             require_value "$@"
             MOTION_ARGS+=("$1" "$2")
             shift 2

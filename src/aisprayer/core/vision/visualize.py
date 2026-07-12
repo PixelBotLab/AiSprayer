@@ -221,8 +221,12 @@ def main():
             data = json.load(f)
         positions = np.array([[p["x"], p["y"], p["z"]] for p in data])
         quats = np.array([[p["qx"], p["qy"], p["qz"], p["qw"]] for p in data])
-        segment_starts = np.array([p.get("segment_start", False) for p in data], dtype=bool)
-        return positions, quats, segment_starts
+        n = len(positions)
+        is_freespace = np.zeros(max(0, n - 1), dtype=bool)
+        for i in range(n - 1):
+            if data[i + 1].get("segment_start", False):
+                is_freespace[i] = True
+        return positions, quats, is_freespace
 
     def load_tcp_trajectory(json_path, urdf_path, tcp_name):
         """加载旧版 TCP 位姿轨迹，或通过 URDF 对关节轨迹执行正运动学。"""
@@ -234,10 +238,7 @@ def main():
         if all(key in data[0] for key in ("x", "y", "z", "qx", "qy", "qz", "qw")):
             positions = np.array([[p["x"], p["y"], p["z"]] for p in data])
             quats = np.array([[p["qx"], p["qy"], p["qz"], p["qw"]] for p in data])
-            segment_starts = np.array([p.get("segment_start", False) for p in data], dtype=bool)
-            return positions, quats, segment_starts
-
-        if "joint_positions" not in data[0]:
+        elif "joint_positions" not in data[0]:
             raise ValueError("轨迹点既不包含 TCP 位姿，也不包含 joint_positions")
         if not urdf_path or not os.path.exists(urdf_path):
             raise ValueError(f"无法找到用于 TCP 正运动学的 URDF: {urdf_path}")
@@ -284,10 +285,20 @@ def main():
         finally:
             p.disconnect(client_id)
 
+        n = len(positions)
+        is_freespace = np.zeros(max(0, n - 1), dtype=bool)
+        for i in range(n - 1):
+            p1 = data[i]
+            p2 = data[i + 1]
+            if p2.get("segment_start", False):
+                is_freespace[i] = True
+            elif p1.get("motion_type") == "FREESPACE" or p2.get("motion_type") == "FREESPACE":
+                is_freespace[i] = True
+
         return (
             np.asarray(positions),
             np.asarray(quats),
-            np.array([point.get("segment_start", False) for point in data], dtype=bool),
+            is_freespace,
         )
         
     def create_cylinder_between_points(A, B, radius=0.0015, color=[0, 0, 1]):
@@ -312,7 +323,7 @@ def main():
         cylinder.translate(A)
         return cylinder
 
-    def build_path_tube(positions, segment_starts, radius=0.0015, start_color=(0.0, 0.0, 1.0), end_color=(1.0, 0.0, 0.0)):
+    def build_path_tube(positions, is_freespace, radius=0.0015, start_color=(0.0, 0.0, 1.0), end_color=(1.0, 0.0, 0.0)):
         n = positions.shape[0]
         t = np.linspace(0.0, 1.0, n)
         start_color = np.asarray(start_color)
@@ -321,12 +332,59 @@ def main():
         segment_colors = (point_colors[:-1] + point_colors[1:]) / 2.0
         path_mesh = o3d.geometry.TriangleMesh()
         for i in range(n - 1):
-            if segment_starts[i + 1]:
+            if is_freespace[i]:
                 continue
             cyl = create_cylinder_between_points(positions[i], positions[i + 1], radius=radius, color=segment_colors[i])
             if cyl is not None:
                 path_mesh += cyl
         return path_mesh
+
+    def build_freespace_connections(positions, is_freespace, radius=0.0005, color=(0.8, 0.8, 0.0), dash_len=0.005, gap_len=0.005):
+        freespace_mesh = o3d.geometry.TriangleMesh()
+        n = positions.shape[0]
+        for i in range(n - 1):
+            if is_freespace[i]:
+                A = positions[i]
+                B = positions[i + 1]
+                dist = np.linalg.norm(B - A)
+                if dist < 1e-6:
+                    continue
+                direction = (B - A) / dist
+                
+                # 绘制虚线段
+                current_dist = 0.0
+                while current_dist < dist:
+                    start_pt = A + direction * current_dist
+                    end_dist = min(current_dist + dash_len, dist)
+                    end_pt = A + direction * end_dist
+                    cyl = create_cylinder_between_points(start_pt, end_pt, radius=radius, color=color)
+                    if cyl is not None:
+                        freespace_mesh += cyl
+                    current_dist += dash_len + gap_len
+                    
+                # 在末尾添加一个箭头表示方向
+                end_pt = B
+                arrow_len = min(0.015, dist / 2.0)
+                if arrow_len > 0.001:
+                    arrow = o3d.geometry.TriangleMesh.create_arrow(
+                        cylinder_radius=radius*1.5, cone_radius=radius*3.5,
+                        cylinder_height=arrow_len*0.5, cone_height=arrow_len*0.5, resolution=8
+                    )
+                    arrow.paint_uniform_color(color)
+                    z_axis = np.array([0.0, 0.0, 1.0])
+                    rotation_axis = np.cross(z_axis, direction)
+                    norm_rotation_axis = np.linalg.norm(rotation_axis)
+                    if norm_rotation_axis > 1e-6:
+                        rotation_axis /= norm_rotation_axis
+                        angle = np.arccos(np.clip(np.dot(z_axis, direction), -1.0, 1.0))
+                        rot = R.from_rotvec(rotation_axis * angle).as_matrix()
+                    else:
+                        rot = -np.eye(3) if np.dot(z_axis, direction) < 0 else np.eye(3)
+                    arrow.rotate(rot, center=[0, 0, 0])
+                    arrow.translate(end_pt - direction * arrow_len)
+                    freespace_mesh += arrow
+                    
+        return freespace_mesh
 
     def build_waypoint_cloud(positions, color=(0.05, 0.05, 0.05)):
         pcd = o3d.geometry.PointCloud()
@@ -354,9 +412,9 @@ def main():
     if os.path.exists(path_json):
         print(f"[*] 找到表面路径文件，正在渲染: {path_json}")
         try:
-            positions, quats, segment_starts = load_path(path_json)
+            positions, quats, p_freespace = load_path(path_json)
             if len(positions) > 0:
-                path_tube = build_path_tube(positions, segment_starts, radius=0.0015)
+                path_tube = build_path_tube(positions, p_freespace, radius=0.0015)
                 waypoint_pcd = build_waypoint_cloud(positions)
                 
                 start_marker = o3d.geometry.TriangleMesh.create_sphere(radius=0.005)
@@ -376,16 +434,26 @@ def main():
     if os.path.exists(traj_json):
         print(f"[*] 找到 TCP 轨迹文件，正在渲染: {traj_json}")
         try:
-            t_pos, t_quats, t_starts = load_tcp_trajectory(
+            t_pos, t_quats, t_freespace = load_tcp_trajectory(
                 traj_json, sprayer_config.urdf_path, "spray_nozzle_link"
             )
             if len(t_pos) > 0:
                 traj_tube = build_path_tube(
-                    t_pos, t_starts, radius=0.0011, start_color=(0.0, 0.85, 0.85), end_color=(0.0, 0.35, 0.15)
+                    t_pos, t_freespace, radius=0.0011, start_color=(0.0, 0.85, 0.85), end_color=(0.0, 0.35, 0.15)
                 )
+                traj_freespace = build_freespace_connections(t_pos, t_freespace, radius=0.0008, color=(1.0, 0.0, 0.0))
                 traj_pcd = build_waypoint_cloud(t_pos, color=(0.0, 0.75, 0.75))
                 traj_arrows = build_waypoint_arrows(t_pos, t_quats, stride=5, size=0.03, color=(0.0, 1.0, 1.0))
-                geometries.extend([traj_tube, traj_pcd, traj_arrows])
+                
+                traj_start_marker = o3d.geometry.TriangleMesh.create_sphere(radius=0.005)
+                traj_start_marker.translate(t_pos[0])
+                traj_start_marker.paint_uniform_color([0.0, 1.0, 0.0])
+                
+                traj_end_marker = o3d.geometry.TriangleMesh.create_sphere(radius=0.005)
+                traj_end_marker.translate(t_pos[-1])
+                traj_end_marker.paint_uniform_color([1.0, 0.0, 1.0])
+                
+                geometries.extend([traj_tube, traj_freespace, traj_pcd, traj_arrows, traj_start_marker, traj_end_marker])
         except Exception as e:
             print(f"[!] 渲染 TCP 轨迹失败: {e}")
 

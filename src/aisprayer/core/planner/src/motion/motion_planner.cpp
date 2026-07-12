@@ -295,10 +295,10 @@ struct PlanningContext
   move_profile->cartesian_cost_config.use_tolerance_override = true;
   move_profile->cartesian_cost_config.lower_tolerance = Eigen::VectorXd::Zero(6);
   move_profile->cartesian_cost_config.lower_tolerance << -config.position_tolerance, -config.position_tolerance,
-      -config.position_tolerance, -15.0 * M_PI / 180.0, -15.0 * M_PI / 180.0, -M_PI;
+      -config.position_tolerance, -config.orientation_tolerance * M_PI / 180.0, -config.orientation_tolerance * M_PI / 180.0, -M_PI;
   move_profile->cartesian_cost_config.upper_tolerance = Eigen::VectorXd::Zero(6);
   move_profile->cartesian_cost_config.upper_tolerance << config.position_tolerance, config.position_tolerance,
-      config.position_tolerance, 15.0 * M_PI / 180.0, 15.0 * M_PI / 180.0, M_PI;
+      config.position_tolerance, config.orientation_tolerance * M_PI / 180.0, config.orientation_tolerance * M_PI / 180.0, M_PI;
   move_profile->cartesian_cost_config.coeff =
       (Eigen::VectorXd(6) << 5.0, 5.0, 5.0, 5.0, 5.0, 0.0).finished();
 
@@ -653,6 +653,8 @@ void validateConfig(const MotionPlannerConfig& config)
     throw std::runtime_error("--threads exceeds the implementation limit of 256");
   if (config.position_tolerance < 0.0 || !isFinite(config.position_tolerance))
     throw std::runtime_error("--position-tolerance must be finite and non-negative");
+  if (config.orientation_tolerance < 0.0 || !isFinite(config.orientation_tolerance))
+    throw std::runtime_error("--orientation-tolerance must be finite and non-negative");
   if (config.angle_unit != "deg" && config.angle_unit != "rad")
     throw std::runtime_error("--angle-unit must be 'deg' or 'rad'");
 }
