@@ -68,6 +68,7 @@ target_include_directories(planner_process PUBLIC
 target_link_libraries(planner_process PUBLIC
     planner_common
     nlohmann_json::nlohmann_json
+    yaml-cpp::yaml-cpp
     noether::noether_tpp
     ${PCL_LIBRARIES}
 )

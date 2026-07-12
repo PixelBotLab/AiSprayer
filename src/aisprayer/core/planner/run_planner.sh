@@ -42,7 +42,8 @@ if [ "$#" -eq 0 ]; then
         --outdir "$TEST_DIR" \
         --distance 0.20 \
         --row-spacing 0.04 \
-        --point-spacing 0.01
+        --point-spacing 0.01 \
+        --calibration "$PROJECT_ROOT/configs/calib/calibration_result.yaml"
     "$BUILD_DIR/motion_planner" \
         --input "$TEST_DIR/tcp_targets.json" \
         --urdf "$PROJECT_ROOT/configs/m530_r6.urdf.xml" \
@@ -50,9 +51,12 @@ if [ "$#" -eq 0 ]; then
         --outdir "$TEST_DIR" \
         --group manipulator \
         --tcp spray_nozzle_link \
-        --threads 6
+        --threads 6 
     exit 0
 fi
+
+
+# --ik-only
 
 if [ "$1" = "--process-only" ]; then
     shift
@@ -70,6 +74,7 @@ PROCESS_ARGS=()
 MOTION_ARGS=()
 OUTDIR=""
 PROCESS_ONLY=false
+RASTER_ORDER_SPECIFIED=false
 
 require_value() {
     if [ "$#" -lt 2 ]; then
@@ -80,13 +85,16 @@ require_value() {
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
-        --mesh|-m|--distance|--direction|--image-horizontal|--seam-dedup-distance|--straight-lines)
+        --mesh|-m|--distance|--direction|--image-horizontal|--calibration|--seam-dedup-distance|--straight-lines)
             if [ "$1" = "--straight-lines" ]; then
                 PROCESS_ARGS+=("$1")
                 shift
             else
                 require_value "$@"
                 PROCESS_ARGS+=("$1" "$2")
+                if [ "$1" = "--image-horizontal" ] || [ "$1" = "--calibration" ]; then
+                    RASTER_ORDER_SPECIFIED=true
+                fi
                 shift 2
             fi
             ;;
@@ -140,6 +148,10 @@ done
 if [ -z "$OUTDIR" ]; then
     echo "Legacy full-pipeline mode requires --outdir." >&2
     exit 2
+fi
+
+if [ "$RASTER_ORDER_SPECIFIED" = false ]; then
+    PROCESS_ARGS+=("--calibration" "$PROJECT_ROOT/configs/calib/calibration_result.yaml")
 fi
 
 "$BUILD_DIR/process_planner" "${PROCESS_ARGS[@]}"

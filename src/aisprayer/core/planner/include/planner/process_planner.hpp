@@ -21,6 +21,7 @@ struct ProcessPlannerOptions
   bool straight_lines{ false };
   std::string direction;
   std::string image_horizontal;
+  std::string calibration_path;
   double seam_dedup_distance{ -1.0 };
 };
 

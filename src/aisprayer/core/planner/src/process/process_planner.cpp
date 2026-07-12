@@ -14,6 +14,7 @@
 
 #include <Eigen/Geometry>
 #include <nlohmann/json.hpp>
+#include <yaml-cpp/yaml.h>
 
 #include <pcl/PolygonMesh.h>
 #include <pcl/common/io.h>
@@ -102,6 +103,42 @@ Eigen::Vector3d parseVector3d(const std::string& value)
   if (!vector.allFinite() || vector.norm() == 0.0)
     throw std::runtime_error("Direction vector must be finite and non-zero: " + value);
   return vector;
+}
+
+Eigen::Vector3d imageRightAxis(const ProcessPlannerOptions& options)
+{
+  if (!options.image_horizontal.empty())
+    return parseVector3d(options.image_horizontal).normalized();
+
+  if (options.calibration_path.empty())
+    throw std::runtime_error(
+        "A left-to-right raster order requires --image-horizontal or --calibration with T_base_camera");
+
+  YAML::Node calibration;
+  try
+  {
+    calibration = YAML::LoadFile(options.calibration_path);
+  }
+  catch (const YAML::Exception& error)
+  {
+    throw std::runtime_error("Unable to read calibration file " + options.calibration_path + ": " + error.what());
+  }
+
+  const YAML::Node transform = calibration["T_base_camera"];
+  if (!transform.IsSequence() || transform.size() < 3)
+    throw std::runtime_error("Calibration file must contain a 4x4 T_base_camera matrix: " + options.calibration_path);
+
+  Eigen::Vector3d right;
+  for (Eigen::Index row = 0; row < 3; ++row)
+  {
+    if (!transform[row].IsSequence() || transform[row].size() < 3)
+      throw std::runtime_error("Calibration T_base_camera must be a 4x4 matrix: " + options.calibration_path);
+    right[row] = transform[row][0].as<double>();
+  }
+  if (!right.allFinite() || right.norm() <= std::numeric_limits<double>::epsilon())
+    throw std::runtime_error("Calibration T_base_camera has an invalid image-right axis: " + options.calibration_path);
+
+  return right.normalized();
 }
 
 void cleanMesh(pcl::PolygonMesh& mesh)
@@ -308,12 +345,17 @@ json poseJson(const Eigen::Isometry3d& pose)
 // motion_planner, so they are dropped here rather than failing later mid-pipeline.
 constexpr std::size_t kMinTrajOptLinearPoints = 4;
 
+struct PlannedStroke
+{
+  std::size_t mesh_index;
+  std::vector<Eigen::Isometry3d> surface_poses;
+  std::vector<Eigen::Isometry3d> tcp_poses;
+};
+
 void appendPaths(const noether::ToolPaths& paths,
                  std::size_t mesh_index,
                  double standoff,
-                 json& surface_points,
-                 json& tcp_strokes,
-                 std::size_t& next_stroke_index,
+                 std::vector<PlannedStroke>& strokes,
                  std::size_t& skipped_short_strokes)
 {
   constexpr double kPi = 3.14159265358979323846;
@@ -328,24 +370,34 @@ void appendPaths(const noether::ToolPaths& paths,
         continue;
       }
 
-      json tcp_points = json::array();
-      bool segment_start = true;
+      PlannedStroke stroke;
+      stroke.mesh_index = mesh_index;
+      stroke.surface_poses.reserve(segment.size());
+      stroke.tcp_poses.reserve(segment.size());
       for (const Eigen::Isometry3d& surface_pose : segment)
       {
-        json surface_point = poseJson(surface_pose);
-        surface_point["segment_start"] = segment_start;
-        surface_points.push_back(std::move(surface_point));
-
         Eigen::Isometry3d tcp_pose = surface_pose;
         tcp_pose.translate(Eigen::Vector3d(0.0, 0.0, standoff));
         tcp_pose.rotate(Eigen::AngleAxisd(kPi, Eigen::Vector3d::UnitX()));
-        tcp_points.push_back(poseJson(tcp_pose));
-        segment_start = false;
+        stroke.surface_poses.push_back(surface_pose);
+        stroke.tcp_poses.push_back(tcp_pose);
       }
-      tcp_strokes.push_back(
-          { { "mesh_index", mesh_index }, { "stroke_index", next_stroke_index++ }, { "points", std::move(tcp_points) } });
+      strokes.push_back(std::move(stroke));
     }
   }
+}
+
+void orderTcpStrokesLeftToRight(std::vector<PlannedStroke>& strokes, const Eigen::Vector3d& image_right)
+{
+  std::stable_sort(strokes.begin(), strokes.end(), [&image_right](const PlannedStroke& lhs, const PlannedStroke& rhs) {
+    const auto mean_projection = [&image_right](const PlannedStroke& stroke) {
+      Eigen::Vector3d mean = Eigen::Vector3d::Zero();
+      for (const Eigen::Isometry3d& pose : stroke.tcp_poses)
+        mean += pose.translation();
+      return (mean / static_cast<double>(stroke.tcp_poses.size())).dot(image_right);
+    };
+    return mean_projection(lhs) < mean_projection(rhs);
+  });
 }
 
 void writeJson(const std::filesystem::path& path, const json& value)
@@ -375,6 +427,9 @@ void ProcessPlanner::run() const
   if (!std::isfinite(dedup_distance) || dedup_distance < 0.0)
     throw std::runtime_error("--seam-dedup-distance must be finite or negative for the default");
 
+  const Eigen::Vector3d image_right = imageRightAxis(options_);
+  std::cout << "  Image-right axis in robot base: " << image_right.transpose() << '\n';
+
   std::error_code error;
   std::filesystem::create_directories(options_.output_directory, error);
   if (error)
@@ -382,8 +437,8 @@ void ProcessPlanner::run() const
 
   json surface_points = json::array();
   json tcp_strokes = json::array();
-  std::size_t stroke_index = 0;
   std::size_t skipped_short_strokes = 0;
+  std::vector<PlannedStroke> planned_strokes;
   pcl::PointCloud<pcl::PointXYZ>::Ptr covered_surface(new pcl::PointCloud<pcl::PointXYZ>);
   const std::vector<std::string> mesh_paths = splitMeshes(options_.mesh_paths);
 
@@ -428,8 +483,7 @@ void ProcessPlanner::run() const
       straightenRasterSegments(paths);
     paths = noether::UniformSpacingModifier(options_.point_spacing, 1, true).modify(std::move(paths));
     paths = noether::RasterOrganizationModifier{}.modify(std::move(paths));
-    if (!options_.image_horizontal.empty())
-      orderRastersLeftToRight(paths, parseVector3d(options_.image_horizontal));
+    orderRastersLeftToRight(paths, image_right);
     paths = noether::SnakeOrganizationModifier{}.modify(std::move(paths));
     removeNaNWaypoints(paths);
 
@@ -446,12 +500,32 @@ void ProcessPlanner::run() const
       lockStraightSegmentOrientations(paths);
     removeNaNWaypoints(paths);
 
-    appendPaths(paths, mesh_index, options_.standoff, surface_points, tcp_strokes, stroke_index, skipped_short_strokes);
+    appendPaths(paths, mesh_index, options_.standoff, planned_strokes, skipped_short_strokes);
     *covered_surface += *mesh_vertices;
   }
 
-  if (tcp_strokes.empty())
+  if (planned_strokes.empty())
     throw std::runtime_error("No valid Noether spray strokes were generated");
+
+  // Sort after applying the TCP standoff as well. Surface normals can shift the
+  // visible TCP lines laterally, and sorting all meshes together prevents the
+  // input OBJ order from splitting an otherwise continuous left-to-right sweep.
+  orderTcpStrokesLeftToRight(planned_strokes, image_right);
+
+  for (std::size_t stroke_index = 0; stroke_index < planned_strokes.size(); ++stroke_index)
+  {
+    const PlannedStroke& stroke = planned_strokes.at(stroke_index);
+    json tcp_points = json::array();
+    for (std::size_t point_index = 0; point_index < stroke.tcp_poses.size(); ++point_index)
+    {
+      json surface_point = poseJson(stroke.surface_poses.at(point_index));
+      surface_point["segment_start"] = point_index == 0;
+      surface_points.push_back(std::move(surface_point));
+      tcp_points.push_back(poseJson(stroke.tcp_poses.at(point_index)));
+    }
+    tcp_strokes.push_back(
+        { { "mesh_index", stroke.mesh_index }, { "stroke_index", stroke_index }, { "points", std::move(tcp_points) } });
+  }
 
   json parameters = {
     { "standoff", options_.standoff },
@@ -459,14 +533,15 @@ void ProcessPlanner::run() const
     { "point_spacing", options_.point_spacing },
     { "straight_lines", options_.straight_lines },
     { "direction", options_.direction.empty() ? json(nullptr) : json(options_.direction) },
-    { "image_horizontal", options_.image_horizontal.empty() ? json(nullptr) : json(options_.image_horizontal) },
+    { "image_horizontal", { image_right.x(), image_right.y(), image_right.z() } },
+    { "calibration_path", options_.calibration_path.empty() ? json(nullptr) : json(options_.calibration_path) },
     { "seam_dedup_distance", dedup_distance }
   };
   const std::filesystem::path output_directory(options_.output_directory);
   writeJson(output_directory / "path_surface.json", surface_points);
   writeJson(output_directory / "tcp_targets.json",
             { { "schema_version", 1 }, { "process_parameters", std::move(parameters) }, { "strokes", std::move(tcp_strokes) } });
-  std::cout << "Saved " << surface_points.size() << " surface points and " << stroke_index
+  std::cout << "Saved " << surface_points.size() << " surface points and " << planned_strokes.size()
             << " TCP strokes to " << output_directory << '\n';
   if (skipped_short_strokes > 0)
     std::cout << "  Dropped " << skipped_short_strokes

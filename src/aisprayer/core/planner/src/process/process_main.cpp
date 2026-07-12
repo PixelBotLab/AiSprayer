@@ -23,6 +23,8 @@ int main(int argc, char** argv)
         ("d,direction", "Raster direction vector: x,y,z", cxxopts::value<std::string>()->default_value(""))
         ("image-horizontal", "Image-right axis in robot-base coordinates: x,y,z",
          cxxopts::value<std::string>()->default_value(""))
+        ("calibration", "Calibration YAML with T_base_camera; its first rotation column is image-right",
+         cxxopts::value<std::string>()->default_value(""))
         ("seam-dedup-distance", "Cross-mesh de-duplication distance in meters; negative uses half row spacing",
          cxxopts::value<double>()->default_value("-1"))
         ("h,help", "Print usage");
@@ -43,6 +45,7 @@ int main(int argc, char** argv)
     process_options.straight_lines = result["straight-lines"].as<bool>();
     process_options.direction = result["direction"].as<std::string>();
     process_options.image_horizontal = result["image-horizontal"].as<std::string>();
+    process_options.calibration_path = result["calibration"].as<std::string>();
     process_options.seam_dedup_distance = result["seam-dedup-distance"].as<double>();
 
     aisprayer::planner::ProcessPlanner(std::move(process_options)).run();
