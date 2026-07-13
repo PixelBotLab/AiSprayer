@@ -70,7 +70,11 @@ int main(int argc, char** argv)
         ("calibration", "Calibration YAML with T_base_camera",
          cxxopts::value<std::string>()->default_value(""))
         ("seam-dedup-distance", "Cross-mesh de-duplication distance in meters",
-         cxxopts::value<double>()->default_value("-1"));
+         cxxopts::value<double>()->default_value("-1"))
+        ("smoothing-window", "Moving average window size for orientation smoothing",
+         cxxopts::value<int>()->default_value("15"))
+        ("merge-gap", "Maximum distance in meters to merge disconnected raster segments",
+         cxxopts::value<double>()->default_value("0.06"));
 
     // Motion Planner options
     options.add_options("Motion")
@@ -125,6 +129,8 @@ int main(int argc, char** argv)
     process_config.direction = arguments["direction"].as<std::string>();
     process_config.image_horizontal = arguments["image-horizontal"].as<std::string>();
     process_config.seam_dedup_distance = arguments["seam-dedup-distance"].as<double>();
+    process_config.smoothing_window = arguments["smoothing-window"].as<int>();
+    process_config.merge_gap_threshold = arguments["merge-gap"].as<double>();
 
     std::string mesh_str = arguments["mesh"].as<std::string>();
     std::vector<std::string> mesh_paths = split(mesh_str, ',');

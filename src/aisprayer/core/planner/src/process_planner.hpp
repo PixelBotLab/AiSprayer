@@ -15,6 +15,8 @@ struct ProcessConfig {
     double seam_dedup_distance = -1.0; // Negative means default to row_spacing * 0.5
     std::string direction = "";
     std::string image_horizontal = "";
+    int smoothing_window = 15;
+    double merge_gap_threshold = 0.06;
 };
 
 class ProcessPlanner {

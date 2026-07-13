@@ -32,6 +32,7 @@ def main():
     parser.add_argument("--camera", action="store_true", help="开启相机采集模式（自动调用相机拍摄、录制、处理并可视化）")
     parser.add_argument("--conf", type=float, default=0.5, help="YOLO 分割置信度阈值")
     parser.add_argument("--mode", default="traj", choices=["traj", "robot"], help="可视化模式: traj(叠加路径和网格), robot(使用PyBullet播放机器人运动)")
+    parser.add_argument("--tcp_source", default="auto", choices=["auto", "xyz", "joint"], help="traj模式下TCP轨迹的数据源: auto(优先joint), xyz(直接读取xyz), joint(使用joint正解)")
     args = parser.parse_args()
 
     sprayer_config = SprayerConfig(args.config)
@@ -223,9 +224,8 @@ def main():
         with open(json_path, "r") as f:
             data = json.load(f)
         
-        # 兼容新的 process_targets.json 格式 (包含 strokes 和 mesh_info)
+        points_data = []
         if isinstance(data, dict) and "strokes" in data:
-            points_data = []
             mesh_info = data.get("mesh_info", [])
             for info in mesh_info:
                 print(f"[PCA Info] mesh: {info.get('mesh_source')}, PCA angle: {info.get('pca_angle_correction_deg', info.get('pca_angle_deg', 0)):.2f} deg")
@@ -241,13 +241,8 @@ def main():
                         "qw": p.get("surface_qw", p.get("qw")),
                         "segment_start": p.get("segment_start", False)
                     })
-        elif isinstance(data, dict) and "surface_points" in data:
-            points_data = data["surface_points"]
-            mesh_info = data.get("mesh_info", [])
-            for info in mesh_info:
-                print(f"[PCA Info] mesh: {info.get('mesh_source')}, PCA angle: {info.get('pca_angle_deg'):.2f} deg")
         else:
-            points_data = data
+            print("[!] 未在 trajectory.json 中找到 'strokes' 字段")
             
         positions = np.array([[p["x"], p["y"], p["z"]] for p in points_data])
         quats = np.array([[p["qx"], p["qy"], p["qz"], p["qw"]] for p in points_data])
@@ -259,24 +254,13 @@ def main():
         return positions, quats, is_freespace
 
     def load_tcp_trajectory(json_path, urdf_path, tcp_name):
-        """加载旧版 TCP 位姿轨迹，或通过 URDF 对关节轨迹执行正运动学。"""
+        """通过 URDF 对关节轨迹执行正运动学，获取 TCP 轨迹。"""
         with open(json_path, "r") as f:
             data = json.load(f)
-        if not data:
+            
+        if not isinstance(data, dict) or "strokes" not in data:
             return np.empty((0, 3)), np.empty((0, 4)), np.empty(0, dtype=bool)
 
-        if isinstance(data, list) and all(key in data[0] for key in ("x", "y", "z", "qx", "qy", "qz", "qw")):
-            positions = np.array([[p["x"], p["y"], p["z"]] for p in data])
-            quats = np.array([[p["qx"], p["qy"], p["qz"], p["qw"]] for p in data])
-        elif isinstance(data, list) and "joint_positions" not in data[0]:
-            return np.empty((0, 3)), np.empty((0, 4)), np.empty(0, dtype=bool)
-        elif isinstance(data, dict) and "strokes" in data:
-            # 新版格式，联合了 process 和 motion 的信息
-            pass
-        elif isinstance(data, list):
-            pass
-        else:
-            return np.empty((0, 3)), np.empty((0, 4)), np.empty(0, dtype=bool)
         if not urdf_path or not os.path.exists(urdf_path):
             raise ValueError(f"无法找到用于 TCP 正运动学的 URDF: {urdf_path}")
 
@@ -303,19 +287,14 @@ def main():
 
             positions, quats = [], []
             point_list = []
-            if isinstance(data, dict) and "trajectory" in data:
-                point_list = data["trajectory"]
-            elif isinstance(data, dict) and "strokes" in data:
-                for stroke in data["strokes"]:
-                    for point in stroke.get("points", []):
-                        if "joint_positions" in point and point.get("status") == "SUCCESS":
-                            point_list.append(point)
-                for transition in data.get("transitions", []):
-                    for point in transition:
-                        if "joint_positions" in point:
-                            point_list.append(point)
-            else:
-                point_list = data
+            for stroke in data["strokes"]:
+                for point in stroke.get("points", []):
+                    if "joint_positions" in point and point.get("status") == "SUCCESS":
+                        point_list.append(point)
+            for transition in data.get("transitions", []):
+                for point in transition:
+                    if "joint_positions" in point:
+                        point_list.append(point)
 
             for point in point_list:
                 joints = point["joint_positions"]
@@ -554,10 +533,6 @@ def main():
                         "qx": p["qx"], "qy": p["qy"], "qz": p["qz"], "qw": p["qw"],
                         "segment_start": p.get("segment_start", False)
                     })
-        elif isinstance(data, dict) and "surface_points" in data:
-            points_data = data["tcp_points"] if "tcp_points" in data else data["surface_points"]
-        else:
-            points_data = data
             
         positions = np.array([[p["x"], p["y"], p["z"]] for p in points_data])
         quats = np.array([[p["qx"], p["qy"], p["qz"], p["qw"]] for p in points_data])
@@ -597,14 +572,19 @@ def main():
             
         # 2. 渲染 TCP 数据 (Raw TCP or Kinematic TCP)
         try:
-            # 首先尝试加载包含运动学信息的轨迹 (Motion Data)
-            t_pos, t_quats, t_freespace = load_tcp_trajectory(
-                unified_json, sprayer_config.urdf_path, "spray_nozzle_link"
-            )
-            if len(t_pos) > 0:
-                print(f"  --> 渲染: [Motion Data] 基于关节运动学正解的真实 TCP 轨迹与过渡段 ({len(t_pos)} 个点)")
-            else:
-                # 降级：如果不存在 joint_positions，则仅显示基础 TCP 数据
+            t_pos, t_quats, t_freespace = [], [], []
+            if args.tcp_source in ["auto", "joint"]:
+                # 尝试加载包含运动学信息的轨迹 (Motion Data)
+                t_pos, t_quats, t_freespace = load_tcp_trajectory(
+                    unified_json, sprayer_config.urdf_path, "spray_nozzle_link"
+                )
+                if len(t_pos) > 0:
+                    print(f"  --> 渲染: [Motion Data] 基于关节运动学正解的真实 TCP 轨迹与过渡段 ({len(t_pos)} 个点)")
+                elif args.tcp_source == "joint":
+                    print("  --> [!] 警告: 未能找到 joint_positions 数据进行运动学解算。")
+                    
+            if len(t_pos) == 0 and args.tcp_source in ["auto", "xyz"]:
+                # 如果没有运动学数据或指定了 xyz，则直接使用原始目标位置
                 t_pos, t_quats, t_freespace = load_raw_tcp_targets(unified_json)
                 if len(t_pos) > 0:
                     print(f"  --> 渲染: [TCP Data] 原始工艺规划 TCP 目标路径，不包含机器臂过渡段 ({len(t_pos)} 个点)")
@@ -656,10 +636,8 @@ def render_robot_trajectory(urdf_path, trajectory_path, tcp_name="spray_nozzle_l
     with open(trajectory_path, "r") as f:
         data = json.load(f)
 
-    if isinstance(data, dict) and "trajectory" in data:
-        traj_data = data["trajectory"]
-    elif isinstance(data, dict) and "strokes" in data:
-        traj_data = []
+    traj_data = []
+    if isinstance(data, dict) and "strokes" in data:
         for stroke in data["strokes"]:
             for point in stroke.get("points", []):
                 if "joint_positions" in point and point.get("status") == "SUCCESS":
@@ -668,8 +646,6 @@ def render_robot_trajectory(urdf_path, trajectory_path, tcp_name="spray_nozzle_l
             for point in transition:
                 if "joint_positions" in point:
                     traj_data.append(point)
-    else:
-        traj_data = data
 
     if not traj_data or "joint_positions" not in traj_data[0]:
         print(f"[!] 轨迹 JSON 不包含 joint_positions: {trajectory_path}")
@@ -717,8 +693,16 @@ def render_robot_trajectory(urdf_path, trajectory_path, tcp_name="spray_nozzle_l
             p.addUserDebugLine(previous_position, position, [0.0, 0.9, 0.9], lineWidth=2.0)
         
         if arrow_stride > 0 and index % arrow_stride == 0:
-            rotation = p.getMatrixFromQuaternion([point["qx"], point["qy"], point["qz"], point["qw"]])
-            z_axis = [rotation[2], rotation[5], rotation[8]]
+            # 用表面法向量四元数绘制箭头（与 --mode traj 中的箭头方向一致，指向机器人/相机侧）
+            # 注：PyBullet getMatrixFromQuaternion 返回列优先(column-major)格式：
+            #   m[0,1,2]=X轴, m[3,4,5]=Y轴, m[6,7,8]=Z轴
+            surf_qx = point.get("surface_qx", point["qx"])
+            surf_qy = point.get("surface_qy", point["qy"])
+            surf_qz = point.get("surface_qz", point["qz"])
+            surf_qw = point.get("surface_qw", point["qw"])
+            surf_rotation = p.getMatrixFromQuaternion([surf_qx, surf_qy, surf_qz, surf_qw])
+            # 正确的 Z 轴：列优先下的第三列 = indices [6,7,8]
+            z_axis = [surf_rotation[6], surf_rotation[7], surf_rotation[8]]
             arrow_end = [position[i] + 0.04 * z_axis[i] for i in range(3)]
             p.addUserDebugLine(position, arrow_end, [0.0, 1.0, 1.0], lineWidth=2.5)
         previous_position = position

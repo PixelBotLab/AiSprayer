@@ -444,19 +444,31 @@ class VisionProcessor:
         pcd.orient_normals_towards_camera_location(camera_location=np.array([0.0, 0.0, 0.0]))
 
         # =========================================================
-        # 3. 滚球法 (BPA) 开放边界网格重构
+        # 3. 泊松曲面重建 (Poisson Surface Reconstruction)
         # =========================================================
-        # 动态计算点云中每个点到最近邻居的平均距离，自适应设定滚球半径
-        distances = pcd.compute_nearest_neighbor_distance()
-        avg_dist = np.mean(distances)
-
-        # 设定三个/四个档位的滚球半径：自适应且更大比例以桥接大破洞
-        radii = [avg_dist, avg_dist * 2.5, avg_dist * 5.0, avg_dist * 8.0]
-
-        print("🚀 正在通过滚球算法生成开放边界网格...")
-        o3d_mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_ball_pivoting(
-            pcd, o3d.utility.DoubleVector(radii)
+        # 用泊松重建替代滚球算法 (BPA)。
+        # 核心优势：泊松重建以上一步估计好的点云法向量作为直接输入，求解一个指示函数
+        # (indicator function) 使得重建曲面的法向场与输入法向场最吻合。
+        # 这样得到的网格法向量在物理上是真正垂直于表面的，不依赖网格拓扑推算。
+        # BPA 会产生拓扑不规则、法向量不准确的问题，泊松重建从根源上解决这个问题。
+        print("🚀 正在通过泊松重建生成平滑网格...")
+        o3d_mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
+            pcd,
+            depth=9,        # 八叉树深度，控制重建精细度 (8~10 适合本场景)
+            width=0,
+            scale=1.1,
+            linear_fit=False
         )
+
+        # 泊松重建是闭合曲面算法，会在裤腰/裤脚等开口处自动补出一个"外壳"。
+        # 通过顶点密度过滤（低密度顶点 = 该位置没有原始点云数据支撑，是人工外壳）
+        # 裁剪掉这层外壳，恢复裤子真实的开口边界。
+        densities_np = np.asarray(densities)
+        density_threshold = np.quantile(densities_np, 0.05)  # 去掉最低 5% 密度的顶点
+        vertices_to_remove = densities_np < density_threshold
+        o3d_mesh.remove_vertices_by_mask(vertices_to_remove)
+        print(f"🧹 泊松密度裁剪：去除低密度外壳顶点 {vertices_to_remove.sum()}/{len(densities_np)} "
+              f"(阈值={density_threshold:.4f})")
 
         # =========================================================
         # 4. Trimesh 接入与拉普拉斯"烫平"布料褶皱
@@ -466,7 +478,7 @@ class VisionProcessor:
         faces = np.asarray(o3d_mesh.triangles)
 
         if vertices_cam.shape[0] == 0:
-            raise RuntimeError("滚球算法未能重建出任何顶点，请检查点云密度/法线质量是否正常。")
+            raise RuntimeError("泊松重建未能重建出任何顶点，请检查点云密度/法线质量是否正常。")
 
         # 将重建后的网格顶点从相机坐标系变换到机器人基座坐标系下
         ones = np.ones((vertices_cam.shape[0], 1))
@@ -476,45 +488,16 @@ class VisionProcessor:
         if not np.isfinite(vertices_base).all():
             n_bad = (~np.isfinite(vertices_base).all(axis=1)).sum()
             raise RuntimeError(
-                f"滚球重建转换后有 {n_bad}/{vertices_base.shape[0]} 个顶点坐标是 NaN/Inf，"
+                f"泊松重建转换后有 {n_bad}/{vertices_base.shape[0]} 个顶点坐标是 NaN/Inf，"
                 "请检查标定矩阵 T_camera_to_base 是否包含异常值。"
             )
 
         jeans_trimesh = trimesh.Trimesh(vertices=vertices_base, faces=faces)
 
-        # 滚球算法用多档递增半径依次重建时，同一块区域经常被两档半径都摸到，
-        # 生成完全重复的三角面，或者让同一条边被 3 个及以上的面共享 (非流形边)。
-        # trimesh 自带的 Laplacian/Taubin 平滑算法在构造邻接权重矩阵时，如果某个
-        # 顶点的边里混进了这种非流形重复边，权重归一化会出 bug (bool 类型的稀疏
-        # 矩阵在合并重复 (row, col) 项时会把"重复 3 次"错误坍缩成"1 次"，导致
-        # 该顶点归一化权重之和 < 1)，平滑一步就能把顶点从"机器人基座系"的原始坐标
-        # (跟坐标原点有 0.3~0.7m 距离) 甩出去几十到几百毫米——这才是"拉丝毛刺随着
-        # 平滑不断变多"的真正根源，比滚球重建本身更隐蔽。这里先把非流形边所在的
-        # 面全部剔除，从根上避免平滑算法遇到这种坏拓扑。
+        # 泊松重建输出的是干净流形网格，一般不会有非流形边，但仍做一次兜底清理。
         jeans_trimesh, n_nonmanifold = self._repair_non_manifold_until_stable(jeans_trimesh)
         if n_nonmanifold:
             print(f"🧹 非流形拓扑修复：剔除了 {n_nonmanifold} 个非流形边/重复面所在的三角面")
-
-        # 滚球算法在点云稀疏/有间隙的区域，为了不留破洞，经常会强行用大半径的球
-        # "够"到远处的孤立点，架出一条条异常细长的三角面片把它们连到主体表面上——
-        # 这才是"拉丝毛刺"的真正成因 (比普通离群点更难防：这些孤立点本身在统计
-        # 离群点剔除里未必会被判定为离群点，只是离主体表面有一段距离，被滚球
-        # "架桥"连了过来)。正常滚球三角面的边长应该都在点云平均间距的量级，
-        # 这里直接按边长过滤掉明显异常细长的"架桥"面片，防止噪点被强行并入主体。
-        face_verts = jeans_trimesh.vertices[jeans_trimesh.faces]  # (F, 3, 3)
-        edge_ab = np.linalg.norm(face_verts[:, 0] - face_verts[:, 1], axis=1)
-        edge_bc = np.linalg.norm(face_verts[:, 1] - face_verts[:, 2], axis=1)
-        edge_ca = np.linalg.norm(face_verts[:, 2] - face_verts[:, 0], axis=1)
-        max_edge_len = np.maximum(np.maximum(edge_ab, edge_bc), edge_ca)
-        spike_edge_threshold = avg_dist * 6  # 6 倍平均点距，正常表面三角面不会到这个量级
-        keep_faces = max_edge_len < spike_edge_threshold
-        if not keep_faces.all():
-            n_removed = (~keep_faces).sum()
-            jeans_trimesh = trimesh.Trimesh(vertices=jeans_trimesh.vertices, faces=jeans_trimesh.faces[keep_faces],
-                                             process=False)
-            jeans_trimesh.remove_unreferenced_vertices()
-            print(f"🧹 拉丝毛刺过滤：剔除了 {n_removed} 个长边异常三角面 "
-                  f"(边长阈值 {spike_edge_threshold * 1000:.1f}mm)")
 
         # 滚球算法在点云噪声/密度不均的区域，经常会额外生成一些跟主体裤子网格
         # 不连通的小碎片 (就是看起来"拉丝毛刺"的那些东西，本质是没有正确并入主表面

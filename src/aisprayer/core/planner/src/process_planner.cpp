@@ -31,6 +31,7 @@
 #include <vtkNew.h>
 #include <vtkPolyData.h>
 #include <vtkSmartPointer.h>
+#include <vtkPolyDataNormals.h>
 #include <vtkTriangleFilter.h>
 
 #include <noether_tpp/core/tool_path_planner.h>
@@ -99,38 +100,50 @@ void cleanMesh(pcl::PolygonMesh& mesh)
 
 /**
  * @brief 计算网格顶点的法向量，因为路径规划器 PlaneSlicerRasterPlanner 需要法向信息。
+ * @note 使用 VTK 根据三角面片的环绕方向计算法向，比 PCL 的点云邻域 PCA 更稳定，且不需要 view_point。
  */
-void ensureVertexNormals(pcl::PolygonMesh& mesh)
+void ensureVertexNormals(pcl::PolygonMesh& mesh, const Eigen::Vector3d& view_point)
 {
-  pcl::PointCloud<pcl::PointXYZ>::Ptr cloud(new pcl::PointCloud<pcl::PointXYZ>);
-  pcl::fromPCLPointCloud2(mesh.cloud, *cloud);
-  if (cloud->empty())
-    throw std::runtime_error("Mesh has no vertices after cleaning");
+  vtkSmartPointer<vtkPolyData> vtk_mesh = vtkSmartPointer<vtkPolyData>::New();
+  pcl::io::mesh2vtk(mesh, vtk_mesh);
 
-  pcl::NormalEstimation<pcl::PointXYZ, pcl::Normal> estimator;
-  estimator.setInputCloud(cloud);
-  estimator.setKSearch(20);
-  pcl::PointCloud<pcl::Normal>::Ptr normals(new pcl::PointCloud<pcl::Normal>);
-  estimator.compute(*normals);
+  vtkNew<vtkPolyDataNormals> normal_generator;
+  normal_generator->SetInputData(vtk_mesh);
+  normal_generator->SplittingOff(); // 保持顶点数量不变，防止网格被切开
+  normal_generator->ConsistencyOn(); // 强制统一网格内部的三角面片环绕顺序
+  normal_generator->AutoOrientNormalsOff(); // 关闭容易出错的包围盒外翻
+  normal_generator->Update();
 
-  for (pcl::Normal& normal : normals->points) {
-    if (!std::isfinite(normal.normal_x) || !std::isfinite(normal.normal_y) || !std::isfinite(normal.normal_z)) {
-      normal.normal_x = 0.0F;
-      normal.normal_y = 0.0F;
-      normal.normal_z = 1.0F;
+  pcl::PolygonMesh cleaned;
+  pcl::io::vtk2mesh(normal_generator->GetOutput(), cleaned);
+  mesh = std::move(cleaned);
+
+  // 统一提取出点云和法线
+  pcl::PointCloud<pcl::PointNormal>::Ptr cloud_with_normals(new pcl::PointCloud<pcl::PointNormal>);
+  pcl::fromPCLPointCloud2(mesh.cloud, *cloud_with_normals);
+
+  // 绝对可靠的朝向修正：由于网格是单目深度相机拍摄的，所有真实的可见表面必然都是朝向相机的！
+  // 逐顶点检查，如果法线背向相机（点乘 < 0），则将其翻转。
+  // 这样既保留了 VTK 三角面片法向的光顺度（无边缘卷曲），又 100% 保证了全局朝向绝对向外。
+  for (auto& pt : cloud_with_normals->points) {
+    Eigen::Vector3d p(pt.x, pt.y, pt.z);
+    Eigen::Vector3d n(pt.normal_x, pt.normal_y, pt.normal_z);
+    Eigen::Vector3d dir_to_cam = view_point - p;
+    if (n.dot(dir_to_cam) < 0) {
+      pt.normal_x = -pt.normal_x;
+      pt.normal_y = -pt.normal_y;
+      pt.normal_z = -pt.normal_z;
     }
   }
 
-  pcl::PointCloud<pcl::PointNormal> cloud_with_normals;
-  pcl::concatenateFields(*cloud, *normals, cloud_with_normals);
-  pcl::toPCLPointCloud2(cloud_with_normals, mesh.cloud);
+  pcl::toPCLPointCloud2(*cloud_with_normals, mesh.cloud);
 }
 
 /**
  * @brief 按照网格 2D 投影的最长轴对工具路径进行栅格化 (Raster) 组织排列。
  * @note 将原始路径旋转至与最长轴平行以进行光顺扫描，规划完后再旋转回原本坐标系。
  */
-MeshPCAInfo organizePathsBy2DPCA(noether::ToolPaths& paths, const CameraCalibration& calib)
+MeshPCAInfo organizePathsBy2DPCA(noether::ToolPaths& paths, const CameraCalibration& calib, double merge_gap_threshold)
 {
   MeshPCAInfo info;
   info.axis = Eigen::Vector2d::UnitX();
@@ -196,54 +209,74 @@ MeshPCAInfo organizePathsBy2DPCA(noether::ToolPaths& paths, const CameraCalibrat
   for (auto& path : paths) {
     if (path.empty()) continue;
     
-    // 1. 合并由于曲面不连续或障碍物导致断开的同一列栅格段
-    noether::ToolPathSegment merged;
-    for (const auto& seg : path)
-      merged.insert(merged.end(), seg.begin(), seg.end());
-    
-    // 2. 计算合并后线段在校正后 (对齐主轴) 坐标系中的 U 轴平均位置
+    // 1. 计算整列在校正后坐标系中的 U 轴平均位置
     double sum_u_rot = 0;
     int count = 0;
-    for (const auto& pose : merged) {
-      double u, v;
-      if (calib.project(pose.translation(), u, v)) {
-        Eigen::Vector2d rotated = rotation * Eigen::Vector2d(u, v);
-        sum_u_rot += rotated.x();
-        count++;
+    for (const auto& seg : path) {
+      for (const auto& pose : seg) {
+        double u, v;
+        if (calib.project(pose.translation(), u, v)) {
+          Eigen::Vector2d rotated = rotation * Eigen::Vector2d(u, v);
+          sum_u_rot += rotated.x();
+          count++;
+        }
       }
     }
     double mean_u_rot = count > 0 ? (sum_u_rot / count) : 0;
 
-    // 3. 判断该线段方向，统一调整为由上至下 (V轴减小)
-    Eigen::Vector3d top_pt = merged.front().translation();
-    Eigen::Vector3d bot_pt = merged.back().translation();
+    // 2. 判断该列整体方向，统一调整为由上至下 (V轴减小)
+    Eigen::Vector3d top_pt = path.front().front().translation();
+    Eigen::Vector3d bot_pt = path.back().back().translation();
     double u_t=0, v_t=0, u_b=0, v_b=0;
     calib.project(top_pt, u_t, v_t);
     calib.project(bot_pt, u_b, v_b);
     Eigen::Vector2d rt = rotation * Eigen::Vector2d(u_t, v_t);
     Eigen::Vector2d rb = rotation * Eigen::Vector2d(u_b, v_b);
     
-    // 如果首点在尾点的下方，则反转点序，使得单条线段方向一致
+    // 如果整体方向是向上的，则将点序反转，使得方向一致
     if (rt.y() > rb.y()) {
-      std::reverse(merged.begin(), merged.end());
+      std::reverse(path.begin(), path.end());
+      for (auto& seg : path) {
+        std::reverse(seg.begin(), seg.end());
+      }
+    }
+
+    // 3. 智能条件合并：跨越微小破洞，但保留真实大间隙
+    noether::ToolPath new_path;
+    if (!path.empty()) {
+      noether::ToolPathSegment current_merged = path.front();
+      for (size_t i = 1; i < path.size(); ++i) {
+        const auto& seg = path[i];
+        if (seg.empty()) continue;
+        
+        // 计算两段之间的物理距离
+        double gap = (current_merged.back().translation() - seg.front().translation()).norm();
+        if (gap < merge_gap_threshold) { // Threshold for merging small holes/noise
+          current_merged.insert(current_merged.end(), seg.begin(), seg.end());
+        } else {
+          // 如果是大间隙（如裤裆），则保留为独立 stroke
+          new_path.push_back(current_merged);
+          current_merged = seg;
+        }
+      }
+      new_path.push_back(current_merged);
     }
     
-    noether::ToolPath new_path;
-    new_path.push_back(merged);
     columns.push_back({new_path, mean_u_rot});
   }
 
-  // 4. 根据 U 轴坐标，从左到右对栅格列进行排序
+  // 3. 根据 U 轴坐标，从左到右对栅格列进行排序
   std::sort(columns.begin(), columns.end(), [](const ColumnInfo& a, const ColumnInfo& b) {
     return a.mean_u_rot < b.mean_u_rot;
   });
 
-  // 5. 将排序后的路径串联起来，并实行之字形 (Zig-Zag) 反转
+  // 4. 将排序后的路径串联起来，并实行之字形 (Zig-Zag) 反转
   paths.clear();
   bool reverse_next = false;
   for (auto& col : columns) {
     if (reverse_next) {
       // 当前列需要从下往上走
+      std::reverse(col.path.begin(), col.path.end());
       for (auto& seg : col.path) {
         std::reverse(seg.begin(), seg.end());
       }
@@ -452,7 +485,11 @@ std::optional<json> ProcessPlanner::plan(const std::vector<std::string>& mesh_pa
     }
 
     cleanMesh(mesh);
-    ensureVertexNormals(mesh);
+    Eigen::Vector3d view_point(0, 0, 1000);
+    if (calib.valid) {
+      view_point = calib.T_base_camera.block<3,1>(0,3);
+    }
+    ensureVertexNormals(mesh, view_point);
 
     pcl::PointCloud<pcl::PointXYZ>::Ptr mesh_vertices(new pcl::PointCloud<pcl::PointXYZ>);
     pcl::fromPCLPointCloud2(mesh.cloud, *mesh_vertices);
@@ -495,8 +532,7 @@ std::optional<json> ProcessPlanner::plan(const std::vector<std::string>& mesh_pa
     double dedup_dist = config_.seam_dedup_distance < 0.0 ? config_.row_spacing * 0.5 : config_.seam_dedup_distance;
     paths = noether::UniformSpacingModifier(config_.point_spacing, 1, true).modify(std::move(paths));
 
-    // 3. 执行轨迹排布与优化
-    paths = noether::RasterOrganizationModifier{}.modify(std::move(paths));
+    // 3. 执行轨迹排布与优化 (移除前置的 RasterOrganizationModifier，防止破坏原始切片列结构)
 
     MeshPCAInfo pca_info;
     pca_info.axis = Eigen::Vector2d::UnitX();
@@ -504,7 +540,7 @@ std::optional<json> ProcessPlanner::plan(const std::vector<std::string>& mesh_pa
 
     if (!config_.straight_lines) {
       // 启用 2D PCA 对齐策略，生成之字形扫描线
-      pca_info = organizePathsBy2DPCA(paths, calib);
+      pca_info = organizePathsBy2DPCA(paths, calib, config_.merge_gap_threshold);
     } else {
       // 如果固定了方向，则根据 image_horizontal 强行重排轨迹顺序
       if (calib.valid && !config_.image_horizontal.empty()) {
@@ -529,8 +565,77 @@ std::optional<json> ProcessPlanner::plan(const std::vector<std::string>& mesh_pa
 
     // 4. 对工具方向进行平滑，避免急剧扭转
     paths = noether::FixedOrientationModifier(Eigen::Vector3d::UnitY()).modify(std::move(paths));
-    paths = noether::MovingAverageOrientationSmoothingModifier(5).modify(std::move(paths));
-    
+    paths = noether::MovingAverageOrientationSmoothingModifier(config_.smoothing_window).modify(std::move(paths));
+
+    // 5. 边缘法向共识修正：
+    //    用中间稳定区域 (去掉首尾各 20%) 的法向量平均值作为"共识参考法向"，
+    //    只纠正那些偏离共识超过 20 度的边缘点，而不是暴力地钳制首尾所有点。
+    //    这样既能修复真正发散的边缘异常点，又完全保留圆柱表面真实的法向变化曲线。
+    const double kBoundaryAngleThresholdRad = 12.0 * M_PI / 180.0; // 12° 足以抓住 14-17° 的边缘异常，又不会误判正常圆柱弧面变化(< 10°)
+    for (auto& path : paths) {
+      for (auto& seg : path) {
+        const int n = static_cast<int>(seg.size());
+        if (n < 6) continue;
+
+        // 从中间60%的点计算稳定共识法向（Z轴，单位向量取和后归一化）
+        int stable_start = n / 5;         // 跳过前 20%
+        int stable_end   = n - n / 5;     // 跳过后 20%
+        Eigen::Vector3d consensus_z = Eigen::Vector3d::Zero();
+        for (int i = stable_start; i < stable_end; ++i) {
+          consensus_z += seg[i].linear().col(2);
+        }
+        if (consensus_z.norm() < 1e-6) continue;
+        consensus_z.normalize();
+
+        // 对每个点检查其法向是否偏离共识超过阈值，超过则用共识替换
+        for (int i = 0; i < n; ++i) {
+          Eigen::Vector3d cur_z = seg[i].linear().col(2);
+          double cos_angle = cur_z.dot(consensus_z);
+          cos_angle = std::max(-1.0, std::min(1.0, cos_angle));
+          if (std::acos(cos_angle) > kBoundaryAngleThresholdRad) {
+            // 用共识Z轴重建旋转矩阵，保留X轴方向（走线方向）
+            Eigen::Vector3d cur_x = seg[i].linear().col(0);
+            Eigen::Vector3d new_y = consensus_z.cross(cur_x);
+            if (new_y.norm() < 1e-6) continue;
+            new_y.normalize();
+            Eigen::Vector3d new_x = new_y.cross(consensus_z);
+            new_x.normalize();
+            seg[i].linear().col(0) = new_x;
+            seg[i].linear().col(1) = new_y;
+            seg[i].linear().col(2) = consensus_z;
+          }
+        }
+      }
+    }
+
+    // 6. 边缘扭转（twist）对齐：
+    //    上面的共识修正已经确保了所有点的 Z 轴（法向）是正确的。
+    //    但 idx 0 和末尾点有时因平滑窗口边界效应，X 轴（行进方向）与相邻点
+    //    出现 90°~180° 的大扭转，产生 SO(3) 意义上的巨大姿态跳变。
+    //    修复：直接把首/末点的 X 轴对齐到其最近邻的 X 轴（保留 Z 轴不变），
+    //    从而消除扭转跳变，同时完全不影响中间所有正常点的圆柱弧面法向变化。
+    auto alignTwistToNeighbor = [](Eigen::Isometry3d& pt, const Eigen::Isometry3d& neighbor) {
+      const Eigen::Vector3d z = pt.linear().col(2);       // 保留已经修正好的 Z（法向）
+      const Eigen::Vector3d ref_x = neighbor.linear().col(0); // 借用邻居的 X（行进方向）
+      Eigen::Vector3d new_y = z.cross(ref_x);
+      if (new_y.norm() < 1e-6) return;
+      new_y.normalize();
+      Eigen::Vector3d new_x = new_y.cross(z);
+      new_x.normalize();
+      pt.linear().col(0) = new_x;
+      pt.linear().col(1) = new_y;
+      // pt.linear().col(2) = z; // Z 不变
+    };
+
+    for (auto& path : paths) {
+      for (auto& seg : path) {
+        const int n = static_cast<int>(seg.size());
+        if (n < 3) continue;
+        alignTwistToNeighbor(seg[0],   seg[1]);     // 首点对齐到第二个点
+        alignTwistToNeighbor(seg[n-1], seg[n-2]);   // 末点对齐到倒数第二个点
+      }
+    }
+
     if (config_.straight_lines)
       lockStraightSegmentOrientations(paths);
 
