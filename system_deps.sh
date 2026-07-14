@@ -30,3 +30,18 @@ if ! command -v npm &> /dev/null; then
         sudo apt-get install -y npm
     fi
 fi
+
+# ------------------------------------------------------------------------------
+# 2. 安装 Python 核心依赖及 SAM3
+# ------------------------------------------------------------------------------
+echo "🐍 正在安装 Python 核心依赖库..."
+pip3 install timm einops pycocotools --break-system-packages
+
+if [ -d "third_party/sam3" ]; then
+    echo "  ↳ 正在通过本地 third_party/sam3 安装 SAM3 官方支持包..."
+    pip3 install -e third_party/sam3 --break-system-packages
+else
+    echo "  ↳ 未发现 third_party/sam3，请确认代码库是否完整。"
+fi
+
+echo "✅ 所有系统与 Python 依赖安装完成！"
