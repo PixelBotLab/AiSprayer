@@ -61,6 +61,18 @@ class SprayerConfig:
         return self._resolve_path(path)
 
     @property
+    def spray_width(self):
+        """喷涂幅宽 (返回单位: 米)"""
+        mm = self.config_data.get("vision", {}).get("planner", {}).get("spray_width_mm", 100.0)
+        return float(mm) / 1000.0
+
+    @property
+    def spray_distance(self):
+        """喷涂距离 (返回单位: 米)"""
+        mm = self.config_data.get("vision", {}).get("planner", {}).get("spray_dist_mm", 100.0)
+        return float(mm) / 1000.0
+
+    @property
     def urdf_path(self):
         """机器人 URDF 模型文件路径"""
         path = self.config_data.get("hardware", {}).get("robot", {}).get("robot_urdf")

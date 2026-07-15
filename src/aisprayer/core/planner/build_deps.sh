@@ -1,6 +1,19 @@
 #!/bin/bash
 set -e
 
+CLEAN_BUILD=false
+while getopts "c" opt; do
+  case ${opt} in
+    c )
+      CLEAN_BUILD=true
+      ;;
+    \? )
+      echo "Usage: $0 [-c]"
+      exit 1
+      ;;
+  esac
+done
+
 # Build directory
 DEPS_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )/deps"
 
@@ -12,93 +25,85 @@ DEPS=(
     "cereal|1.3.2|https://github.com/USCiLab/cereal.git"
     "descartes_light|0.4.10|https://github.com/swri-robotics/descartes_light.git"
     "noether|0.16.0|https://github.com/ros-industrial/noether.git"
+    "noether_ros2|0.2.0|https://github.com/ros-industrial/noether_ros2.git"
     "opw_kinematics|0.5.5|https://github.com/Jmeyer1292/opw_kinematics.git"
     "ruckig|0.9.2|https://github.com/pantor/ruckig.git"
     "tesseract|0.35.0|https://github.com/tesseract-robotics/tesseract.git"
+    "tesseract_ros2|0.35.0|https://github.com/tesseract-robotics/tesseract_ros2.git"
+    "tesseract_qt|0.35.0|https://github.com/tesseract-robotics/tesseract_qt.git"
     "tesseract_planning|0.35.0|https://github.com/tesseract-robotics/tesseract_planning.git"
     "trajopt|0.35.0|https://github.com/tesseract-robotics/trajopt.git"
+    "qdldl|master|https://github.com/osqp/qdldl.git"
 )
 
-TEMP_DIR="$DEPS_DIR/temp_restore"
-rm -rf "$TEMP_DIR"
-mkdir -p "$TEMP_DIR"
+mkdir -p "$DEPS_DIR/src"
 
 for dep in "${DEPS[@]}"; do
     IFS="|" read -r name version url <<< "$dep"
     
     target_dep_dir="$DEPS_DIR/src/$name"
-    if [ ! -d "$target_dep_dir" ]; then
-        echo "Target directory $target_dep_dir does not exist. Skipping copy."
-        continue
-    fi
-
-    if [ -f "$target_dep_dir/.downloaded" ]; then
+    if [ -d "$target_dep_dir" ]; then
         echo "====================================="
-        echo "$name is already downloaded. Skipping restore."
+        echo "Target directory $target_dep_dir already exists. Skipping download."
         echo "====================================="
         continue
     fi
 
     echo "====================================="
-    echo "Restoring $name (version $version)..."
+    echo "Downloading $name (version $version)..."
     echo "====================================="
-
-    clone_path="$TEMP_DIR/$name"
-    rm -rf "$clone_path"
 
     # Try different tags/branches
     success=false
     for tag in "$version" "v$version" "main" "master"; do
         echo "Trying to clone tag/branch: $tag"
-        if git clone --depth 1 --branch "$tag" "$url" "$clone_path" &> /dev/null; then
+        if git clone --depth 1 --branch "$tag" "$url" "$target_dep_dir" &> /dev/null; then
             success=true
             break
         else
-            rm -rf "$clone_path"
+            rm -rf "$target_dep_dir"
         fi
     done
 
     if [ "$success" = false ]; then
         # Fallback to cloning default branch
         echo "Cloning default branch without specifying tag..."
-        if ! git clone --depth 1 "$url" "$clone_path" &> /dev/null; then
+        if ! git clone --depth 1 "$url" "$target_dep_dir" &> /dev/null; then
             echo "Failed to clone $name"
-            rm -rf "$clone_path"
+            rm -rf "$target_dep_dir"
             continue
         fi
     fi
-
-    # Copy .cmake, .json, .png, .jpg, .obj files
-    if [ -d "$clone_path" ]; then
-        copied_count=0
-        # Find files inside clone_path with given extensions and copy preserving directory structure
-        (
-            cd "$clone_path"
-            find . -type f \( -name "*.cmake" -o -name "*.json" -o -name "*.png" -o -name "*.jpg" -o -name "*.obj" \)
-        ) | while read -r rel_file; do
-            rel_file="${rel_file#./}"
-            src_file="$clone_path/$rel_file"
-            dest_file="$target_dep_dir/$rel_file"
-            mkdir -p "$(dirname "$dest_file")"
-            cp -p "$src_file" "$dest_file"
-        done
-
-        copied_count=$(find "$clone_path" -type f \( -name "*.cmake" -o -name "*.json" -o -name "*.png" -o -name "*.jpg" -o -name "*.obj" \) | wc -l)
-        echo "Successfully copied $copied_count files for $name"
-
-        rm -rf "$clone_path"
-        touch "$target_dep_dir/.downloaded"
-    fi
 done
 
-# Clean up temp_dir
-rm -rf "$TEMP_DIR"
-echo "Done restoring all dependencies!"
+echo "Done downloading all dependencies!"
 
 echo "======================================"
 echo " Building all dependencies in deps/src..."
 echo "======================================"
 
 cd "$DEPS_DIR"
-colcon build --merge-install --base-paths src --install-base install --cmake-args -DCMAKE_BUILD_TYPE=Release -DTESSERACT_BUILD_TASK_COMPOSER_TASKFLOW=OFF -DTESSERACT_ENABLE_TESTING=OFF -DTESSERACT_ENABLE_EXAMPLES=OFF
+
+if [ "$CLEAN_BUILD" = true ]; then
+    echo "======================================"
+    echo " Cleaning previous build artifacts..."
+    echo "======================================"
+    rm -rf build install log
+fi
+
+colcon build \
+    --merge-install \
+    --base-paths src \
+    --install-base install \
+    --packages-ignore tesseract_ros_examples \
+    --cmake-args \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DTESSERACT_BUILD_TASK_COMPOSER_TASKFLOW=OFF \
+    -DTESSERACT_ENABLE_TESTING=OFF \
+    -DTESSERACT_ENABLE_EXAMPLES=OFF \
+    -DBUILD_TESTING=OFF \
+    -DBUILD_TESTS=OFF \
+    -DJUST_INSTALL_CEREAL=ON \
+    -DFETCHCONTENT_SOURCE_DIR_QDLDL=$PWD/src/qdldl \
+    -DBUILD_STUDIO=OFF
 

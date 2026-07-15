@@ -7,7 +7,7 @@ set -e
 # 1. 安装重型系统工具及 C++ 矩阵/解析基础库
 # ------------------------------------------------------------------------------
 echo "📦 正在安装 Linux 系统基础依赖工具..."
-PACKAGES=(build-essential cmake git wget g++ python3-pip python3-dev libeigen3-dev libcli11-dev libboost-all-dev liboctomap-dev libfcl-dev libassimp-dev liborocos-kdl-dev libyaml-cpp-dev libtinyxml2-dev libconsole-bridge-dev libbullet-dev libpcl-dev libbullet-extras-dev libomp-dev libcxxopts-dev nodejs)
+PACKAGES=(build-essential cmake git wget g++ python3-pip python3-dev libeigen3-dev libcli11-dev libboost-all-dev liboctomap-dev libfcl-dev libassimp-dev liborocos-kdl-dev libyaml-cpp-dev libtinyxml2-dev libconsole-bridge-dev libbullet-dev libpcl-dev libbullet-extras-dev libomp-dev libcxxopts-dev nodejs libgraphviz-dev qtbase5-dev libqt5svg5-dev libqwt-qt5-dev)
 MISSING_PACKAGES=()
 for pkg in "${PACKAGES[@]}"; do
     if ! dpkg -s "$pkg" &> /dev/null; then
@@ -35,7 +35,7 @@ fi
 # 2. 安装 Python 核心依赖及 SAM3
 # ------------------------------------------------------------------------------
 echo "🐍 正在安装 Python 核心依赖库..."
-pip3 install timm einops pycocotools --break-system-packages
+pip3 install timm einops pycocotools pybullet --break-system-packages
 
 if [ -d "third_party/sam3" ]; then
     echo "  ↳ 正在通过本地 third_party/sam3 安装 SAM3 官方支持包..."

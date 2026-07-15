@@ -22,7 +22,7 @@ if SRC_DIR not in sys.path:
 
 from aisprayer.core.config import SprayerConfig
 from aisprayer.core.vision.segmenter import SegmenterFactory
-from aisprayer.core.vision.vision_processor import VisionProcessor
+from aisprayer.core.vision.reconstruction import PoissonReconstructor
 from aisprayer.core.vision.recorder import ScanRecorder
 
 def main():
@@ -75,7 +75,7 @@ def main():
         
         # 初始化处理器并执行点云重建
         intrinsics_k = np.array(k_list) if k_list else None
-        processor = VisionProcessor(
+        processor = PoissonReconstructor(
             T_camera_to_base=sprayer_config.T_camera_to_base,
             intrinsics_k=intrinsics_k,
             segmenter=segmenter,
@@ -83,8 +83,21 @@ def main():
         color_path = os.path.join(scan_dir, "scan.jpg")
         depth_path = os.path.join(scan_dir, "scan.depth.npy")
         output_dir = os.path.join(scan_dir, "output")
-        print("[*] 正在执行点云网格重建流水线...")
-        processor.process_scan_data(color_image_path=color_path, depth_image_path=depth_path, output_dir=output_dir)
+        print("[*] 正在执行 Poisson 网格重建流水线...")
+        os.makedirs(output_dir, exist_ok=True)
+        meshes, mask_img = processor.from_file(color_image_path=color_path, depth_image_path=depth_path, split_parts=2)
+        
+        # 外部保存掩码图像
+        mask_overlay_path = os.path.join(output_dir, "captured_color_mask.jpg")
+        cv2.imwrite(mask_overlay_path, mask_img)
+        print(f"🎭 掩码标记图已导出为: {mask_overlay_path}")
+
+        # 保存 3D 网格
+        if len(meshes) == 1:
+            meshes[0].export(os.path.join(output_dir, "reconstructed.obj"))
+        else:
+            for i, mesh in enumerate(meshes):
+                mesh.export(os.path.join(output_dir, f"{i + 1}.obj"))
         
     else:
         # 2. 如果是离线目录读取模式
@@ -105,11 +118,19 @@ def main():
             print(f"[*] 模式: 加载指定的离线数据目录: {scan_dir}")
 
     # =========================================================
+    # 查找输出目录和重建的 3D 网格文件
+    # =========================================================
+    output_dir = os.path.join(scan_dir, "output")
+    color_img_path = os.path.join(scan_dir, "scan.jpg")
+    
+    obj_files = glob.glob(os.path.join(output_dir, "*.obj"))
+
+    # =========================================================
     # PyBullet 机器人仿真模式
     # =========================================================
     if args.mode == "robot":
         print("[*] 启动 PyBullet 机器人运动仿真模式...")
-        traj_json = os.path.join(scan_dir, "output", "trajectory.json")
+        traj_json = os.path.join(output_dir, "trajectory.json")
         urdf_path = sprayer_config.urdf_path
         if not urdf_path:
             raise ValueError("[!] 未能在配置文件中找到 robot_urdf 设置。")
@@ -117,19 +138,15 @@ def main():
         render_robot_trajectory(
             urdf_path=urdf_path,
             trajectory_path=traj_json,
+            obj_files=obj_files,
             tcp_name="spray_nozzle_link",
             fps=30.0,
-            base_height=0.0
+            base_height=0.0,
+            spray_width=sprayer_config.spray_width,
+            spray_distance=sprayer_config.spray_distance
         )
         return
 
-    # =========================================================
-    # 可视化阶段：读取输出目录并在 Open3D 窗口中加载网格与真实颜色
-    # =========================================================
-    output_dir = os.path.join(scan_dir, "output")
-    color_img_path = os.path.join(scan_dir, "scan.jpg")
-    
-    obj_files = glob.glob(os.path.join(output_dir, "*.obj"))
     if not obj_files:
         print(f"[!] 在 {output_dir} 下未找到任何 .obj 文件，请检查处理流水线是否成功执行。")
         return
@@ -255,6 +272,7 @@ def main():
 
     def load_tcp_trajectory(json_path, urdf_path, tcp_name):
         """通过 URDF 对关节轨迹执行正运动学，获取 TCP 轨迹。"""
+        import pybullet as p
         with open(json_path, "r") as f:
             data = json.load(f)
             
@@ -264,7 +282,18 @@ def main():
         if not urdf_path or not os.path.exists(urdf_path):
             raise ValueError(f"无法找到用于 TCP 正运动学的 URDF: {urdf_path}")
 
-        import pybullet as p
+        point_list = []
+        strokes = data.get("strokes", [])
+        transitions = data.get("transitions", [])
+        
+        # 只提取实际喷涂的 strokes，按顺序相连
+        for i in range(len(strokes)):
+            for point in strokes[i].get("points", []):
+                if "joint_positions" in point and point.get("status") == "SUCCESS":
+                    point_list.append(point)
+
+        if not point_list:
+            return np.empty((0, 3)), np.empty((0, 4)), np.empty(0, dtype=bool)
 
         client_id = p.connect(p.DIRECT)
         try:
@@ -286,15 +315,6 @@ def main():
                 raise ValueError(f"URDF 中未找到 TCP 链接: {tcp_name}")
 
             positions, quats = [], []
-            point_list = []
-            for stroke in data["strokes"]:
-                for point in stroke.get("points", []):
-                    if "joint_positions" in point and point.get("status") == "SUCCESS":
-                        point_list.append(point)
-            for transition in data.get("transitions", []):
-                for point in transition:
-                    if "joint_positions" in point:
-                        point_list.append(point)
 
             for point in point_list:
                 joints = point["joint_positions"]
@@ -575,13 +595,15 @@ def main():
             t_pos, t_quats, t_freespace = [], [], []
             if args.tcp_source in ["auto", "joint"]:
                 # 尝试加载包含运动学信息的轨迹 (Motion Data)
-                t_pos, t_quats, t_freespace = load_tcp_trajectory(
-                    unified_json, sprayer_config.urdf_path, "spray_nozzle_link"
-                )
-                if len(t_pos) > 0:
-                    print(f"  --> 渲染: [Motion Data] 基于关节运动学正解的真实 TCP 轨迹与过渡段 ({len(t_pos)} 个点)")
-                elif args.tcp_source == "joint":
-                    print("  --> [!] 警告: 未能找到 joint_positions 数据进行运动学解算。")
+                try:
+                    t_pos, t_quats, t_freespace = load_tcp_trajectory(
+                        unified_json, sprayer_config.urdf_path, "spray_nozzle_link"
+                    )
+                    if len(t_pos) > 0:
+                        print(f"  --> 渲染: [Motion Data] 基于关节运动学正解的真实 TCP 轨迹与过渡段 ({len(t_pos)} 个点)")
+                except Exception as e:
+                    print(f"  --> [!] 无法加载运动学正解轨迹，将尝试降级处理: {e}")
+                    t_pos = []
                     
             if len(t_pos) == 0 and args.tcp_source in ["auto", "xyz"]:
                 # 如果没有运动学数据或指定了 xyz，则直接使用原始目标位置
@@ -590,24 +612,34 @@ def main():
                     print(f"  --> 渲染: [TCP Data] 原始工艺规划 TCP 目标路径，不包含机器臂过渡段 ({len(t_pos)} 个点)")
 
             if len(t_pos) > 0:
-                traj_tube = build_path_tube(
-                    t_pos, t_freespace, radius=0.0011, start_color=(0.0, 0.85, 0.85), end_color=(0.0, 0.35, 0.15)
-                )
-                traj_freespace = build_freespace_connections(t_pos, t_freespace, radius=0.0008, color=(1.0, 0.0, 0.0))
-                traj_pcd = build_waypoint_cloud(t_pos, color=(0.0, 0.75, 0.75))
-                traj_arrows = build_waypoint_arrows(t_pos, t_quats, stride=5, size=0.03, color=(0.0, 1.0, 1.0))
+                is_identical = False
+                try:
+                    if len(t_pos) == len(positions) and np.allclose(t_pos, positions) and np.allclose(t_quats, quats):
+                        is_identical = True
+                except Exception:
+                    pass
                 
-                traj_start_marker = o3d.geometry.TriangleMesh.create_sphere(radius=0.005)
-                traj_start_marker.translate(t_pos[0])
-                traj_start_marker.paint_uniform_color([0.0, 1.0, 0.0])
-                
-                traj_end_marker = o3d.geometry.TriangleMesh.create_sphere(radius=0.005)
-                traj_end_marker.translate(t_pos[-1])
-                traj_end_marker.paint_uniform_color([1.0, 0.0, 1.0])
-                
-                traj_stroke_numbers = build_stroke_numbers(t_pos, t_freespace, scale=0.008, color=(1.0, 0.0, 0.0))
-                
-                geometries.extend([traj_tube, traj_freespace, traj_pcd, traj_arrows, traj_start_marker, traj_end_marker, traj_stroke_numbers])
+                if is_identical:
+                    print("  --> [!] 发现 TCP 轨迹与表面投影轨迹完全重合，为避免 3D 渲染画面闪烁撕裂 (Z-fighting)，已自动隐藏重复的轨迹。")
+                else:
+                    traj_tube = build_path_tube(
+                        t_pos, t_freespace, radius=0.0011, start_color=(0.0, 0.85, 0.85), end_color=(0.0, 0.35, 0.15)
+                    )
+                    traj_freespace = build_freespace_connections(t_pos, t_freespace, radius=0.0008, color=(1.0, 0.0, 0.0))
+                    traj_pcd = build_waypoint_cloud(t_pos, color=(0.0, 0.75, 0.75))
+                    traj_arrows = build_waypoint_arrows(t_pos, t_quats, stride=5, size=0.03, color=(0.0, 1.0, 1.0))
+                    
+                    traj_start_marker = o3d.geometry.TriangleMesh.create_sphere(radius=0.005)
+                    traj_start_marker.translate(t_pos[0])
+                    traj_start_marker.paint_uniform_color([0.0, 1.0, 0.0])
+                    
+                    traj_end_marker = o3d.geometry.TriangleMesh.create_sphere(radius=0.005)
+                    traj_end_marker.translate(t_pos[-1])
+                    traj_end_marker.paint_uniform_color([1.0, 0.0, 1.0])
+                    
+                    traj_stroke_numbers = build_stroke_numbers(t_pos, t_freespace, scale=0.008, color=(1.0, 0.0, 0.0))
+                    
+                    geometries.extend([traj_tube, traj_freespace, traj_pcd, traj_arrows, traj_start_marker, traj_end_marker, traj_stroke_numbers])
         except Exception as e:
             print(f"[!] 渲染 TCP/Motion 轨迹失败: {e}")
 
@@ -619,12 +651,13 @@ def main():
         height=900,
     )
 
-def render_robot_trajectory(urdf_path, trajectory_path, tcp_name="spray_nozzle_link", fps=30.0, base_height=0.0):
+def render_robot_trajectory(urdf_path, trajectory_path, obj_files=None, tcp_name="spray_nozzle_link", fps=30.0, base_height=0.0, spray_width=0.15, spray_distance=0.1):
     import pybullet as p
     import pybullet_data
     import time
     import math
     import json
+    import numpy as np
     
     if not os.path.exists(urdf_path):
         print(f"[!] URDF 文件未找到: {urdf_path}")
@@ -638,14 +671,20 @@ def render_robot_trajectory(urdf_path, trajectory_path, tcp_name="spray_nozzle_l
 
     traj_data = []
     if isinstance(data, dict) and "strokes" in data:
-        for stroke in data["strokes"]:
-            for point in stroke.get("points", []):
+        strokes = data.get("strokes", [])
+        transitions = data.get("transitions", [])
+        
+        for i in range(len(strokes)):
+            for point in strokes[i].get("points", []):
                 if "joint_positions" in point and point.get("status") == "SUCCESS":
+                    point["is_spraying"] = True
                     traj_data.append(point)
-        for transition in data.get("transitions", []):
-            for point in transition:
-                if "joint_positions" in point:
-                    traj_data.append(point)
+            
+            if i < len(transitions):
+                for point in transitions[i]:
+                    if "joint_positions" in point:
+                        point["is_spraying"] = False
+                        traj_data.append(point)
 
     if not traj_data or "joint_positions" not in traj_data[0]:
         print(f"[!] 轨迹 JSON 不包含 joint_positions: {trajectory_path}")
@@ -666,6 +705,35 @@ def render_robot_trajectory(urdf_path, trajectory_path, tcp_name="spray_nozzle_l
     planeId = p.loadURDF("plane.urdf")
     base_position = [0.0, 0.0, base_height]
     robotId = p.loadURDF(urdf_path, basePosition=base_position, useFixedBase=1)
+    
+    # 显示重建的 3D 网格 (obj_files)
+    mesh_ids = []
+    if obj_files:
+        for obj_path in obj_files:
+            try:
+                visual_shape_id = p.createVisualShape(
+                    shapeType=p.GEOM_MESH,
+                    fileName=obj_path,
+                    rgbaColor=[0.75, 0.75, 0.82, 1.0],
+                    meshScale=[1, 1, 1]
+                )
+                collision_shape_id = p.createCollisionShape(
+                    shapeType=p.GEOM_MESH,
+                    fileName=obj_path,
+                    meshScale=[1, 1, 1],
+                    flags=p.GEOM_FORCE_CONCAVE_TRIMESH
+                )
+                mesh_id = p.createMultiBody(
+                    baseMass=0,
+                    baseCollisionShapeIndex=collision_shape_id,
+                    baseVisualShapeIndex=visual_shape_id,
+                    basePosition=base_position,
+                    baseOrientation=[0, 0, 0, 1]
+                )
+                mesh_ids.append(mesh_id)
+                print(f"[*] 已在 PyBullet 仿真中加载重建网格: {os.path.basename(obj_path)}")
+            except Exception as e:
+                print(f"[!] PyBullet 加载网格失败 {obj_path}: {e}")
     
     num_joints = p.getNumJoints(robotId)
     revolute_joint_indices = []
@@ -701,8 +769,8 @@ def render_robot_trajectory(urdf_path, trajectory_path, tcp_name="spray_nozzle_l
             surf_qz = point.get("surface_qz", point["qz"])
             surf_qw = point.get("surface_qw", point["qw"])
             surf_rotation = p.getMatrixFromQuaternion([surf_qx, surf_qy, surf_qz, surf_qw])
-            # 正确的 Z 轴：列优先下的第三列 = indices [6,7,8]
-            z_axis = [surf_rotation[6], surf_rotation[7], surf_rotation[8]]
+            # 正确的 Z 轴：行优先下的第三列 = indices [2, 5, 8]
+            z_axis = [surf_rotation[2], surf_rotation[5], surf_rotation[8]]
             arrow_end = [position[i] + 0.04 * z_axis[i] for i in range(3)]
             p.addUserDebugLine(position, arrow_end, [0.0, 1.0, 1.0], lineWidth=2.5)
         previous_position = position
@@ -720,8 +788,30 @@ def render_robot_trajectory(urdf_path, trajectory_path, tcp_name="spray_nozzle_l
     print("=======================================================\n")
     time.sleep(1)
     
+    paint_decal_ids = []
+    
+    # 预计算喷漆的本地射线目标 (形成一个圆锥面)
+    local_ray_targets = []
+    spray_rad = spray_width / 2.0
+    # 在给定的 spray_distance 平面上生成一个圆形采样盘
+    for r in np.linspace(0.01, spray_rad, 5):
+        num_points = max(4, int((r / spray_rad) * 20))
+        for angle in np.linspace(0, 2*math.pi, num_points, endpoint=False):
+            local_x = r * math.cos(angle)
+            local_y = r * math.sin(angle)
+            local_z = spray_distance
+            # 延长射线以便击中略远的物体 (例如最多 0.5 米)
+            scale = 0.5 / spray_distance if spray_distance > 1e-4 else 5.0
+            local_ray_targets.append(np.array([local_x * scale, local_y * scale, local_z * scale]))
+    num_rays = len(local_ray_targets)
+    
     try:
         while True:
+            # 清除上一轮画的油漆
+            for decal_id in paint_decal_ids:
+                p.removeUserDebugItem(decal_id)
+            paint_decal_ids.clear()
+            
             previous_tcp_position = None
             for pt in traj_data:
                 positions = pt["joint_positions"]
@@ -733,10 +823,45 @@ def render_robot_trajectory(urdf_path, trajectory_path, tcp_name="spray_nozzle_l
                 
                 p.stepSimulation()
                 if tcp_link_index is not None:
-                    tcp_position = p.getLinkState(robotId, tcp_link_index, computeForwardKinematics=True)[4]
+                    tcp_state = p.getLinkState(robotId, tcp_link_index, computeForwardKinematics=True)
+                    tcp_position = tcp_state[4]
                     if previous_tcp_position is not None:
                         p.addUserDebugLine(previous_tcp_position, tcp_position, [1.0, 0.8, 0.0], lineWidth=2.0)
                     previous_tcp_position = tcp_position
+                    
+                    # 模拟喷漆效果：批量射线检测
+                    if pt.get("is_spraying", False):
+                        tcp_quat = tcp_state[5]
+                        matrix = np.array(p.getMatrixFromQuaternion(tcp_quat)).reshape(3, 3)
+                        
+                        ray_from = [tcp_position] * num_rays
+                        ray_to = []
+                        for local_target in local_ray_targets:
+                            # 将本地向量旋转到世界坐标系并平移
+                            world_vec = matrix.dot(local_target)
+                            ray_to.append([tcp_position[j] + world_vec[j] for j in range(3)])
+                        
+                        results = p.rayTestBatch(ray_from, ray_to)
+                        paint_points = []
+                        for res in results:
+                            # res: [objectUniqueId, linkIndex, hit_fraction, hit_position, hit_normal]
+                            if res[0] in mesh_ids:
+                                paint_points.append(res[3])
+                        
+                        if paint_points:
+                            colors = [[0.0, 0.5, 1.0]] * len(paint_points)
+                            decal_id = p.addUserDebugPoints(paint_points, colors, pointSize=4.0)
+                            paint_decal_ids.append(decal_id)
+                            
+                            # 动态渲染空气中喷射的“圆锥”线条 (存活 0.1 秒后自动消失)
+                            # 取最后外圈的 8 个点画线
+                            if len(local_ray_targets) >= 8:
+                                for edge_target in local_ray_targets[-8:]:
+                                    # 计算真实的击中距离比例 (假设打在最佳喷涂距离附近)
+                                    world_edge = matrix.dot(edge_target)
+                                    edge_to = [tcp_position[j] + world_edge[j] * (spray_distance / 0.5) for j in range(3)]
+                                    p.addUserDebugLine(tcp_position, edge_to, [0.0, 0.7, 1.0], lineWidth=1.0, lifeTime=0.1)
+                                
                 time.sleep(1.0 / fps)
             print("[*] 动画循环重新开始...")
             time.sleep(1)

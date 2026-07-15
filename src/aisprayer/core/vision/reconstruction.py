@@ -58,7 +58,7 @@ class PoissonReconstructor:
                  z_min: float = 100, z_max: float = 3000,
                  mask_erode_px: int = 1, flying_pixel_max_grad: float = 50.0,
                  mask_alpha: float = 0.25, poisson_depth: int = 9, density_threshold: float = 0.05,
-                 voxel_size: float = 0.003, normal_radius: float = 0.03, smooth_iterations: int = 10,
+                 voxel_size: float = 0.003, normal_radius: float = 0.03, smooth_iterations: int = 20,
                  **kwargs):
         """
         :param T_camera_to_base: 4x4 手眼标定矩阵 (numpy 数组或二维列表)
@@ -103,7 +103,7 @@ class PoissonReconstructor:
         edge_mask = cv2.dilate(edge_mask.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1).astype(bool)
         return ~edge_mask
 
-    def from_file(self, color_image_path, depth_image_path):
+    def from_file(self, color_image_path, depth_image_path, split_parts: int = 1, split_overlap_px: int = 12):
         print("-" * 50)
         print("🔍 [PoissonReconstructor] 泊松重建流水线启动...")
         print("-" * 50)
@@ -160,10 +160,18 @@ class PoissonReconstructor:
         # 把 YOLO 分割掩码叠加到彩色图上，以便返回给调用方保存
         mask_overlay_image = overlay_mask_on_image(color_image, yolo_mask_2d, alpha=self.mask_alpha)
 
-        # 整体重建，不再拆分为两个目标
-        mesh = self.reconstruct_mesh(raw_point_cloud, combined_mask)
-
-        return mesh, mask_overlay_image
+        if split_parts == 1:
+            # 整体重建，保持原逻辑，返回单个 mesh
+            mesh = self.reconstruct_mesh(raw_point_cloud, combined_mask)
+            return mesh, mask_overlay_image
+        else:
+            # 分腿拆分掩码，防止在接缝处连接不自然
+            from jeans_segmentation import split_jeans_mask
+            masks = split_jeans_mask(combined_mask, overlap_px=split_overlap_px)
+            meshes = []
+            for mask in masks:
+                meshes.append(self.reconstruct_mesh(raw_point_cloud, mask))
+            return meshes, mask_overlay_image
 
     def reconstruct_mesh(self, raw_point_cloud, yolo_mask_2d):
         """
@@ -313,6 +321,8 @@ if __name__ == "__main__":
     parser.add_argument("--show", action="store_true", help="是否在输出后显示重建效果")
     parser.add_argument("--segmenter", type=str, default="yolo_trousers", choices=["yolo_trousers", "sam3.1"],
                         help="选择使用的分割器引擎 (YOLO 或 SAM3.1)")
+    parser.add_argument("--split_parts", type=int, default=1, choices=[1, 2], help="重建成1个整体还是2个(分腿)")
+    parser.add_argument("--split_overlap_px", type=int, default=12, help="分腿时的重叠像素")
     args = parser.parse_args()
 
     sprayer_config = SprayerConfig(args.config)
@@ -353,10 +363,20 @@ if __name__ == "__main__":
         segmenter=segmenter,
     )
 
-    mesh, mask_overlay_image = reconstructor.from_file(
+    result = reconstructor.from_file(
         color_image_path=color_path,
-        depth_image_path=depth_path
+        depth_image_path=depth_path,
+        split_parts=args.split_parts,
+        split_overlap_px=args.split_overlap_px
     )
+    
+    # 根据 split_parts 的值，返回值可能是 (mesh, image) 或者是 (meshes_list, image)
+    if args.split_parts == 1:
+        meshes = [result[0]]
+        mask_overlay_image = result[1]
+    else:
+        meshes = result[0]
+        mask_overlay_image = result[1]
 
     output_dir = os.path.join(scan_dir, "output")
     os.makedirs(output_dir, exist_ok=True)
@@ -367,13 +387,24 @@ if __name__ == "__main__":
     print(f"🎭 掩码标记图已导出为: {mask_overlay_path}")
 
     # 外部保存 3D 网格
-    output_obj_path = os.path.join(output_dir, "reconstructed.obj")
-    mesh.export(output_obj_path)
-    print(f"✓ 测试完成，网格已导出为: {output_obj_path}")
+    output_paths = []
+    if len(meshes) == 1:
+        output_obj_path = os.path.join(output_dir, "reconstructed.obj")
+        meshes[0].export(output_obj_path)
+        output_paths.append(output_obj_path)
+    else:
+        for i, mesh in enumerate(meshes):
+            output_obj_path = os.path.join(output_dir, f"{i + 1}.obj")
+            mesh.export(output_obj_path)
+            output_paths.append(output_obj_path)
+    print(f"✓ 测试完成，网格已导出为: {', '.join(output_paths)}")
 
     if args.show:
         print("[*] 正在准备可视化重建网格...")
-        mesh = o3d.io.read_triangle_mesh(output_obj_path)
+        o3d_meshes = [o3d.io.read_triangle_mesh(p) for p in output_paths]
+        mesh = o3d_meshes[0]
+        for m in o3d_meshes[1:]:
+            mesh += m
         mesh.compute_vertex_normals()
         
         color_img = cv2.imread(color_path)
