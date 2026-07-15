@@ -761,18 +761,39 @@ def render_robot_trajectory(urdf_path, trajectory_path, obj_files=None, tcp_name
             p.addUserDebugLine(previous_position, position, [0.0, 0.9, 0.9], lineWidth=2.0)
         
         if arrow_stride > 0 and index % arrow_stride == 0:
-            # 用表面法向量四元数绘制箭头（与 --mode traj 中的箭头方向一致，指向机器人/相机侧）
-            # 注：PyBullet getMatrixFromQuaternion 返回列优先(column-major)格式：
-            #   m[0,1,2]=X轴, m[3,4,5]=Y轴, m[6,7,8]=Z轴
-            surf_qx = point.get("surface_qx", point["qx"])
-            surf_qy = point.get("surface_qy", point["qy"])
-            surf_qz = point.get("surface_qz", point["qz"])
-            surf_qw = point.get("surface_qw", point["qw"])
-            surf_rotation = p.getMatrixFromQuaternion([surf_qx, surf_qy, surf_qz, surf_qw])
-            # 正确的 Z 轴：行优先下的第三列 = indices [2, 5, 8]
-            z_axis = [surf_rotation[2], surf_rotation[5], surf_rotation[8]]
-            arrow_end = [position[i] + 0.04 * z_axis[i] for i in range(3)]
-            p.addUserDebugLine(position, arrow_end, [0.0, 1.0, 1.0], lineWidth=2.5)
+            # 使用真实 TCP 目标四元数（与 traj 模式中 tcp_source=joint 的朝向一致）
+            qx = point["qx"]
+            qy = point["qy"]
+            qz = point["qz"]
+            qw = point["qw"]
+            rotation = p.getMatrixFromQuaternion([qx, qy, qz, qw])
+            # 取第三列 [2, 5, 8] 作为 Z 轴（指向裤子）
+            z_axis = np.array([rotation[2], rotation[5], rotation[8]])
+            
+            # 画红色箭头主体
+            start = position
+            length = 0.04
+            color = [1.0, 0.0, 0.0]
+            end = [start[i] + z_axis[i] * length for i in range(3)]
+            p.addUserDebugLine(start, end, color, lineWidth=2.5)
+            
+            # 绘制 3D 箭头尖端
+            if np.linalg.norm(z_axis) > 1e-6:
+                direction = z_axis / np.linalg.norm(z_axis)
+                if abs(direction[0]) > 0.5:
+                    u = np.array([0, 1, 0])
+                else:
+                    u = np.array([1, 0, 0])
+                u = np.cross(direction, u)
+                u = u / np.linalg.norm(u)
+                v = np.cross(direction, u)
+                
+                head_len = length * 0.25
+                head_width = head_len * 0.4
+                for angle in [0, math.pi/2, math.pi, 3*math.pi/2]:
+                    offset = u * math.cos(angle) + v * math.sin(angle)
+                    p1 = np.array(end) - direction * head_len + offset * head_width
+                    p.addUserDebugLine(end, p1.tolist(), color, lineWidth=2.0)
         previous_position = position
 
     tcp_link_index = link_indices.get(tcp_name)
