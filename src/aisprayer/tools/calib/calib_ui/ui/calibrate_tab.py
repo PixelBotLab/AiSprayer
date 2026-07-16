@@ -4,7 +4,7 @@ from datetime import datetime
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QPushButton, QLineEdit, QGroupBox, QDoubleSpinBox, 
                              QTextEdit, QGridLayout, QSizePolicy, QScrollArea, 
-                             QFrame, QMessageBox)
+                             QFrame, QMessageBox, QComboBox)
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QPixmap
 from aisprayer.tools.calib.calib_ui.ui.widgets import ClickableFrame, AspectLabel
@@ -82,19 +82,46 @@ class CalibrateTab(QWidget):
         conn_layout = QHBoxLayout(self.conn_group)
         conn_layout.setContentsMargins(5, 5, 5, 5)
         conn_layout.setSpacing(5)
+        
+        self.combo_robot_type = QComboBox()
+        self.combo_robot_type.addItems(["inexbot", "dobot"])
+        self.combo_robot_type.setMinimumWidth(100)
+        
+        # Select default based on config if possible
+        default_type = self.main_win.h_cfg.get("robot", {}).get("type", "inexbot")
+        idx = self.combo_robot_type.findText(default_type, Qt.MatchFixedString)
+        if idx >= 0:
+            self.combo_robot_type.setCurrentIndex(idx)
+            
+        # Update default IP/Port based on selection
+        def update_default_ip_port(idx):
+            r_type = self.combo_robot_type.currentText()
+            if r_type == "dobot":
+                self.txt_ip.setText("192.168.5.1")
+                self.txt_port.setText("29999")
+            elif r_type == "inexbot":
+                self.txt_ip.setText("192.168.2.14")
+                self.txt_port.setText("6001")
+        self.combo_robot_type.currentIndexChanged.connect(update_default_ip_port)
+
         self.txt_ip = QLineEdit(self.main_win.default_ip)
-        self.txt_ip.setFixedWidth(300)
+        self.txt_ip.setMinimumWidth(150)
         self.txt_port = QLineEdit(self.main_win.default_port)
-        self.txt_port.setFixedWidth(100)
-        self.btn_connect_robot = QPushButton("Connect Robot")
+        self.txt_port.setMinimumWidth(80)
+        
+        self.btn_connect_robot = QPushButton("Connect")
         self.btn_connect_robot.clicked.connect(self.main_win.toggle_robot_connection)
 
+        # Build Single Row with increased spacing
+        conn_layout.addWidget(QLabel("Type:"))
+        conn_layout.addWidget(self.combo_robot_type)
+        conn_layout.addSpacing(30)
         conn_layout.addWidget(QLabel("IP:"))
         conn_layout.addWidget(self.txt_ip)
-        conn_layout.addSpacing(8)
+        conn_layout.addSpacing(30)
         conn_layout.addWidget(QLabel("Port:"))
         conn_layout.addWidget(self.txt_port)
-        conn_layout.addSpacing(15)
+        conn_layout.addSpacing(30)
         conn_layout.addWidget(self.btn_connect_robot)
         conn_layout.addStretch()
         right_layout.addWidget(self.conn_group)

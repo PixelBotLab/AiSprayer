@@ -19,7 +19,8 @@ else:
     if PROJECT_ROOT not in sys.path:
         sys.path.append(os.path.join(PROJECT_ROOT, "src"))
 
-from aisprayer.core.hardware.robot.inexbot_driver import InexbotDriver, RobotPose
+from aisprayer.core.hardware.robot.factory import get_robot
+from aisprayer.core.hardware.robot.base_driver import RobotPose
 from aisprayer.core.hardware.camera.factory import get_camera
 from aisprayer.utils.config_helper import load_config, get_abs_path
 from aisprayer.utils.hardware_helper import verify_hardware_consistency
@@ -156,6 +157,7 @@ class CalibMainWindow(QMainWindow):
         self.conn_group = self.calibrate_tab.conn_group
         self.txt_ip = self.calibrate_tab.txt_ip
         self.txt_port = self.calibrate_tab.txt_port
+        self.combo_robot_type = self.calibrate_tab.combo_robot_type
         self.btn_connect_robot = self.calibrate_tab.btn_connect_robot
         self.lbl_save_dir = self.calibrate_tab.lbl_save_dir
         self.jog_inputs = self.calibrate_tab.jog_inputs
@@ -241,7 +243,10 @@ class CalibMainWindow(QMainWindow):
             QApplication.processEvents()
 
             try:
-                self.robot = InexbotDriver(ip=ip, port=port)
+                robot_type = self.combo_robot_type.currentText().strip()
+                self.robot = get_robot(robot_type, ip=ip, port=port)
+                if self.robot is None:
+                    raise ValueError(f"Failed to instantiate robot driver for type: {robot_type}")
                 self.executor.robot = self.robot
                 if not self.robot.startup(timeout=5.0):
                     QMessageBox.critical(self, "Error", "Robot startup failed! Make sure controller IP/Port are correct.")
@@ -874,14 +879,7 @@ class CalibMainWindow(QMainWindow):
             return
 
         self.txt_calib_log.append(f"[Move] Target: X:{x:.2f} Y:{y:.2f} Z:{z:.2f} A:{self.jog_inputs['A'].value():.2f} B:{self.jog_inputs['B'].value():.2f} C:{self.jog_inputs['C'].value():.2f}")
-        self.robot.move_j(target_pose)
-        self.read_robot_pose()
-
-        actual_pose = self.robot.get_current_pose()
-        if actual_pose is not None:
-            self.txt_calib_log.append(f"[Move] Actual: X:{actual_pose.x:.2f} Y:{actual_pose.y:.2f} Z:{actual_pose.z:.2f} A:{np.degrees(actual_pose.a):.2f} B:{np.degrees(actual_pose.b):.2f} C:{np.degrees(actual_pose.c):.2f}")
-        else:
-            self.txt_calib_log.append("[Move] Failed to query actual reached pose.")
+        self.robot.move_j(target_pose, wait=False)
 
     def jog_step(self, axis, direction):
         if not self.robot_connected or not self.robot:

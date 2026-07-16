@@ -20,10 +20,10 @@ import math
 import logging
 import sys
 import threading
-from dataclasses import dataclass
 from typing import Optional, List, Union
 
 from .inexbot_v24_03_py38 import nrc_interface as nrc
+from .base_driver import BaseRobotDriver, RobotPose, PoseLike, _to_list
 
 COORD_ACS = 0; COORD_MCS = 1
 MODE_TEACH = 0; MODE_REMOTE = 1; MODE_RUN = 2
@@ -32,56 +32,6 @@ MODE_TEACH = 0; MODE_REMOTE = 1; MODE_RUN = 2
 
 logger = logging.getLogger(__name__)
 
-# ═══════════════════════════════════════════════
-#   位姿数据类型
-# ═══════════════════════════════════════════════
-
-@dataclass
-class RobotPose:
-    """
-    机器人直角坐标位姿（弧度制）
-    默认坐标系为直角坐标系，坐标轴顺序为(x, y, z, a, b, c)
-    平移单位: mm, 姿态角单位: rad。
-
-    示例:
-        p = RobotPose(400, 0, 300, 0, math.pi, 0)
-        p = RobotPose.form_list([400, 0, 300, 0, math.pi, 0])
-        robot.move_l(p)
-    """
-    x: float = 0.0; y: float = 0.0; z: float = 0.0
-    a: float = 0.0; b: float = 0.0; c: float = 0.0
-
-    @classmethod
-    def from_list(cls, data: list) -> "RobotPose":
-        """从长度 >=6 的列表创建位姿RobotPose, 不足部分填 0。"""
-        if not data: return cls()
-        return cls(*[float(x) for x in data[:6]])
-
-    def to_list(self) -> list:
-        """转换为 [x,y,z,a,b,c] 列表。"""
-        return [self.x, self.y, self.z, self.a, self.b, self.c]
-    
-    def __repr__(self):
-        """返回可读性较好的字符串表示。"""
-        return (f"RobotPose(x={self.x:.3f}, y={self.y:.3f}, z={self.z:.3f}, "
-                f"a={self.a:.3f}, b={self.b:.3f}, c={self.c:.3f})")
-    
-    def __eq__(self, other):
-        """重载==，允许直接比较两个 RobotPose 对象是否相等。"""
-        if not isinstance(other, RobotPose):
-            return NotImplemented
-        return (math.isclose(self.x, other.x) and math.isclose(self.y, other.y) and 
-                math.isclose(self.z, other.z) and math.isclose(self.a, other.a) and 
-                math.isclose(self.b, other.b) and math.isclose(self.c, other.c))
-
-# 位姿参数类型别名: 公开接口统一接受 RobotPose 或原始 list 两种形式
-PoseLike = Union[RobotPose, List[float]]
-
-def _to_list(pose: PoseLike) -> list:
-    """将 PoseLike 转换为 list 形式。"""
-    if isinstance(pose, RobotPose):
-        return pose.to_list()
-    return [float(x) for x in pose]
 
 # ---------------------------------------------
 # 伺服状态常量（get_servo_state，对应 demo Widget 伺服停止/就绪/报警/运行）
@@ -116,7 +66,7 @@ DEFAULT_ACC = 80
 DEFAULT_DEC = 80
 DEFAULT_GLOBAL_SPEED = 80   # 示教/远程/运行模式全局速度百分比 (0,100]
 
-class InexbotDriver:
+class InexbotDriver(BaseRobotDriver):
     """
     Inexbot 机械臂驱动类。
 
@@ -763,6 +713,53 @@ class InexbotDriver:
         if wait:
             self._wait_motion_done()
             logger.info(f"[move_j] movej command sent successfully, target pose: {pose}")
+        return ret
+
+    def move_joint(
+        self, 
+        joints: List[float], 
+        velocity: float = DEFAULT_VELOCITY, 
+        acc: float = DEFAULT_ACC, 
+        dec: float = DEFAULT_DEC,
+        tool_num: int = 0,
+        wait: bool = True,
+    ) -> int:
+        """
+        关节空间关节运动(MOVJ)，目标位置由各关节角度确定。
+        :param joints: 目标关节角度 [j1, j2, j3, j4, j5, j6]
+        :param velocity: 速度，单位 %（百分比），范围 (0, 100]
+        :param acc: 加速度，范围 (0, 100]
+        :param dec: 减速度，范围 (0, 100]
+        :param tool_num: 工具号
+        :param wait: 是否等待运动完成，True=阻塞直到运动完成，False=立即返回
+        :return: 接口返回码，（0=成功，负值=失败）
+        """
+        # 1. 构造 14 位点位数组 (前 7 位本体，后 7 位外部轴)
+        vec = nrc.VectorDouble()
+        for v in joints:
+            vec.append(float(v))
+        while len(vec) < 7:
+            vec.append(0.0)
+
+        cmd = nrc.MoveCmd()
+        cmd.targetPosType = nrc.PosType_data
+        cmd.targetPosValue = vec
+        cmd.coord = 0 # 关节坐标系
+        cmd.velocity = velocity
+        cmd.acc = acc
+        cmd.dec = dec
+        cmd.toolNum = tool_num if tool_num > 0 else self.tool_num
+        cmd.userNum = 0
+        cmd.pl = 0
+
+        with self._sdk_lock:
+            ret = nrc.robot_movej(self.fd, cmd)
+        if ret != nrc.SUCCESS:
+            logger.error(f"[move_joint] Failed to send move_joint command, error code: {ret}")
+            return ret
+        if wait:
+            self._wait_motion_done()
+            logger.info(f"[move_joint] move_joint command sent successfully, target joints: {joints}")
         return ret
 
     def move_l(

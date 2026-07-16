@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 import time
 import numpy as np
-from aisprayer.core.hardware.robot.inexbot_driver import RobotPose
+from aisprayer.core.hardware.robot.base_driver import RobotPose
 
 class VerificationRouteExecutor:
     """
