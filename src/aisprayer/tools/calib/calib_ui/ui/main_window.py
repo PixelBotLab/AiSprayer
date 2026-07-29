@@ -292,7 +292,13 @@ class CalibMainWindow(QMainWindow):
         self.conn_group.setStyleSheet("QGroupBox::title { color: #f44336; font-weight: bold; }")
 
     def select_save_dir(self):
-        d = QFileDialog.getExistingDirectory(self, "Select Save Directory", PROJECT_ROOT)
+        # 暂停定时器避免与模态对话框冲突
+        self.timer.stop()
+        d = QFileDialog.getExistingDirectory(
+            self, "Select Save Directory", PROJECT_ROOT,
+            QFileDialog.ShowDirsOnly | QFileDialog.DontUseNativeDialog
+        )
+        self.timer.start(30)
         if d:
             if os.path.exists(os.path.join(d, "calibration_info.yaml")):
                 target_dir = d
@@ -902,7 +908,12 @@ class CalibMainWindow(QMainWindow):
 
     def select_calib_file(self):
         from PyQt5.QtWidgets import QFileDialog
-        f, _ = QFileDialog.getOpenFileName(self, "Select Calibration File", PROJECT_ROOT, "YAML Files (*.yaml)")
+        self.timer.stop()
+        f, _ = QFileDialog.getOpenFileName(
+            self, "Select Calibration File", PROJECT_ROOT, "YAML Files (*.yaml)",
+            options=QFileDialog.DontUseNativeDialog
+        )
+        self.timer.start(30)
         if f:
             self.load_calib_file(f)
 
