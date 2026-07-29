@@ -53,8 +53,8 @@ class CalibMainWindow(QMainWindow):
 
         # Setup parameters
         self.camera_model = self.h_cfg.get("camera", {}).get("model", "orbbec")
-        self.default_ip = self.h_cfg.get("robot", {}).get("ip", "192.168.2.14")
-        self.default_port = str(self.h_cfg.get("robot", {}).get("port", "6001"))
+        self.default_ip = self.h_cfg.get("robot", {}).get("ip", "192.168.5.1")
+        self.default_port = str(self.h_cfg.get("robot", {}).get("port", "29999"))
         self.default_output_dir = get_abs_path(self.c_cfg.get("capture", {}).get("output_dir", "data/calib"), PROJECT_ROOT)
 
         # Board params

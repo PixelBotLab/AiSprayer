@@ -135,12 +135,13 @@ def alarmAlarmJsonFile():
 
 
 class DobotApi:
-    def __init__(self, ip, port, *args):
+    def __init__(self, ip, port, *args, verbose=False):
         self.ip = ip
         self.port = port
         self.socket_dobot = 0
         self.__globalLock = threading.Lock()
         self.text_log: Text = None
+        self.verbose = verbose  # 控制是否打印socket通信日志到控制台
         if args:
             self.text_log = args[0]
 
@@ -160,7 +161,7 @@ class DobotApi:
         if self.text_log:
             date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S ")
             self.text_log.insert(END, date + text + "\n")
-        else:
+        elif self.verbose:
             print(text)
 
     def send_data(self, string):

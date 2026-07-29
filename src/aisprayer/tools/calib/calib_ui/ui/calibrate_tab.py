@@ -88,7 +88,7 @@ class CalibrateTab(QWidget):
         self.combo_robot_type.setMinimumWidth(100)
         
         # Select default based on config if possible
-        default_type = self.main_win.h_cfg.get("robot", {}).get("type", "inexbot")
+        default_type = self.main_win.h_cfg.get("robot", {}).get("type", "dobot")
         idx = self.combo_robot_type.findText(default_type, Qt.MatchFixedString)
         if idx >= 0:
             self.combo_robot_type.setCurrentIndex(idx)
