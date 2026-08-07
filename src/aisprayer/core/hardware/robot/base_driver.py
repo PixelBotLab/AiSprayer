@@ -98,7 +98,7 @@ class BaseRobotDriver(ABC):
     def move_j(
         self, 
         pose: PoseLike, 
-        velocity: float = 50.0, 
+        velocity: float = 40.0, 
         acc: float = 80.0, 
         dec: float = 80.0,
         tool_num: int = 0,
@@ -120,7 +120,7 @@ class BaseRobotDriver(ABC):
     def move_joint(
         self, 
         joints: List[float], 
-        velocity: float = 50.0, 
+        velocity: float = 40.0, 
         acc: float = 80.0, 
         dec: float = 80.0,
         tool_num: int = 0,
@@ -142,7 +142,7 @@ class BaseRobotDriver(ABC):
     def move_l(
         self, 
         pose: PoseLike, 
-        velocity: float = 50.0, 
+        velocity: float = 100.0, 
         acc: float = 80.0, 
         dec: float = 80.0,
         tool_num: int = 0,
@@ -156,6 +156,54 @@ class BaseRobotDriver(ABC):
         :param dec: 减速度
         :param tool_num: 工具号
         :param wait: 是否等待运动完成
+        :return: 返回码
+        """
+        pass
+
+    @abstractmethod
+    def move_j_queue(
+        self, 
+        poses: List[PoseLike], 
+        velocity: float = 40.0, 
+        acc: float = 80.0, 
+        dec: float = 80.0,
+        tool_num: int = 0,
+        wait: bool = True,
+        cp_ratio: int = 50
+    ) -> int:
+        """
+        队列形式的关节运动(MOVJ)，用于多点连续平滑移动。
+        :param poses: 目标位姿列表
+        :param velocity: 速度
+        :param acc: 加速度
+        :param dec: 减速度
+        :param tool_num: 工具号
+        :param wait: 是否等待整个队列运动完成
+        :param cp_ratio: 连续路径平滑过渡比例(1-100)，0表示关闭平滑
+        :return: 返回码
+        """
+        pass
+
+    @abstractmethod
+    def move_l_queue(
+        self, 
+        poses: List[PoseLike], 
+        velocity: float = 100.0, 
+        acc: float = 80.0, 
+        dec: float = 80.0,
+        tool_num: int = 0,
+        wait: bool = True,
+        cp_ratio: int = 50
+    ) -> int:
+        """
+        队列形式的直线运动(MOVL)，用于多点连续平滑移动。
+        :param poses: 目标位姿列表
+        :param velocity: 速度
+        :param acc: 加速度
+        :param dec: 减速度
+        :param tool_num: 工具号
+        :param wait: 是否等待整个队列运动完成
+        :param cp_ratio: 连续路径平滑过渡比例(1-100)，0表示关闭平滑
         :return: 返回码
         """
         pass

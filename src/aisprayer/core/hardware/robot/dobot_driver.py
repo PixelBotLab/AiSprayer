@@ -142,13 +142,17 @@ class DobotDriver(BaseRobotDriver):
             time.sleep(0.05)
         return False
 
-    def move_j(self, pose: PoseLike, velocity: float = 50.0, acc: float = 80.0, dec: float = 80.0, tool_num: int = 0, wait: bool = True) -> int:
+    def move_j(self, pose: PoseLike, velocity: float = 40.0, acc: float = 80.0, dec: float = 80.0, tool_num: int = 0, wait: bool = True) -> int:
         if not self._connected or not self.move:
             return -2
         lst = _to_list(pose)
         x, y, z = lst[0], lst[1], lst[2]
         rx_deg, ry_deg, rz_deg = math.degrees(lst[3]), math.degrees(lst[4]), math.degrees(lst[5])
         
+        if self.dashboard:
+            self.dashboard.SpeedJ(int(velocity))
+            self.dashboard.AccJ(int(acc))
+            
         # We can dynamically set speed if needed, but DobotMove API just sends the command.
         # Alternatively we can use SpeedJ() from dashboard
         self.move.MovJ(x, y, z, rx_deg, ry_deg, rz_deg)
@@ -157,11 +161,15 @@ class DobotDriver(BaseRobotDriver):
             self._wait_motion_done()
         return 0
 
-    def move_joint(self, joints: List[float], velocity: float = 50.0, acc: float = 80.0, dec: float = 80.0, tool_num: int = 0, wait: bool = True) -> int:
+    def move_joint(self, joints: List[float], velocity: float = 40.0, acc: float = 80.0, dec: float = 80.0, tool_num: int = 0, wait: bool = True) -> int:
         if not self._connected or not self.move:
             return -2
         if len(joints) < 6:
             joints.extend([0.0]*(6-len(joints)))
+            
+        if self.dashboard:
+            self.dashboard.SpeedJ(int(velocity))
+            self.dashboard.AccJ(int(acc))
         
         self.move.JointMovJ(joints[0], joints[1], joints[2], joints[3], joints[4], joints[5])
         
@@ -169,17 +177,79 @@ class DobotDriver(BaseRobotDriver):
             self._wait_motion_done()
         return 0
 
-    def move_l(self, pose: PoseLike, velocity: float = 50.0, acc: float = 80.0, dec: float = 80.0, tool_num: int = 0, wait: bool = True) -> int:
+    def move_l(self, pose: PoseLike, velocity: float = 100.0, acc: float = 80.0, dec: float = 80.0, tool_num: int = 0, wait: bool = True) -> int:
         if not self._connected or not self.move:
             return -2
         lst = _to_list(pose)
         x, y, z = lst[0], lst[1], lst[2]
         rx_deg, ry_deg, rz_deg = math.degrees(lst[3]), math.degrees(lst[4]), math.degrees(lst[5])
         
+        if self.dashboard:
+            self.dashboard.SpeedL(int(velocity))
+            self.dashboard.AccL(int(acc))
+            
         self.move.MovL(x, y, z, rx_deg, ry_deg, rz_deg)
         
         if wait:
             self._wait_motion_done()
+        return 0
+
+    def move_j_queue(
+        self, 
+        poses: List[PoseLike], 
+        velocity: float = 40.0, 
+        acc: float = 80.0, 
+        dec: float = 80.0,
+        tool_num: int = 0,
+        wait: bool = True,
+        cp_ratio: int = 50
+    ) -> int:
+        if not self._connected or not self.move:
+            return -2
+            
+        if self.dashboard:
+            self.dashboard.CP(cp_ratio)
+            self.dashboard.SpeedJ(int(velocity))
+            self.dashboard.AccJ(int(acc))
+            
+        for pose in poses:
+            lst = _to_list(pose)
+            x, y, z = lst[0], lst[1], lst[2]
+            rx_deg, ry_deg, rz_deg = math.degrees(lst[3]), math.degrees(lst[4]), math.degrees(lst[5])
+            self.move.MovJ(x, y, z, rx_deg, ry_deg, rz_deg)
+            
+        if wait:
+            self._wait_motion_done()
+            
+        return 0
+
+    def move_l_queue(
+        self, 
+        poses: List[PoseLike], 
+        velocity: float = 100.0, 
+        acc: float = 80.0, 
+        dec: float = 80.0,
+        tool_num: int = 0,
+        wait: bool = True,
+        cp_ratio: int = 50
+    ) -> int:
+        if not self._connected or not self.move:
+            return -2
+            
+        if self.dashboard:
+            self.dashboard.CP(cp_ratio)
+            self.dashboard.SpeedL(int(velocity))
+            self.dashboard.AccL(int(acc))
+            
+        for pose in poses:
+            lst = _to_list(pose)
+            x, y, z = lst[0], lst[1], lst[2]
+            rx_deg, ry_deg, rz_deg = math.degrees(lst[3]), math.degrees(lst[4]), math.degrees(lst[5])
+            self.move.MovL(x, y, z, rx_deg, ry_deg, rz_deg)
+            
+        if wait:
+            self._wait_motion_done()
+            
         return 0
 
     def set_tool_number(self, tool_num: int) -> bool:

@@ -189,8 +189,8 @@ class VerifyTab(QWidget):
         lbl_global_speed = QLabel("Global Speed:")
         self.slider_speed = QSlider(Qt.Horizontal)
         self.slider_speed.setRange(1, 100)
-        self.slider_speed.setValue(80)
-        self.lbl_speed_val = QLabel("80 %")
+        self.slider_speed.setValue(40)
+        self.lbl_speed_val = QLabel("40 %")
         self.lbl_speed_val.setFixedWidth(65)
         
         def on_speed_changed(val):
@@ -207,8 +207,8 @@ class VerifyTab(QWidget):
         lbl_movl_speed = QLabel("MOVL Speed:")
         self.slider_movl_speed = QSlider(Qt.Horizontal)
         self.slider_movl_speed.setRange(10, 1000)
-        self.slider_movl_speed.setValue(500)
-        self.lbl_movl_speed_val = QLabel("500 mm/s")
+        self.slider_movl_speed.setValue(100)
+        self.lbl_movl_speed_val = QLabel("100 mm/s")
         self.lbl_movl_speed_val.setFixedWidth(65)
         self.slider_movl_speed.valueChanged.connect(lambda val: self.lbl_movl_speed_val.setText(f"{val} mm/s"))
         
