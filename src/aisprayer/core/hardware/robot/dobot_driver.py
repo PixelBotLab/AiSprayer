@@ -65,12 +65,13 @@ class DobotDriver(BaseRobotDriver):
             if res:
                 parts = res.split(',')
                 if len(parts) >= 2:
-                    mode_str = parts[1].strip('{} \t\n\r')
-                    mode = int(mode_str)
-                    # Dobot RobotMode (rough map):
-                    # 5: Running, 7: Normal idle, 9: error/alarm
-                    if mode == 5:
-                        return 2
+                    mode_str = parts[1].strip('{} \t\n\r;')
+                    if mode_str:
+                        mode = int(mode_str)
+                        # Dobot RobotMode (rough map):
+                        # 5: Running, 7: Normal idle, 9: error/alarm
+                        if mode == 5:
+                            return 2
                     return 0
         except Exception as e:
             logger.warning(f"Error getting Dobot state: {e}")
@@ -273,4 +274,4 @@ class DobotDriver(BaseRobotDriver):
         if velocity is not None:
             self.set_global_speed(int(velocity))
         # Default home position for Dobot
-        return self.move_joint([0, 0, -90, 90, 90, 0], wait=wait)
+        return self.move_joint([0, 0, -90, -90, -90, 0], wait=wait)

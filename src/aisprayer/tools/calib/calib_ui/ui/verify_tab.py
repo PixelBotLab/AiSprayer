@@ -242,6 +242,19 @@ class VerifyTab(QWidget):
         sliders_grid.addWidget(self.slider_dec, 3, 1)
         sliders_grid.addWidget(self.lbl_dec_val, 3, 2)
         
+        # Row 4: CP Ratio
+        lbl_cp = QLabel("CP Ratio:")
+        self.slider_cp = QSlider(Qt.Horizontal)
+        self.slider_cp.setRange(0, 100)
+        self.slider_cp.setValue(50)
+        self.lbl_cp_val = QLabel("50 %")
+        self.lbl_cp_val.setFixedWidth(65)
+        self.slider_cp.valueChanged.connect(lambda val: self.lbl_cp_val.setText(f"{val} %"))
+        
+        sliders_grid.addWidget(lbl_cp, 4, 0)
+        sliders_grid.addWidget(self.slider_cp, 4, 1)
+        sliders_grid.addWidget(self.lbl_cp_val, 4, 2)
+        
         action_vbox.addLayout(sliders_grid)
 
         # Draw segment/point & verification route execution controls (2x2 Grid)

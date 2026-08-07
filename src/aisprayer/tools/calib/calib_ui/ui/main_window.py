@@ -191,6 +191,7 @@ class CalibMainWindow(QMainWindow):
         self.spin_tool_num = self.verify_tab.spin_tool_num
         self.slider_acc = self.verify_tab.slider_acc
         self.slider_dec = self.verify_tab.slider_dec
+        self.slider_cp = self.verify_tab.slider_cp
         self.progress_bar = self.verify_tab.progress_bar
         self.txt_verify_log = self.verify_tab.txt_verify_log
 
@@ -369,15 +370,66 @@ class CalibMainWindow(QMainWindow):
                     pass
                 self.last_heartbeat_time = time.time()
 
-        # 2. 验证路径非阻塞跟踪监控
+        # 2. 验证路径非阻塞跟踪监控 (状态机)
         if self.executor.is_moving():
             if self.robot_connected and self.robot:
                 now = time.time()
-                # 设定 0.8s 的保护时间间隔，避免在刚发送指令的瞬间误判为已经到达
-                if now - self.executor.last_move_cmd_time > 0.8:
-                    if self.robot.is_robot_idle():
-                        self.executor.completed_waypoints += 1
-                        self.execute_next_verify_step()
+                state = getattr(self, "task_state", "")
+                
+                if state == "dispatch_start":
+                    task_poses = self.verify_tasks[self.current_task_idx]
+                    item_id = self.verify_items[self.current_task_idx]["id"]
+                    acc = float(self.slider_acc.value())
+                    dec = float(self.slider_dec.value())
+                    tool_num = int(self.spin_tool_num.value())
+                    
+                    self.txt_verify_log.append(f"[*] Dispatching MOVJ for Item #{item_id} start point.")
+                    self.robot.move_j(task_poses[0], acc=acc, dec=dec, tool_num=tool_num, wait=False)
+                    self.executor.last_move_cmd_time = now
+                    self.task_state = "wait_start"
+                    
+                elif state == "wait_start":
+                    if now - self.executor.last_move_cmd_time > 0.8 and self.robot.is_robot_idle():
+                        self.txt_verify_log.append("[*] Reached start point. Pausing for 3 seconds...")
+                        self.delay_start_time = now
+                        self.task_state = "delay_3s"
+                        
+                elif state == "delay_3s":
+                    if now - self.delay_start_time >= 3.0:
+                        task_poses = self.verify_tasks[self.current_task_idx]
+                        item_id = self.verify_items[self.current_task_idx]["id"]
+                        if len(task_poses) > 1:
+                            acc = float(self.slider_acc.value())
+                            dec = float(self.slider_dec.value())
+                            tool_num = int(self.spin_tool_num.value())
+                            movl_speed = float(self.slider_movl_speed.value())
+                            cp_ratio = int(self.slider_cp.value())
+                            
+                            self.txt_verify_log.append(f"[*] Dispatching MOVL queue ({len(task_poses)-1} points) for Item #{item_id}.")
+                            self.robot.move_l_queue(task_poses[1:], velocity=movl_speed, acc=acc, dec=dec, tool_num=tool_num, wait=False, cp_ratio=cp_ratio)
+                            self.executor.last_move_cmd_time = now
+                            self.task_state = "wait_queue"
+                        else:
+                            self.verify_items[self.current_task_idx]["status"] = "visited"
+                            self.task_state = "task_done"
+                            
+                elif state == "wait_queue":
+                    if now - self.executor.last_move_cmd_time > 0.8 and self.robot.is_robot_idle():
+                        self.verify_items[self.current_task_idx]["status"] = "visited"
+                        self.task_state = "task_done"
+                        
+                elif state == "task_done":
+                    self.current_task_idx += 1
+                    if self.current_task_idx >= len(self.verify_tasks):
+                        self.executor.stop()
+                        self.btn_ver_move.setText("Move Robot (Execute Route)")
+                        self.btn_ver_move.setEnabled(True)
+                        self.progress_bar.setValue(100)
+                        self.progress_bar.setVisible(False)
+                        self.txt_verify_log.append("[OK] All verify items executed successfully!")
+                        self.task_state = "idle"
+                    else:
+                        self.task_state = "dispatch_start"
 
         # 3. 节流（每150ms）读取机械臂实时坐标并更新运动进度
         if self.robot_connected and self.robot:
@@ -1044,81 +1096,7 @@ class CalibMainWindow(QMainWindow):
         except Exception:
             pass
 
-    def execute_next_verify_step(self):
-        if time.time() - self.executor.last_move_cmd_time < 0.8:
-            return
 
-        if self.executor.exec_item_index >= len(self.verify_items):
-            self.executor.stop()
-            self.btn_ver_move.setText("Move Robot (Execute Route)")
-            self.btn_ver_move.setEnabled(True)
-            self.progress_bar.setValue(100)
-            self.progress_bar.setVisible(False)
-            self.txt_verify_log.append("[OK] All verify items executed successfully!")
-            return
-
-        current_item = self.verify_items[self.executor.exec_item_index]
-        poses = current_item["pose_data"]
-
-        if self.executor.exec_waypoint_index >= len(poses):
-            current_item["status"] = "visited"
-            self.txt_verify_log.append(f"[OK] Item #{current_item['id']} finished.")
-            self.executor.exec_item_index += 1
-            self.executor.exec_waypoint_index = 0
-            self.execute_next_verify_step()
-            return
-
-        pose_info = poses[self.executor.exec_waypoint_index]
-        offset = self.spin_ver_offset.value()
-        p_dest = pose_info["p_base"] + pose_info["n_base"] * offset
-        a = pose_info["a"]
-        b = pose_info["b"]
-        c = pose_info["c"]
-
-        target_pose = RobotPose(p_dest[0], p_dest[1], p_dest[2], a, b, c)
-
-        ok, err_msg = self.executor.check_safety_limit(p_dest)
-        if not ok:
-            msg = f"Item #{current_item['id']} Pt #{self.executor.exec_waypoint_index + 1} {err_msg}"
-            QMessageBox.warning(self, "Safety Limit", msg)
-            self.txt_verify_log.append(f"  [!] Safety Limit: {msg}")
-            self.stop_verify_execution()
-            return
-
-        if self.executor.exec_waypoint_index == 0:
-            move_mode = "MOVJ"
-        else:
-            move_mode = "MOVL"
-
-        if not self.robot.is_reachable(target_pose, move_mode):
-            self.txt_verify_log.append(f"  [*] Target pose unreachable ({move_mode}), trying to adjust roll to find a reachable pose...")
-            adjusted_pose = self.try_adjust_unreachable_pose(target_pose, pose_info, move_mode)
-            if adjusted_pose is not None:
-                target_pose = adjusted_pose
-                a = target_pose.a
-                b = target_pose.b
-                c = target_pose.c
-            else:
-                msg = f"Item #{current_item['id']} Pt #{self.executor.exec_waypoint_index + 1} target pose is kinematics-unreachable ({move_mode}) even after roll adjustment."
-                QMessageBox.warning(self, "Unreachable", msg)
-                self.txt_verify_log.append(f"  [!] Unreachable: {msg}")
-                self.stop_verify_execution()
-                return
-
-        acc = float(self.slider_acc.value())
-        dec = float(self.slider_dec.value())
-        tool_num = int(self.spin_tool_num.value())
-
-        if move_mode == "MOVJ":
-            self.txt_verify_log.append(f"[*] Moving ({move_mode}) to Item #{current_item['id']} Pt #{self.executor.exec_waypoint_index + 1}: X={p_dest[0]:.1f}, Y={p_dest[1]:.1f}, Z={p_dest[2]:.1f}, A={a:.4f}, B={b:.4f}, C={c:.4f} (Acc: {acc:.0f}%, Dec: {dec:.0f}%, Tool: {tool_num})")
-            self.robot.move_j(target_pose, acc=acc, dec=dec, tool_num=tool_num, wait=False)
-        else:
-            movl_speed = float(self.slider_movl_speed.value())
-            self.txt_verify_log.append(f"[*] Moving ({move_mode}) to Item #{current_item['id']} Pt #{self.executor.exec_waypoint_index + 1}: X={p_dest[0]:.1f}, Y={p_dest[1]:.1f}, Z={p_dest[2]:.1f}, A={a:.4f}, B={b:.4f}, C={c:.4f} (Speed: {movl_speed:.1f} mm/s, Acc: {acc:.0f}%, Dec: {dec:.0f}%, Tool: {tool_num})")
-            self.robot.move_l(target_pose, velocity=movl_speed, acc=acc, dec=dec, tool_num=tool_num, wait=False)
-        self.executor.last_move_cmd_time = time.time()
-
-        self.executor.exec_waypoint_index += 1
 
     def try_adjust_unreachable_pose(self, target_pose, pose_info, move_mode):
         """
@@ -1315,7 +1293,52 @@ class CalibMainWindow(QMainWindow):
         self.executor.robot = self.robot
         curr_pose = self.robot.get_current_pose()
         offset = self.spin_ver_offset.value()
+
+        acc = float(self.slider_acc.value())
+        dec = float(self.slider_dec.value())
+        tool_num = int(self.spin_tool_num.value())
+        movl_speed = float(self.slider_movl_speed.value())
+
+        # 1. 批量安全检查和运动学求解
+        adjusted_items = []
+        for item in self.verify_items:
+            adj_poses = []
+            for i, pose_info in enumerate(item["pose_data"]):
+                p_dest = pose_info["p_base"] + pose_info["n_base"] * offset
+                
+                # 安全限制检查
+                ok, err_msg = self.executor.check_safety_limit(p_dest)
+                if not ok:
+                    msg = f"Item #{item['id']} Pt #{i + 1} {err_msg}"
+                    QMessageBox.warning(self, "Safety Limit", msg)
+                    self.txt_verify_log.append(f"  [!] Safety Limit: {msg}")
+                    return
+
+                target_pose = RobotPose(p_dest[0], p_dest[1], p_dest[2], pose_info["a"], pose_info["b"], pose_info["c"])
+                move_mode = "MOVJ" if i == 0 else "MOVL"
+                
+                # 可达性与姿态调整
+                if not self.robot.is_reachable(target_pose, move_mode):
+                    self.txt_verify_log.append(f"  [*] Target pose unreachable ({move_mode}), trying to adjust roll...")
+                    adjusted_pose = self.try_adjust_unreachable_pose(target_pose, pose_info, move_mode)
+                    if adjusted_pose is not None:
+                        target_pose = adjusted_pose
+                    else:
+                        msg = f"Item #{item['id']} Pt #{i + 1} target pose is kinematics-unreachable ({move_mode}) even after roll adjustment."
+                        QMessageBox.warning(self, "Unreachable", msg)
+                        self.txt_verify_log.append(f"  [!] Unreachable: {msg}")
+                        return
+                        
+                adj_poses.append(target_pose)
+            adjusted_items.append(adj_poses)
+
+        # 2. 正式开始下发所有验证路径
         self.executor.start(self.verify_items, offset, curr_pose)
+        self.txt_verify_log.append(f"[*] Starting robot route execution (Total Distance: {self.executor.total_path_distance:.1f} mm)...")
+
+        self.verify_tasks = adjusted_items
+        self.current_task_idx = 0
+        self.task_state = "dispatch_start"
 
         self.btn_ver_move.setEnabled(False)
         self.btn_ver_move.setText("Moving...")
@@ -1325,9 +1348,8 @@ class CalibMainWindow(QMainWindow):
         else:
             self.progress_bar.setFormat("Progress: 100%")
         self.progress_bar.setVisible(True)
-        self.txt_verify_log.append(f"[*] Starting robot route execution (Total Distance: {self.executor.total_path_distance:.1f} mm)...")
         
-        self.execute_next_verify_step()
+        self.executor.last_move_cmd_time = time.time()
 
     def move_to_safe_pose(self):
         if not self.robot_connected or not self.robot:
