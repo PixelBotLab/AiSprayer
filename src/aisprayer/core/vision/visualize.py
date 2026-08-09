@@ -21,7 +21,7 @@ if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
 from aisprayer.core.config import SprayerConfig
-from aisprayer.core.vision.segmenter import SegmenterFactory
+from aisprayer.core.vision.image2d.segmenter import SegmenterFactory
 from aisprayer.core.vision.reconstruction import PoissonReconstructor
 from aisprayer.core.vision.recorder import ScanRecorder
 

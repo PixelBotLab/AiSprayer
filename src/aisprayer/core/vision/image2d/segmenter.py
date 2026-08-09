@@ -4,8 +4,8 @@ import numpy as np
 from abc import ABC, abstractmethod
 
 # 定位到项目根目录 (AiSprayer/)，config.yaml / models/ 等都挂在这一层
-# 当前文件: src/aisprayer/core/vision/segmenter.py -> vision -> core -> aisprayer -> src -> AiSprayer
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+# 当前文件: src/aisprayer/core/vision/image2d/segmenter.py -> image2d -> vision -> core -> aisprayer -> src -> AiSprayer
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", ".."))
 def resolve_project_path(path):
     """把相对路径解析为相对项目根目录 (SprayAnything/) 的绝对路径。
 
@@ -147,10 +147,13 @@ class SAMSegmenter(BaseSegmenter):
             import warnings
             import contextlib
             import os
+            import time
+            import torch
             
             # 临时屏蔽第三方库的各种烦人警告（如 timm 的 FutureWarning）
             warnings.filterwarnings("ignore")
             
+            t_load_start = time.time()
             from sam3.model_builder import build_sam3_image_model
             from sam3.model.sam3_image_processor import Sam3Processor
             
@@ -159,12 +162,19 @@ class SAMSegmenter(BaseSegmenter):
                 self.model = build_sam3_image_model(checkpoint_path=model_path, load_from_HF=False)
                 self.processor = Sam3Processor(self.model)
                 
+            t_load_end = time.time()
+            
             # 恢复警告配置
             warnings.filterwarnings("default")
             
-            print("[+] SAMSegmenter: 官方 SAM 3 模型加载成功")
+            device = next(self.model.parameters()).device
+            print(f"[+] SAMSegmenter: 官方 SAM 3 模型加载成功 (耗时: {t_load_end - t_load_start:.3f} 秒, 推理设备: {device})")
+            
+            if not torch.cuda.is_available():
+                print("[!] 警告: 当前环境中 torch 无法检测到 CUDA，将强制使用 CPU，这会导致推理极慢！")
+                
         except Exception as e:
-            print(f"[-] SAMSegmenter: 官方 SAM 3 加载失败! 请确保安装了 facebookresearch/sam3。错误: {e}")
+            print(f"[-] SAMSegmenter: 官方 SAM 3 加载失败! 错误: {e}")
             self.model = None
 
     def get_mask(self, image):
