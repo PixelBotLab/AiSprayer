@@ -42,6 +42,7 @@ OrbbecSDK.log.*
 data/runs/*
 data/calib/*
 !data/samples/
+!data/runs/0
 models/*
 !models/wissight.pt
 
