@@ -217,6 +217,18 @@ class PoissonReconstructor:
         densities = np.asarray(densities)
         density_val = np.quantile(densities, self.density_threshold)
         vertices_to_remove = densities < density_val
+        
+        # 【关键重叠修复】：严苛的距离裁剪
+        # 泊松重建会在边界处生成圆滑的“裙边”或者背面闭合曲面，
+        # 导致原本在 2D 掩码切分开的两条裤腿在 3D 空间再次膨胀，并在裆部发生物理重叠。
+        # 这里强制计算网格所有顶点到原始点云 (pcd) 的绝对物理距离，
+        # 将偏离超过 2 倍体素大小（如 6mm）的“虚假外壳”和“膨胀裙边”彻底裁剪掉！
+        #mesh_pcd = o3d.geometry.PointCloud()
+        #mesh_pcd.points = o3d_mesh.vertices
+        #dists = np.asarray(mesh_pcd.compute_point_cloud_distance(pcd))
+        #distance_threshold = self.voxel_size * 2.0
+        #vertices_to_remove = vertices_to_remove | (dists > distance_threshold)
+        
         o3d_mesh.remove_vertices_by_mask(vertices_to_remove)
 
         # 可选的后处理平滑 (Taubin 平滑不会显著导致收缩)

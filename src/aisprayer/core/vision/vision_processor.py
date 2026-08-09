@@ -466,9 +466,21 @@ class VisionProcessor:
         densities_np = np.asarray(densities)
         density_threshold = np.quantile(densities_np, 0.05)  # 去掉最低 5% 密度的顶点
         vertices_to_remove = densities_np < density_threshold
+        
+        # 【关键重叠修复】：严苛的距离裁剪
+        # 泊松重建会在分腿边界处生成圆滑的“裙边”或者背面闭合曲面，
+        # 导致原本切分开的两条裤腿在 3D 空间再次向外膨胀，在中间发生物理重叠。
+        # 我们计算生成网格的所有顶点到原始输入点云 (pcd) 的绝对物理距离，
+        # 将偏离点云超过 6mm 的“虚假外壳”和“膨胀裙边”彻底裁剪掉！
+        mesh_pcd = o3d.geometry.PointCloud()
+        mesh_pcd.points = o3d_mesh.vertices
+        dists = np.asarray(mesh_pcd.compute_point_cloud_distance(pcd))
+        distance_threshold = 0.006  # 6mm
+        vertices_to_remove = vertices_to_remove | (dists > distance_threshold)
+        
         o3d_mesh.remove_vertices_by_mask(vertices_to_remove)
-        print(f"🧹 泊松密度裁剪：去除低密度外壳顶点 {vertices_to_remove.sum()}/{len(densities_np)} "
-              f"(阈值={density_threshold:.4f})")
+        print(f"🧹 泊松边界与重叠裁剪：去除低密度及膨胀外壳顶点 {vertices_to_remove.sum()}/{len(densities_np)} "
+              f"(密度阈值={density_threshold:.4f}, 距离阈值={distance_threshold*1000:.1f}mm)")
 
         # =========================================================
         # 4. Trimesh 接入与拉普拉斯"烫平"布料褶皱
