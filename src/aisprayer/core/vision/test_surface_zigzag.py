@@ -16,6 +16,7 @@ from aisprayer.core.vision.reconstruction import PoissonReconstructor
 from aisprayer.core.vision.image2d.segmenter import SegmenterFactory
 from aisprayer.core.config import SprayerConfig
 from aisprayer.core.vision.surface_sampler import SurfaceZigzagSampler
+from aisprayer.core.vision.conformal_sampler import SurfaceConformalSampler
 
 
 def create_sphere_mesh(center, radius=0.003, color=[0.0, 1.0, 0.0]):
@@ -25,6 +26,8 @@ def create_sphere_mesh(center, radius=0.003, color=[0.0, 1.0, 0.0]):
     return sphere
 
 def create_cylinder_mesh(p1, p2, radius=0.001, color=[1.0, 0.0, 0.0]):
+    p1 = np.array(p1)
+    p2 = np.array(p2)
     vec = p2 - p1
     vec_len = np.linalg.norm(vec)
     if vec_len < 1e-6:
@@ -124,9 +127,9 @@ def main():
     default_scan = os.path.join(PROJECT_ROOT, "data/runs/0")
     parser.add_argument("--scan_dir", type=str, default=default_scan, help="扫描数据目录")
     parser.add_argument("--config", default="configs/aisprayer_config.yaml", help="配置文件路径")
-    parser.add_argument("--row_spacing", type=float, default=120.0, help="之字形横向行距 (mm)")
+    parser.add_argument("--row_spacing", type=float, default=100.0, help="之字形横向行距 (mm)")
     parser.add_argument("--point_spacing", type=float, default=100.0, help="路径上点距 (mm)")
-    parser.add_argument("--segmenter", type=str, default="sam3.1", help="使用的分割模型")
+    parser.add_argument("--segmenter", type=str, default="yolo", help="使用的分割模型")
     
     args = parser.parse_args()
 
@@ -184,7 +187,7 @@ def main():
 
     # 3. 运行 3D 曲面之字形采点
     print(f"[*] 开始 3D 曲面之字形采点 (行距={args.row_spacing}mm, 点距={args.point_spacing}mm)...")
-    sampler = SurfaceZigzagSampler()
+    sampler = SurfaceConformalSampler()
     
     paths_per_mesh = []
     total_points = 0
