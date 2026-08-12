@@ -17,6 +17,10 @@ class WebSocketLogHandler(logging.Handler):
 
     def emit(self, record):
         try:
+            # Filter out noisy uvicorn logs from frontend display
+            if record.name.startswith("uvicorn"):
+                return
+
             msg = self.format(record)
             
             # Clean up color codes if they got into the record

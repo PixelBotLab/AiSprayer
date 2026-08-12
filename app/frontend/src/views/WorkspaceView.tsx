@@ -16,8 +16,6 @@ interface WorkspaceViewProps {
 
 const WorkspaceView: React.FC<WorkspaceViewProps> = ({ activeTab }) => {
   const [robotState, setRobotState] = useState<RobotState>({ pose: [0,0,0,0,0,0], joint: [0,0,0,0,0,0] });
-  const [samples, setSamples] = useState<any[]>([]);
-  const [isCapturing, setIsCapturing] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -34,48 +32,13 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({ activeTab }) => {
     };
     connect();
 
-    const fetchSamples = async () => {
-      try {
-        const res = await fetch('http://localhost:8000/api/calib/samples');
-        if (res.ok) {
-          const data = await res.json();
-          setSamples(data.samples || []);
-        }
-      } catch (err) {
-        console.error('Failed to fetch samples:', err);
-      }
-    };
-    fetchSamples();
-
     return () => wsRef.current?.close();
   }, []);
-
-  const handleAddSample = async () => {
-    if (isCapturing) return;
-    setIsCapturing(true);
-    try {
-      const res = await fetch('http://localhost:8000/api/calib/samples/add', { method: 'POST' });
-      if (res.ok) {
-        const listRes = await fetch('http://localhost:8000/api/calib/samples');
-        if (listRes.ok) {
-          const data = await listRes.json();
-          setSamples(data.samples || []);
-        }
-      } else {
-        const err = await res.json();
-        alert(`Failed to add sample: ${err.detail}`);
-      }
-    } catch (err: any) {
-      alert(`Error capturing sample: ${err.message}`);
-    } finally {
-      setIsCapturing(false);
-    }
-  };
 
   const renderOperationZone = () => {
     switch (activeTab) {
       case 'calib':
-        return <CalibrationOp samples={samples} isCapturing={isCapturing} onAddSample={handleAddSample} />;
+        return <CalibrationOp />;
       case 'interactive':
         return <div className="p-8 text-slate-400 bg-slate-900/50 rounded-xl border border-slate-800 w-full h-full flex items-center justify-center">2D Interactive Teach (Coming Soon)</div>;
       case 'auto_planner':

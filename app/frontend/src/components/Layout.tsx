@@ -9,10 +9,10 @@ interface LayoutProps {
 
 const Layout: React.FC<LayoutProps> = ({ children, activeTab, setActiveTab }) => {
   const tabs = [
-    { id: 'calib', label: 'Calibration', icon: Crosshair },
     { id: 'interactive', label: 'Interactive Teach', icon: MousePointer2 },
     { id: 'auto_planner', label: '3D Auto Planner', icon: GitBranch },
     { id: 'digital_twin', label: 'Digital Twin', icon: Box },
+    { id: 'calib', label: 'Calibration', icon: Crosshair },
   ];
   const [isHovered, setIsHovered] = useState(false);
 

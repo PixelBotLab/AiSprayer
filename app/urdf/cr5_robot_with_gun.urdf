@@ -40,6 +40,36 @@
     </collision>
   </link>
 
+  <link name="spray_gun">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://dobot_rviz/meshes/dobot_gazebo_sim/spray_gun.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://dobot_rviz/meshes/dobot_gazebo_sim/spray_gun.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="Link6_to_spray_gun" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 1.5708" />
+    <parent link="Link6" />
+    <child link="spray_gun" />
+  </joint>
+
+  
+  <link name="spray_nozzle_link" />
+
+  <joint name="Link6_to_spray_nozzle_link" type="fixed">
+    <origin xyz="0.002022 -0.0353263 0.3122347" rpy="0.0329936 -0.0038327 -2.3392176" />
+    <parent link="Link6" />
+    <child link="spray_nozzle_link" />
+  </joint>
+
   <link name="world" />
 
   <joint name="world_joint" type="fixed">

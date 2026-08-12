@@ -85,7 +85,7 @@ const RobotModel: React.FC<RobotModelProps> = ({ jointAngles }) => {
     };
     loader.loadMeshCb = loadUrdfMesh;
 
-    loader.load(`http://localhost:8000/urdf/cr5_robot.urdf`, (r: any) => {
+    loader.load(`http://localhost:8000/urdf/cr5_robot.urdf?v=${Date.now()}`, (r: any) => {
       // 兜底再扫一遍整机，防止个别 mesh 漏网
       stripEmbeddedLights(r);
       r.rotation.x = -Math.PI / 2;

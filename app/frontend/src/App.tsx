@@ -4,7 +4,7 @@ import ConfigView from './views/ConfigView';
 import Layout from './components/Layout';
 
 function App() {
-  const [activeTab, setActiveTab] = useState('calib');
+  const [activeTab, setActiveTab] = useState('interactive');
 
   const renderContent = () => {
     switch (activeTab) {

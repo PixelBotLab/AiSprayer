@@ -3,6 +3,7 @@ import { Camera, Maximize, Crosshair, GripHorizontal } from 'lucide-react';
 
 const FloatingCameraZone: React.FC = () => {
   const [resolution, setResolution] = useState<{width: number, height: number} | null>(null);
+  const [streamUrl, setStreamUrl] = useState("http://localhost:8000/api/calib/camera/stream");
   
   // Floating window state
   const [position, setPosition] = useState({ x: 24, y: 24 });
@@ -107,7 +108,7 @@ const FloatingCameraZone: React.FC = () => {
 
         {/* Real Camera Stream */}
         <img 
-          src="http://localhost:8000/api/calib/camera/stream" 
+          src={streamUrl} 
           alt="Camera Stream" 
           className="absolute inset-0 w-full h-full object-contain z-0 transition-opacity duration-300 pointer-events-none"
           onError={(e) => {
@@ -115,6 +116,11 @@ const FloatingCameraZone: React.FC = () => {
             setResolution(null);
             const fallback = document.getElementById('camera-fallback');
             if (fallback) fallback.style.display = 'flex';
+            
+            // Auto reconnect after 3 seconds by busting the cache
+            setTimeout(() => {
+              setStreamUrl(`http://localhost:8000/api/calib/camera/stream?t=${Date.now()}`);
+            }, 3000);
           }}
           onLoad={(e) => {
             e.currentTarget.style.opacity = '1';

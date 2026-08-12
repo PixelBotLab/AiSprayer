@@ -1,57 +1,454 @@
-import React from 'react';
-import { Save, Play, RefreshCw } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { Save, Play, FolderPlus, Trash2, Image as ImageIcon, Camera, ChevronLeft, ChevronRight } from 'lucide-react';
 
-interface CalibrationOpProps {
-  samples: any[];
-  isCapturing: boolean;
-  onAddSample: () => void;
-}
+const CalibrationOp: React.FC = () => {
+  const [sessions, setSessions] = useState<string[]>([]);
+  const [activeSession, setActiveSession] = useState<string | null>(null);
+  const [sessionData, setSessionData] = useState<{ samples: any[], result: any }>({ samples: [], result: null });
+  const [activeImage, setActiveImage] = useState<string | null>(null);
+  const [isCapturing, setIsCapturing] = useState(false);
+  const [isRunning, setIsRunning] = useState(false);
+  const [progressData, setProgressData] = useState<{current: number, total: number, status: string} | null>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
 
-const CalibrationOp: React.FC<CalibrationOpProps> = ({ samples, isCapturing, onAddSample }) => {
-  return (
-    <div className="w-full h-full bg-slate-900/80 rounded-xl border border-slate-800 shadow-xl p-4 flex flex-col gap-4 backdrop-blur-sm min-h-[200px]">
-      {/* Thumbnails Gallery */}
-      <div className="flex-1 relative min-h-0">
-        <div className="absolute top-2 left-2 z-10 text-[10px] font-medium text-blue-400 bg-slate-900/90 backdrop-blur-sm border border-blue-500/30 px-2.5 py-0.5 rounded-full shadow-md">
-          {samples.length} Samples
-        </div>
+  const fetchSessions = async () => {
+    try {
+      const res = await fetch('http://localhost:8000/api/calib/sessions');
+      if (res.ok) {
+        const data = await res.json();
+        setSessions(data.sessions || []);
+        if (data.sessions?.length > 0 && !activeSession) {
+          setActiveSession(data.sessions[0]);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch sessions:', err);
+    }
+  };
+
+let calibrationModeTimeout: any = null;
+
+  useEffect(() => {
+    fetchSessions();
+
+    if (calibrationModeTimeout) {
+      clearTimeout(calibrationModeTimeout);
+      calibrationModeTimeout = null;
+    }
+
+    // Enable calibration mode for live camera feed
+    fetch('http://localhost:8000/api/system/camera/calibration_mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: true })
+    }).catch(console.error);
+
+    return () => {
+      // Disable calibration mode when leaving this tab, with a slight delay
+      // to prevent React StrictMode race conditions (mount -> unmount -> remount)
+      calibrationModeTimeout = setTimeout(() => {
+        fetch('http://localhost:8000/api/system/camera/calibration_mode', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled: false })
+        }).catch(console.error);
+      }, 100);
+    };
+  }, []);
+
+  const fetchSessionData = async (sessionId: string) => {
+    try {
+      const res = await fetch(`http://localhost:8000/api/calib/sessions/${sessionId}`);
+      if (res.ok) {
+        const data = await res.json();
+        setSessionData({ 
+          samples: data.samples || [], 
+          result: data.result || null,
+          mode: data.mode || undefined
+        });
+        if (data.samples?.length > 0) {
+          setActiveImage(data.samples[0].filename);
+        } else {
+          setActiveImage(null);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch session data:', err);
+    }
+  };
+
+  useEffect(() => {
+    if (!activeSession) return;
+    fetchSessionData(activeSession);
+  }, [activeSession]);
+
+  const handleCreateSession = async () => {
+    try {
+      const res = await fetch('http://localhost:8000/api/calib/sessions/new', { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        await fetchSessions();
+        setActiveSession(data.session_id);
+      }
+    } catch (err) {
+      console.error('Failed to create session:', err);
+    }
+  };
+
+  const handleDeleteSession = async () => {
+    if (!activeSession) return;
+    if (!window.confirm(`Are you sure you want to delete session ${activeSession}?`)) return;
+    try {
+      const res = await fetch(`http://localhost:8000/api/calib/sessions/${activeSession}`, { method: 'DELETE' });
+      if (res.ok) {
+        setActiveSession(null);
+        setActiveImage(null);
+        setSessionData({ samples: [], result: null });
+        fetchSessions();
+      }
+    } catch (err) {
+      console.error('Failed to delete session:', err);
+    }
+  };
+
+  const handleCapture = async () => {
+    if (!activeSession || isCapturing) return;
+    setIsCapturing(true);
+    try {
+      const res = await fetch(`http://localhost:8000/api/calib/sessions/${activeSession}/samples`, { method: 'POST' });
+      if (res.ok) {
+        // Refresh session data
+        const dataRes = await fetch(`http://localhost:8000/api/calib/sessions/${activeSession}`);
+        if (dataRes.ok) {
+          const data = await dataRes.json();
+          setSessionData({ 
+            samples: data.samples || [], 
+            result: data.result || null,
+            mode: data.mode || undefined
+          });
+          if (data.samples?.length > 0) {
+            setActiveImage(data.samples[data.samples.length - 1].filename); // select latest
+          }
+        }
+      } else {
+        const err = await res.json();
+        alert(`Capture failed: ${err.detail}`);
+      }
+    } catch (err: any) {
+      alert(`Error capturing sample: ${err.message}`);
+    } finally {
+      setIsCapturing(false);
+    }
+  };
+
+  const handleRunCalibration = async () => {
+    if (!activeSession || isRunning) return;
+    if (sessionData.samples.length < 3) {
+      alert('Need at least 3 samples to run calibration.');
+      return;
+    }
+    setIsRunning(true);
+    setProgressData({ current: 0, total: sessionData.samples.length, status: 'started' });
+    try {
+      const res = await fetch(`http://localhost:8000/api/calib/sessions/${activeSession}/run`, { method: 'POST' });
+      if (!res.ok) {
+        throw new Error('Failed to start calibration task');
+      }
+
+      const eventSource = new EventSource(`http://localhost:8000/api/calib/sessions/${activeSession}/progress`);
+      
+      eventSource.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.status === 'waiting') return;
         
-        <div className="w-full h-full border border-slate-800 border-dashed rounded-lg bg-slate-950/50 flex items-center p-3 gap-3 overflow-x-auto overflow-y-hidden custom-scrollbar pt-8">
-          {samples.length === 0 ? (
-            <div className="w-full h-full flex flex-col items-center justify-center text-slate-500 text-sm">
-              <RefreshCw size={16} className="opacity-30 mb-2" />
-              No calibration samples
-            </div>
-          ) : (
-            <div className="flex items-center gap-3 h-full">
-              {samples.map((s, idx) => (
-                <div key={idx} className="shrink-0 h-full aspect-video bg-slate-800 rounded-lg border border-slate-700 relative overflow-hidden group shadow-md hover:border-blue-500/50 transition-colors cursor-pointer">
-                  <div className="absolute inset-0 flex items-center justify-center text-slate-500 text-xs font-medium">Sample {idx + 1}</div>
-                  <div className="absolute bottom-0 inset-x-0 bg-gradient-to-t from-slate-900 to-transparent p-2 text-[10px] text-slate-300 translate-y-full group-hover:translate-y-0 transition-transform">
-                    View Details
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
+        setProgressData({
+          current: data.current || 0,
+          total: data.total || 1,
+          status: data.status
+        });
+        
+        if (data.filename) {
+          setActiveImage(data.filename);
+        }
+
+        if (data.status === 'completed' || data.status === 'error') {
+          eventSource.close();
+          setIsRunning(false);
+          setProgressData(null);
+          
+          if (data.status === 'completed') {
+            fetchSessionData(activeSession);
+          } else {
+            alert('Calibration failed. Check logs.');
+          }
+        }
+      };
+      
+      eventSource.onerror = () => {
+        eventSource.close();
+        setIsRunning(false);
+        setProgressData(null);
+      };
+    } catch (err: any) {
+      alert(`Error starting calibration: ${err.message}`);
+      setIsRunning(false);
+      setProgressData(null);
+    }
+  };
+
+  const activeImageUrl = activeSession && activeImage 
+    ? `http://localhost:8000/api/calib/sessions/${activeSession}/images_with_corners/${activeImage}`
+    : null;
+
+  const scrollTabs = (dir: 'left' | 'right') => {
+    if (scrollRef.current) {
+      scrollRef.current.scrollBy({ left: dir === 'left' ? -200 : 200, behavior: 'smooth' });
+    }
+  };
+
+  return (
+    <div className="w-full h-full flex flex-col bg-slate-900/80 rounded-xl border border-slate-800 shadow-xl overflow-hidden backdrop-blur-sm">
+      {/* TOP BAR: Sessions */}
+      <div className="h-14 shrink-0 border-b border-slate-800 bg-slate-950/50 flex items-center px-3 gap-2">
+        <button onClick={() => scrollTabs('left')} className="p-1 hover:bg-slate-800 rounded text-slate-500 hover:text-slate-300">
+          <ChevronLeft size={16} />
+        </button>
+        
+        <div ref={scrollRef} className="flex-1 flex items-center overflow-x-hidden gap-2 scroll-smooth">
+          {sessions.map(session => (
+            <button
+              key={session}
+              onClick={() => setActiveSession(session)}
+              className={`px-4 h-8 shrink-0 rounded-md text-xs font-medium border transition-colors ${
+                activeSession === session
+                  ? 'bg-blue-600/20 text-blue-400 border-blue-500/50 shadow-[0_0_8px_rgba(59,130,246,0.3)]'
+                  : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200 hover:bg-slate-700'
+              }`}
+            >
+              {session}
+            </button>
+          ))}
         </div>
+
+        <button onClick={() => scrollTabs('right')} className="p-1 hover:bg-slate-800 rounded text-slate-500 hover:text-slate-300">
+          <ChevronRight size={16} />
+        </button>
+        
+        <div className="w-px h-6 bg-slate-700 mx-1 shrink-0" />
+        <button
+          onClick={handleCreateSession}
+          className="px-4 h-8 shrink-0 rounded-md text-xs font-medium border border-emerald-500/30 bg-emerald-600/10 text-emerald-400 hover:bg-emerald-600/20 transition-colors flex items-center gap-2"
+        >
+          <FolderPlus size={14} /> New
+        </button>
       </div>
 
-      {/* Action Buttons */}
-      <div className="flex gap-4 shrink-0 justify-end">
-        <button 
-          onClick={onAddSample}
-          disabled={isCapturing}
-          className="px-6 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-600 text-slate-200 font-medium rounded-lg shadow-sm transition-all flex items-center justify-center gap-2 text-sm group active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
-        >
-          <Save size={16} className={`text-slate-400 transition-colors ${!isCapturing && 'group-hover:text-blue-400'}`} />
-          {isCapturing ? 'Capturing...' : 'Capture Pose & Image'}
-        </button>
+      {/* MAIN CONTENT: 3 Columns */}
+      <div className="flex-1 flex min-h-0">
+        
+        {/* Left Column: Big Image Viewer */}
+        <div className="flex-1 flex flex-col border-r border-slate-800 relative bg-black">
+          {activeImageUrl ? (
+            <img src={activeImageUrl} className="w-full h-full object-contain" alt="calibration sample" />
+          ) : (
+            <div className="w-full h-full flex items-center justify-center text-slate-700">
+              <ImageIcon size={48} className="opacity-20" />
+            </div>
+          )}
 
-        <button className="px-6 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-medium rounded-lg shadow-lg shadow-blue-900/20 transition-all flex items-center justify-center gap-2 text-sm active:scale-[0.98]">
-          <Play size={16} fill="currentColor" />
-          Execute Calibration
-        </button>
+            
+            {/* Progress Overlay */}
+            {isRunning && progressData && (
+              <div className="absolute inset-x-0 bottom-0 bg-slate-950/80 backdrop-blur-sm p-4 border-t border-emerald-900/50 flex flex-col gap-2">
+                <div className="flex justify-between items-center text-xs">
+                  <span className="text-emerald-400 font-bold uppercase tracking-wider">{progressData.status}</span>
+                  <span className="text-slate-400 font-mono">{progressData.current} / {progressData.total}</span>
+                </div>
+                <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                  <div 
+                    className="h-full bg-emerald-500 transition-all duration-300"
+                    style={{ width: `${(progressData.current / Math.max(1, progressData.total)) * 100}%` }}
+                  />
+                </div>
+              </div>
+            )}
+          </div>
+
+        {/* Middle Column: Thumbnails */}
+        <div className="w-36 shrink-0 border-r border-slate-800 p-3 overflow-y-auto custom-scrollbar flex flex-col gap-3 bg-slate-950/30">
+          {sessionData.samples.length === 0 ? (
+            <div className="text-xs text-center text-slate-500 mt-10">Empty session</div>
+          ) : (
+            sessionData.samples.map(sample => (
+              <div 
+                key={sample.id}
+                onClick={() => setActiveImage(sample.filename)}
+                className={`w-full shrink-0 rounded border overflow-hidden flex flex-col bg-slate-900 cursor-pointer transition-all relative group ${
+                  activeImage === sample.filename 
+                    ? 'border-blue-500 ring-2 ring-blue-500/30 shadow-md' 
+                    : 'border-slate-700 hover:border-slate-500 opacity-70 hover:opacity-100'
+                }`}
+              >
+                <div className="w-full aspect-video relative">
+                  <img 
+                    src={`http://localhost:8000/api/calib/sessions/${activeSession}/images/${sample.filename}`} 
+                    alt={sample.filename}
+                    className="w-full h-full object-cover"
+                  />
+                  <div className="absolute top-0 right-0 bg-black/60 text-[9px] text-white px-1.5 py-0.5 rounded-bl">
+                    #{sample.id}
+                  </div>
+                </div>
+                <div className="p-1.5 flex flex-col gap-1 text-[8px] text-slate-400 font-mono tracking-tight border-t border-slate-800 leading-none">
+                  <div className="flex justify-between">
+                    <span>X:{sample.pose?.[0]?.toFixed(1) ?? '0.0'}</span>
+                    <span>Y:{sample.pose?.[1]?.toFixed(1) ?? '0.0'}</span>
+                    <span>Z:{sample.pose?.[2]?.toFixed(1) ?? '0.0'}</span>
+                  </div>
+                  <div className="flex justify-between text-slate-500">
+                    <span>Rx:{sample.pose?.[3]?.toFixed(2) ?? '0.00'}</span>
+                    <span>Ry:{sample.pose?.[4]?.toFixed(2) ?? '0.00'}</span>
+                    <span>Rz:{sample.pose?.[5]?.toFixed(2) ?? '0.00'}</span>
+                  </div>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+
+        {/* Right Column: Controls & Result Data */}
+        <div className="w-[340px] shrink-0 bg-slate-950/50 flex flex-col overflow-hidden">
+          
+          {/* Scrollable Results Area */}
+          <div className="flex-1 overflow-y-auto custom-scrollbar p-4 flex flex-col gap-4">
+            
+            {/* Header: Mode Display */}
+            {sessionData.mode && (
+              <div className="flex justify-between items-center bg-slate-900 border border-slate-800 rounded p-2 shadow-inner">
+                <span className="text-[10px] text-slate-500 uppercase tracking-wider font-bold">Calibration Mode</span>
+                <span className="text-[10px] text-emerald-400 font-mono uppercase bg-emerald-950/30 px-2 py-0.5 rounded border border-emerald-900/50">
+                  {sessionData.mode}
+                </span>
+              </div>
+            )}
+
+            {!sessionData.result ? (
+              <div className="flex-1 flex flex-col items-center justify-center text-slate-500 opacity-60">
+                <p className="text-xs">No calibration data yet.</p>
+                <p className="text-xs mt-1">Capture at least 3 samples.</p>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-5">
+                
+                {/* Errors */}
+                <div className="bg-slate-900 border border-slate-800 rounded-lg p-3 flex justify-between shadow-inner">
+                  <div className="flex flex-col">
+                    <span className="text-[10px] text-slate-500 mb-1">Reproj Error (mm)</span>
+                    <span className="text-base font-mono text-emerald-400 leading-none">{sessionData.result.metadata?.reprojection_error_mm?.toFixed(4) || 'N/A'}</span>
+                  </div>
+                  <div className="flex flex-col text-right">
+                    <span className="text-[10px] text-slate-500 mb-1">Rot Error (deg)</span>
+                    <span className="text-base font-mono text-emerald-400 leading-none">{sessionData.result.metadata?.rotation_error_deg?.toFixed(4) || 'N/A'}</span>
+                  </div>
+                </div>
+
+                {/* Camera Pose (XYZ RPY) */}
+                <div className="flex flex-col gap-2">
+                  <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Camera Pose (Base Frame)</h4>
+                  <div className="bg-slate-900 border border-slate-800 rounded p-2 text-[10px] font-mono text-slate-300 grid grid-cols-2 gap-x-2 gap-y-1.5 shadow-inner">
+                    <span className="flex justify-between"><span className="text-slate-500">X:</span> {sessionData.result.camera_pose_base?.x?.toFixed(2) ?? '-'}</span>
+                    <span className="flex justify-between"><span className="text-slate-500">R:</span> {sessionData.result.camera_pose_base?.roll_deg?.toFixed(2) ?? '-'}°</span>
+                    <span className="flex justify-between"><span className="text-slate-500">Y:</span> {sessionData.result.camera_pose_base?.y?.toFixed(2) ?? '-'}</span>
+                    <span className="flex justify-between"><span className="text-slate-500">P:</span> {sessionData.result.camera_pose_base?.pitch_deg?.toFixed(2) ?? '-'}°</span>
+                    <span className="flex justify-between"><span className="text-slate-500">Z:</span> {sessionData.result.camera_pose_base?.z?.toFixed(2) ?? '-'}</span>
+                    <span className="flex justify-between"><span className="text-slate-500">Y:</span> {sessionData.result.camera_pose_base?.yaw_deg?.toFixed(2) ?? '-'}°</span>
+                  </div>
+                </div>
+
+                {/* Transform Matrix */}
+                <div className="flex flex-col gap-2">
+                  <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Transform Matrix</h4>
+                  <div className="bg-slate-900 border border-slate-800 rounded p-2 text-[10px] font-mono text-slate-300 overflow-x-auto whitespace-pre shadow-inner">
+                    {sessionData.result.T_base_camera?.map((row: any[], i: number) => (
+                      <div key={i} className="flex gap-2">
+                        {row.map((val, j) => (
+                          <span key={j} className="w-[60px] text-right inline-block">{val.toFixed(4)}</span>
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Intrinsics & Params */}
+                <div className="flex flex-col gap-2">
+                  <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Configuration</h4>
+                  <div className="bg-slate-900 border border-slate-800 rounded p-2 text-[10px] font-mono text-slate-400 flex flex-col gap-1.5 shadow-inner">
+                    <div className="flex justify-between">
+                      <span>Model: <span className="text-slate-200">{sessionData.result.camera_params?.camera_model || '-'}</span></span>
+                      <span>Res: <span className="text-slate-200">{sessionData.result.camera_params?.width || '-'}x{sessionData.result.camera_params?.height || '-'}</span></span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>Board: <span className="text-slate-200">{sessionData.result.board_params?.cols || '-'}x{sessionData.result.board_params?.rows || '-'}</span></span>
+                      <span>Square: <span className="text-slate-200">{sessionData.result.board_params?.square_size_mm || '-'}mm</span></span>
+                    </div>
+                  </div>
+                </div>
+
+              </div>
+            )}
+          </div>
+
+          {/* Action Footer */}
+          <div className="p-3 bg-slate-950 border-t border-slate-800 flex flex-col gap-3 shrink-0 shadow-[0_-10px_20px_rgba(0,0,0,0.3)]">
+            
+            <div className="flex justify-between items-center text-[10px] text-slate-400 px-1 font-medium">
+              <span>
+                {sessionData.result?.metadata ? (
+                  <>
+                    <span className="text-emerald-400 font-bold">
+                      {sessionData.result.metadata.samples_used} / {sessionData.result.metadata.samples_total}
+                    </span> Samples Used
+                  </>
+                ) : (
+                  <>
+                    <span className="text-emerald-400 font-bold">{sessionData.samples.length}</span> Samples Captured
+                  </>
+                )}
+              </span>
+              {sessionData.result?.metadata?.timestamp && (
+                <span>{sessionData.result.metadata.timestamp}</span>
+              )}
+            </div>
+
+            <div className="flex gap-2">
+              <button 
+                onClick={handleCapture}
+                disabled={isCapturing || !activeSession}
+                className="flex-1 py-2 bg-blue-600 hover:bg-blue-500 border border-blue-500 text-white font-medium rounded-lg shadow transition-colors flex items-center justify-center gap-1.5 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Camera size={14} />
+                {isCapturing ? 'Wait...' : 'Capture'}
+              </button>
+              <button 
+                onClick={handleRunCalibration}
+                disabled={isRunning || !activeSession || sessionData.samples.length < 3}
+                className="flex-1 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-medium rounded-lg shadow-lg shadow-emerald-900/20 transition-all flex items-center justify-center gap-1.5 text-xs active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Play size={14} fill="currentColor" />
+                {isRunning ? 'Solving...' : 'Execute'}
+              </button>
+              <button 
+                onClick={handleDeleteSession}
+                disabled={!activeSession}
+                className="px-3 py-2 bg-transparent hover:bg-red-950 border border-red-900/50 hover:border-red-500/50 text-red-500 font-medium rounded-lg transition-colors flex items-center justify-center gap-1 text-xs disabled:opacity-30 disabled:cursor-not-allowed"
+                title="Delete Session"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          </div>
+
+        </div>
       </div>
     </div>
   );

@@ -39,3 +39,12 @@ async def websocket_logs(websocket: WebSocket):
             await websocket.receive_text()
     except WebSocketDisconnect:
         log_service.disconnect(websocket)
+
+class CalibrationModeUpdate(BaseModel):
+    enabled: bool
+
+@sys_router.post("/camera/calibration_mode")
+def set_calibration_mode(req: CalibrationModeUpdate):
+    from services.camera_service import camera_service
+    camera_service.set_calibration_mode(req.enabled)
+    return {"status": "ok", "enabled": req.enabled}
