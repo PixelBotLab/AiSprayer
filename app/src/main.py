@@ -57,6 +57,9 @@ logging.basicConfig(
 # Silence watchfiles info logs (which spam the console due to OrbbecSDK.log.txt changing)
 logging.getLogger("watchfiles.main").setLevel(logging.WARNING)
 
+from services.log_service import ws_log_handler, log_service
+logging.getLogger().addHandler(ws_log_handler)
+
 from db.database import engine, Base
 from apps.calib.api import calib_router
 from apps.system.api import sys_router
@@ -71,6 +74,9 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Startup: Initialize logging broadcast
+    log_service.initialize()
+    
     # Startup: Start hardware services
     logger.info("Starting background services (Camera, Robot)...")
     camera_service.start_stream(camera_type="orbbec")

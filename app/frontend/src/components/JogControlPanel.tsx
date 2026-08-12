@@ -25,7 +25,17 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
   const [wsConnected, setWsConnected] = useState<boolean>(false);
   const [robotConnected, setRobotConnected] = useState<boolean>(false);
   const [connecting, setConnecting] = useState<boolean>(false);
+  const [activeAction, setActiveAction] = useState<'home' | 'zero' | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+
+  const isMoving = displayState.status === 1;
+  const disableMotion = !robotConnected || isMoving;
+
+  useEffect(() => {
+    if (!isMoving) {
+      setActiveAction(null);
+    }
+  }, [isMoving]);
 
   useEffect(() => {
     connectWs();
@@ -131,6 +141,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
   };
 
   const handleZero = async () => {
+    setActiveAction('zero');
     try {
       const res = await fetch('http://localhost:8000/api/calib/robot/zero', {
         method: 'POST',
@@ -148,6 +159,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
   };
 
   const handleHome = async () => {
+    setActiveAction('home');
     try {
       const res = await fetch('http://localhost:8000/api/calib/robot/home', {
         method: 'POST',
@@ -211,8 +223,6 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
     return val.toFixed(2);
   };
 
-  const isMoving = displayState.status === 1;
-  const disableMotion = !robotConnected || isMoving;
   return (
     <div className="bg-slate-900/80 rounded-xl border border-slate-800 p-5 shadow-lg backdrop-blur-sm shrink-0 w-full flex flex-col gap-4 relative">
       {/* Jog Controls Toolbar */}
@@ -253,14 +263,22 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
           <button
             onClick={handleHome}
             disabled={disableMotion}
-            className="px-2 h-8 text-xs font-medium rounded-md flex items-center justify-center gap-1.5 transition-colors bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700/50 disabled:opacity-50 disabled:cursor-not-allowed"
+            className={`px-2 h-8 text-xs font-medium rounded-md flex items-center justify-center gap-1.5 transition-colors border ${
+              activeAction === 'home'
+                ? 'bg-emerald-600/20 text-emerald-400 border-emerald-500/50 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)] cursor-not-allowed'
+                : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border-slate-700/50 disabled:opacity-50 disabled:cursor-not-allowed'
+            }`}
           >
             <Home size={12} className="shrink-0" /> <span>Home</span>
           </button>
           <button
             onClick={handleZero}
             disabled={disableMotion}
-            className="px-2 h-8 text-xs font-medium rounded-md flex items-center justify-center gap-1.5 transition-colors bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700/50 disabled:opacity-50 disabled:cursor-not-allowed"
+            className={`px-2 h-8 text-xs font-medium rounded-md flex items-center justify-center gap-1.5 transition-colors border ${
+              activeAction === 'zero'
+                ? 'bg-emerald-600/20 text-emerald-400 border-emerald-500/50 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)] cursor-not-allowed'
+                : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border-slate-700/50 disabled:opacity-50 disabled:cursor-not-allowed'
+            }`}
           >
             <Crosshair size={12} className="shrink-0" /> <span>Zero</span>
           </button>

@@ -1,7 +1,8 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
 from typing import Dict, Any
 from services.setting_service import SettingService
+from services.log_service import log_service
 
 sys_router = APIRouter(prefix="/api/system", tags=["System"])
 
@@ -28,3 +29,13 @@ def update_config(req: SettingsUpdate):
     for k, v in req.settings.items():
         srv.set_value(k, v)
     return {"status": "ok"}
+
+@sys_router.websocket("/logs/ws")
+async def websocket_logs(websocket: WebSocket):
+    await log_service.connect(websocket)
+    try:
+        while True:
+            # Keep the connection open and wait for client disconnect
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        log_service.disconnect(websocket)

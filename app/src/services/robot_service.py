@@ -3,6 +3,7 @@ import os
 import time
 import threading
 import logging
+import math
 from typing import Optional, List, Callable
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
@@ -12,6 +13,11 @@ from core.hardware.robot.factory import get_robot
 from core.hardware.robot.base_driver import BaseRobotDriver
 
 logger = logging.getLogger(__name__)
+
+def _fmt(arr: Optional[List[float]]) -> str:
+    if arr is None:
+        return "None"
+    return "[" + ", ".join(f"{x:.2f}" for x in arr) + "]"
 
 class RobotService:
     def __init__(self):
@@ -128,11 +134,11 @@ class RobotService:
             return False, msg
 
         pose_val, _ = self.get_current_pose()
-        logger.info(f"move_to_pose: from pose:{pose_val}, to pose:{pose}, speed:{speed}, acc:{acc}")
+        logger.info(f"move_to_pose: from pose:{_fmt(pose_val)}, to pose:{_fmt(pose)}, speed:{speed:.2f}, acc:{acc:.2f}")
         try:
             self._driver.move_l(pose, velocity=speed, acc=acc)
             new_pose_val, _ = self.get_current_pose()
-            logger.info(f"move_to_pose: Success moving to pose, actual pose:{new_pose_val}")
+            logger.info(f"move_to_pose: Success moving to pose, actual pose:{_fmt(new_pose_val)}")
             return True, ""
         except Exception as e:
             msg = f"move_to_pose: Error moving to pose: {e}"
@@ -146,11 +152,11 @@ class RobotService:
             return False, msg
 
         joint_val, _ = self.get_current_joint()
-        logger.info(f"move_to_joint: from joints:{joint_val}, to joints:{joints}, speed:{speed}, acc:{acc}")
+        logger.info(f"move_to_joint: from joints:{_fmt(joint_val)}, to joints:{_fmt(joints)}, speed:{speed:.2f}, acc:{acc:.2f}")
         try:
             self._driver.move_joint(joints, velocity=speed, acc=acc)
             new_joint_val, _ = self.get_current_joint()
-            logger.info(f"move_to_joint: Success moving to joint, actual joints:{new_joint_val}")
+            logger.info(f"move_to_joint: Success moving to joint, actual joints:{_fmt(new_joint_val)}")
             return True, ""
         except Exception as e:
             msg = f"move_to_joint: Error moving to joint: {e}"
@@ -166,7 +172,7 @@ class RobotService:
         cartesian_map = {'X': 0, 'Y': 1, 'Z': 2, 'Rx': 3, 'Ry': 4, 'Rz': 5}
         joint_map = {'J1': 0, 'J2': 1, 'J3': 2, 'J4': 3, 'J5': 4, 'J6': 5}
 
-        logger.info(f"jog_step: axis:{axis}, direction:{direction}, step_size:{step_size}, speed:{speed}, acc:{acc}")
+        logger.info(f"jog_step: axis:{axis}, direction:{direction}, step_size:{step_size:.2f}, speed:{speed:.2f}, acc:{acc:.2f}")
 
         if axis in cartesian_map:
             pose, err_msg = self.get_current_pose()
