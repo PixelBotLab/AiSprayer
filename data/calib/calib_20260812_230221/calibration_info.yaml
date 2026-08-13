@@ -1,0 +1,273 @@
+board_params:
+  cols: 9
+  pattern_size_inner:
+  - 8
+  - 11
+  rows: 12
+  square_size_mm: 15.0
+calibration_mode: eye-to-hand
+camera_params:
+  camera_model: orbbec
+  distortion_coeffs:
+  - -0.03204389661550522
+  - 0.034532126039266586
+  - 0.0003080253954976797
+  - 0.00034928417881019413
+  - -0.01199629157781601
+  height: 800
+  intrinsic_matrix:
+  - - 611.683837890625
+    - 0.0
+    - 643.4285278320312
+  - - 0.0
+    - 611.6983642578125
+    - 405.1534118652344
+  - - 0.0
+    - 0.0
+    - 1.0
+  width: 1280
+samples:
+- id: 1
+  image_file: image_001.png
+  robot_pose:
+    a: -2.67751
+    b: 0.31164
+    c: -2.06561
+    x: 497.031
+    y: -45.478
+    z: -85.712
+- id: 2
+  image_file: image_002.png
+  robot_pose:
+    a: -2.67751
+    b: 0.31164
+    c: -2.06561
+    x: 497.033
+    y: -45.477
+    z: -195.712
+- id: 3
+  image_file: image_003.png
+  robot_pose:
+    a: -2.67751
+    b: 0.31164
+    c: -2.06561
+    x: 497.033
+    y: -45.477
+    z: -245.712
+- id: 4
+  image_file: image_004.png
+  robot_pose:
+    a: -2.67751
+    b: 0.31164
+    c: -2.06561
+    x: 547.033
+    y: -45.477
+    z: -245.713
+- id: 5
+  image_file: image_005.png
+  robot_pose:
+    a: -2.67751
+    b: 0.31164
+    c: -2.06561
+    x: 647.032
+    y: -45.477
+    z: -245.713
+- id: 6
+  image_file: image_006.png
+  robot_pose:
+    a: -2.85204
+    b: 0.31164
+    c: -2.06561
+    x: 647.032
+    y: -45.478
+    z: -245.713
+- id: 7
+  image_file: image_007.png
+  robot_pose:
+    a: -2.85203
+    b: 0.31164
+    c: -2.06562
+    x: 647.037
+    y: 104.518
+    z: -245.711
+- id: 8
+  image_file: image_008.png
+  robot_pose:
+    a: -2.85203
+    b: 0.31163
+    c: -2.06561
+    x: 647.037
+    y: 254.518
+    z: -245.711
+- id: 9
+  image_file: image_009.png
+  robot_pose:
+    a: -2.85203
+    b: 0.31163
+    c: -2.06562
+    x: 647.037
+    y: 254.517
+    z: -145.71
+- id: 10
+  image_file: image_010.png
+  robot_pose:
+    a: -2.85203
+    b: 0.31163
+    c: -2.06561
+    x: 647.037
+    y: 254.517
+    z: -45.707
+- id: 11
+  image_file: image_011.png
+  robot_pose:
+    a: -2.85203
+    b: 0.57343
+    c: -2.06561
+    x: 647.037
+    y: 254.518
+    z: -45.707
+- id: 12
+  image_file: image_012.png
+  robot_pose:
+    a: -2.85203
+    b: 0.57343
+    c: -1.89108
+    x: 647.036
+    y: 254.517
+    z: -45.707
+- id: 13
+  image_file: image_013.png
+  robot_pose:
+    a: -3.02656
+    b: 0.57343
+    c: -1.89108
+    x: 647.037
+    y: 254.517
+    z: -45.707
+- id: 14
+  image_file: image_014.png
+  robot_pose:
+    a: -3.11383
+    b: 0.48617
+    c: -1.89108
+    x: 647.037
+    y: 254.517
+    z: -45.707
+- id: 15
+  image_file: image_015.png
+  robot_pose:
+    a: -2.85202
+    b: 0.48617
+    c: -1.89108
+    x: 647.04
+    y: 154.518
+    z: -45.701
+- id: 16
+  image_file: image_016.png
+  robot_pose:
+    a: -2.85202
+    b: 0.48617
+    c: -1.89108
+    x: 647.04
+    y: 154.519
+    z: -145.702
+- id: 17
+  image_file: image_017.png
+  robot_pose:
+    a: -2.85202
+    b: 0.48617
+    c: -2.06561
+    x: 647.04
+    y: 154.519
+    z: -145.702
+- id: 18
+  image_file: image_018.png
+  robot_pose:
+    a: -2.85202
+    b: 0.66071
+    c: -2.06561
+    x: 647.039
+    y: 154.523
+    z: -145.701
+- id: 19
+  image_file: image_019.png
+  robot_pose:
+    a: -2.85206
+    b: 0.66071
+    c: -2.0656
+    x: 747.021
+    y: 154.531
+    z: -145.704
+- id: 20
+  image_file: image_020.png
+  robot_pose:
+    a: -2.85198
+    b: 0.13699
+    c: -2.15302
+    x: 547.027
+    y: 54.46
+    z: -145.722
+- id: 21
+  image_file: image_021.png
+  robot_pose:
+    a: -2.852
+    b: 0.13702
+    c: -2.153
+    x: 547.029
+    y: -45.525
+    z: -145.722
+- id: 22
+  image_file: image_022.png
+  robot_pose:
+    a: -2.852
+    b: 0.13701
+    c: -2.15301
+    x: 547.026
+    y: -45.53
+    z: -45.721
+- id: 23
+  image_file: image_023.png
+  robot_pose:
+    a: -2.852
+    b: 0.13703
+    c: -1.80393
+    x: 547.028
+    y: -45.52
+    z: -45.721
+- id: 24
+  image_file: image_024.png
+  robot_pose:
+    a: -2.85199
+    b: -0.12478
+    c: -1.80394
+    x: 547.03
+    y: -45.524
+    z: -45.721
+- id: 25
+  image_file: image_025.png
+  robot_pose:
+    a: -2.85197
+    b: -0.12476
+    c: -1.80394
+    x: 547.04
+    y: -45.52
+    z: -145.724
+- id: 26
+  image_file: image_026.png
+  robot_pose:
+    a: -2.85196
+    b: -0.47384
+    c: -1.80395
+    x: 547.042
+    y: -45.525
+    z: -145.722
+- id: 27
+  image_file: image_027.png
+  robot_pose:
+    a: -2.85201
+    b: -0.47383
+    c: -2.15304
+    x: 547.021
+    y: 4.485
+    z: -145.728
+version: '1.0'

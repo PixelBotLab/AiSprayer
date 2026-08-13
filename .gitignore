@@ -41,6 +41,7 @@ OrbbecSDK.log.*
 # 数据文件 (忽略采集的原始数据和标定过程数据)
 data/runs/*
 data/calib/*
+!data/calib/calib_20260812_230221
 !data/samples/
 !data/runs/0
 models/*
