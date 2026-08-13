@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Camera, Maximize, Crosshair, GripHorizontal } from 'lucide-react';
+import { Camera, Maximize2, Minimize2, Crosshair, GripHorizontal } from 'lucide-react';
 
 const FloatingCameraZone: React.FC = () => {
   const [resolution, setResolution] = useState<{width: number, height: number} | null>(null);
@@ -10,12 +10,14 @@ const FloatingCameraZone: React.FC = () => {
   const [size, setSize] = useState({ w: 400, h: 300 });
   const [isDragging, setIsDragging] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
+  const [isMaximized, setIsMaximized] = useState(false);
   
   const dragRef = useRef({ startX: 0, startY: 0, initialX: 0, initialY: 0 });
   const resizeRef = useRef({ startX: 0, startY: 0, initialW: 0, initialH: 0 });
 
   // Handle Dragging
   const handleDragStart = (e: React.MouseEvent) => {
+    if (isMaximized) return;
     setIsDragging(true);
     dragRef.current = {
       startX: e.clientX,
@@ -27,6 +29,7 @@ const FloatingCameraZone: React.FC = () => {
 
   // Handle Resizing
   const handleResizeStart = (e: React.MouseEvent) => {
+    if (isMaximized) return;
     e.stopPropagation();
     setIsResizing(true);
     resizeRef.current = {
@@ -72,28 +75,51 @@ const FloatingCameraZone: React.FC = () => {
     };
   }, [isDragging, isResizing]);
 
-  return (
-    <div 
-      className="absolute bg-slate-900 rounded-xl border border-slate-700 shadow-2xl overflow-hidden flex flex-col z-50 transition-shadow duration-200"
-      style={{
+  const containerClasses = isMaximized
+    ? "fixed inset-4 md:inset-6 z-[100] bg-slate-900/98 rounded-xl border border-slate-700/80 shadow-2xl overflow-hidden flex flex-col transition-all duration-200 backdrop-blur-xl"
+    : "absolute bg-slate-900 rounded-xl border border-slate-700 shadow-2xl overflow-hidden flex flex-col z-50 transition-shadow duration-200";
+
+  const containerStyles = isMaximized
+    ? {}
+    : {
         left: position.x,
         top: position.y,
         width: size.w,
         height: size.h,
         boxShadow: isDragging ? '0 25px 50px -12px rgba(0, 0, 0, 0.7)' : undefined
-      }}
-    >
+      };
+
+  return (
+    <div className={containerClasses} style={containerStyles}>
       {/* Draggable Header */}
       <div 
-        className="shrink-0 px-4 py-2.5 flex justify-between items-center bg-gradient-to-b from-slate-800 to-slate-900 border-b border-slate-700 cursor-move select-none"
+        className={`shrink-0 px-4 py-2.5 flex justify-between items-center bg-gradient-to-b from-slate-800 to-slate-900 border-b border-slate-700 select-none ${isMaximized ? '' : 'cursor-move'}`}
         onMouseDown={handleDragStart}
       >
         <h2 className="font-medium text-slate-100 flex items-center gap-2 text-sm drop-shadow-md">
           <Camera size={16} className="text-blue-400" />
-          Live Stream
+          Live Stream {isMaximized ? '(Fullscreen View)' : ''}
         </h2>
-        <div className="flex gap-2 text-slate-400">
-          <GripHorizontal size={16} />
+        <div className="flex items-center gap-2 text-slate-400">
+          <button
+            onClick={() => setIsMaximized(!isMaximized)}
+            className={`transition-colors rounded flex items-center gap-1.5 text-xs ${
+              isMaximized 
+                ? 'px-2 py-1 bg-blue-600 hover:bg-blue-500 text-white font-medium shadow' 
+                : 'p-1 hover:bg-slate-700 hover:text-white'
+            }`}
+            title={isMaximized ? "Exit Fullscreen" : "Fullscreen Stream"}
+          >
+            {isMaximized ? (
+              <>
+                <Minimize2 size={15} />
+                <span>Exit Fullscreen</span>
+              </>
+            ) : (
+              <Maximize2 size={16} />
+            )}
+          </button>
+          {!isMaximized && <GripHorizontal size={16} />}
         </div>
       </div>
       
@@ -148,12 +174,14 @@ const FloatingCameraZone: React.FC = () => {
         </div>
 
         {/* Resize Handle */}
-        <div 
-          className="absolute bottom-0 right-0 w-6 h-6 cursor-se-resize flex items-end justify-end p-1 z-30 group"
-          onMouseDown={handleResizeStart}
-        >
-          <div className="w-2.5 h-2.5 border-r-2 border-b-2 border-slate-500 group-hover:border-blue-400 transition-colors"></div>
-        </div>
+        {!isMaximized && (
+          <div 
+            className="absolute bottom-0 right-0 w-6 h-6 cursor-se-resize flex items-end justify-end p-1 z-30 group"
+            onMouseDown={handleResizeStart}
+          >
+            <div className="w-2.5 h-2.5 border-r-2 border-b-2 border-slate-500 group-hover:border-blue-400 transition-colors"></div>
+          </div>
+        )}
       </div>
     </div>
   );

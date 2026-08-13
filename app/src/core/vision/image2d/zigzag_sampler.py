@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 
-from aisprayer.core.vision.image2d.jeans_segmentation import split_jeans_mask
+from core.vision.image2d.jeans_segmentation import split_jeans_mask
 
 class JeansZigzagSampler:
     """

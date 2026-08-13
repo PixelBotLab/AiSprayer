@@ -7,7 +7,7 @@ import sys
 from typing import Optional, Generator
 import numpy as np
 
-from aisprayer.core.hardware.camera.factory import get_camera
+from core.hardware.camera.factory import get_camera
 
 logger = logging.getLogger(__name__)
 

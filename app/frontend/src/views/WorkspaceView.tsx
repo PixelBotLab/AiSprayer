@@ -56,7 +56,7 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({ activeTab }) => {
       <FloatingCameraZone />
       
       {/* Left Column (60% width) - Operations & Logs */}
-      <div className="flex-[3] flex flex-col gap-6 min-w-0 h-full z-0">
+      <div className="flex-[3] flex flex-col gap-6 min-w-0 h-full">
         
         {/* Top Left: Operation Zone (Dynamic based on Tab) */}
         <div className="flex-1 min-h-0 flex flex-col">
@@ -70,7 +70,7 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({ activeTab }) => {
       </div>
 
       {/* Right Column (40% width) - Robot Zone Full Height */}
-      <div className="flex-[2] flex flex-col gap-6 min-w-0 h-full z-0">
+      <div className="flex-[2] flex flex-col gap-6 min-w-0 h-full">
         {/* Full Right: Robot Zone */}
         <div className="flex-1 min-h-0">
           <RobotZone robotState={robotState} />

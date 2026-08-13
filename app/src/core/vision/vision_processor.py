@@ -373,7 +373,7 @@ class VisionProcessor:
         # 两条裤腿应分别重建、分别规划：每条腿有各自的最长主轴，合并成整条裤子后只做
         # 一次 PCA 会丢失这种局部方向信息。分割掩码在切线处保留重叠带，避免两个独立
         # BPA 网格都在边界收缩而形成中缝空白。
-        from aisprayer.core.vision.image2d.jeans_segmentation import split_jeans_mask
+        from core.vision.image2d.jeans_segmentation import split_jeans_mask
         masks = split_jeans_mask(combined_mask, overlap_px=self.split_overlap_px)
         output_paths = []
 
@@ -651,7 +651,7 @@ if __name__ == "__main__":
     if CORE_DIR not in sys.path:
         sys.path.insert(0, CORE_DIR)
         
-    from aisprayer.core.vision.image2d.segmenter import SegmenterFactory
+    from core.vision.image2d.segmenter import SegmenterFactory
     from config import SprayerConfig
 
     parser = argparse.ArgumentParser(description="牛仔裤视觉处理流水线 - 离线数据测试")

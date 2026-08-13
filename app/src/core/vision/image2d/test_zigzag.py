@@ -10,8 +10,8 @@ SRC_DIR = os.path.join(PROJECT_ROOT, "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from aisprayer.core.vision.image2d.segmenter import SegmenterFactory
-from aisprayer.core.vision.image2d.zigzag_sampler import JeansZigzagSampler
+from core.vision.image2d.segmenter import SegmenterFactory
+from core.vision.image2d.zigzag_sampler import JeansZigzagSampler
 
 def main():
     parser = argparse.ArgumentParser(description="Test Zigzag Sampler on an Image")

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import WorkspaceView from './views/WorkspaceView';
 import ConfigView from './views/ConfigView';
 import Layout from './components/Layout';

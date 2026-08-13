@@ -1,10 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Save, Play, FolderPlus, Trash2, Image as ImageIcon, Camera, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Play, FolderPlus, Trash2, Image as ImageIcon, Camera, ChevronLeft, ChevronRight } from 'lucide-react';
 
 const CalibrationOp: React.FC = () => {
   const [sessions, setSessions] = useState<string[]>([]);
   const [activeSession, setActiveSession] = useState<string | null>(null);
-  const [sessionData, setSessionData] = useState<{ samples: any[], result: any }>({ samples: [], result: null });
+  const [sessionData, setSessionData] = useState<{ samples: any[], result: any, mode?: string }>({ samples: [], result: null });
   const [activeImage, setActiveImage] = useState<string | null>(null);
   const [isCapturing, setIsCapturing] = useState(false);
   const [isRunning, setIsRunning] = useState(false);

@@ -4,7 +4,7 @@ import os
 import time
 import yaml
 import open3d as o3d
-from aisprayer.core.vision.point_cloud_processor import depth_to_pcd
+from core.vision.point_cloud_processor import depth_to_pcd
 
 class ScanRecorder:
     """

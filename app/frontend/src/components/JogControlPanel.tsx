@@ -22,7 +22,6 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
 
   // Use prop robotState if provided, else fall back to internal zeros
   const displayState: RobotState = robotState ?? { pose: [0,0,0,0,0,0], joint: [0,0,0,0,0,0] };
-  const [wsConnected, setWsConnected] = useState<boolean>(false);
   const [robotConnected, setRobotConnected] = useState<boolean>(false);
   const [connecting, setConnecting] = useState<boolean>(false);
   const [activeAction, setActiveAction] = useState<'home' | 'zero' | null>(null);
@@ -46,9 +45,8 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
 
   const connectWs = () => {
     const ws = new WebSocket('ws://localhost:8000/api/calib/robot/ws');
-    ws.onopen = () => setWsConnected(true);
+    ws.onopen = () => {};
     ws.onclose = () => {
-      setWsConnected(false);
       setTimeout(connectWs, 2000); // Reconnect WebSocket
     };
     ws.onmessage = (_e) => {

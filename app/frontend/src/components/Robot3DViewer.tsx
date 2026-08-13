@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Grid } from '@react-three/drei';
 import URDFLoader from 'urdf-loader';
+import { Maximize2, Minimize2 } from 'lucide-react';
 import {
   Object3D,
   LoadingManager,
@@ -59,8 +60,12 @@ function loadUrdfMesh(
     loader.load(
       path,
       (dae) => {
-        stripEmbeddedLights(dae.scene);
-        done(dae.scene);
+        if (dae && dae.scene) {
+          stripEmbeddedLights(dae.scene);
+          done(dae.scene);
+        } else {
+          done(new Object3D(), new Error(`Invalid DAE file: ${path}`));
+        }
       },
       undefined,
       (err) => done(new Object3D(), err as Error),
@@ -130,8 +135,14 @@ interface Robot3DViewerProps {
 }
 
 const Robot3DViewer: React.FC<Robot3DViewerProps> = ({ jointAngles = [0, 0, 0, 0, 0, 0] }) => {
+  const [isMaximized, setIsMaximized] = useState(false);
+
+  const containerClasses = isMaximized
+    ? "fixed inset-0 z-[100] bg-slate-950/95 backdrop-blur-md p-4 flex flex-col items-center justify-center animate-in fade-in duration-200"
+    : "w-full h-full bg-slate-900/50 rounded-xl overflow-hidden relative border border-slate-800 shadow-inner flex flex-col items-center justify-center";
+
   return (
-    <div className="w-full h-full bg-slate-900/50 rounded-xl overflow-hidden relative border border-slate-800 shadow-inner flex flex-col items-center justify-center">
+    <div className={containerClasses}>
       <Canvas shadows camera={{ position: [2, 1.5, 2], fov: 45 }}>
         <color attach="background" args={['#1e293b']} />
 
@@ -152,9 +163,17 @@ const Robot3DViewer: React.FC<Robot3DViewerProps> = ({ jointAngles = [0, 0, 0, 0
         />
         <OrbitControls makeDefault />
       </Canvas>
-      <div className="absolute top-3 left-3 text-[10px] font-mono text-slate-400 bg-slate-950/80 px-2 py-1 rounded shadow-md pointer-events-none">
-        DOBOT CR5 Digital Twin
+      <div className="absolute top-3 left-3 text-[10px] font-mono text-slate-400 bg-slate-950/80 px-2 py-1 rounded shadow-md pointer-events-none z-10">
+        DOBOT CR5 Digital Twin {isMaximized ? '(Fullscreen View)' : ''}
       </div>
+
+      <button
+        onClick={() => setIsMaximized(!isMaximized)}
+        className="absolute top-3 right-3 p-1.5 bg-slate-900/80 hover:bg-slate-800 text-slate-400 hover:text-white rounded-lg border border-slate-700/80 shadow-lg transition-all z-10 flex items-center gap-1 text-xs"
+        title={isMaximized ? "Exit Fullscreen" : "Fullscreen View"}
+      >
+        {isMaximized ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+      </button>
     </div>
   );
 };

@@ -166,7 +166,7 @@ class PoissonReconstructor:
             return mesh, mask_overlay_image
         else:
             # 分腿拆分掩码，防止在接缝处连接不自然
-            from aisprayer.core.vision.image2d.jeans_segmentation import split_jeans_mask
+            from core.vision.image2d.jeans_segmentation import split_jeans_mask
             masks = split_jeans_mask(combined_mask, overlap_px=split_overlap_px)
             meshes = []
             for mask in masks:
@@ -323,7 +323,7 @@ if __name__ == "__main__":
     if CORE_DIR not in sys.path:
         sys.path.insert(0, CORE_DIR)
         
-    from aisprayer.core.vision.image2d.segmenter import SegmenterFactory
+    from core.vision.image2d.segmenter import SegmenterFactory
     from config import SprayerConfig
 
     parser = argparse.ArgumentParser(description="视觉处理流水线 (泊松版) - 离线测试")

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Terminal, Trash2 } from 'lucide-react';
+import { Terminal, Trash2, Maximize2, Minimize2 } from 'lucide-react';
 
 interface LogEntry {
   time: string;
@@ -10,12 +10,18 @@ interface LogEntry {
 
 const ConsoleLogZone: React.FC = () => {
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [isMaximized, setIsMaximized] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
+    let isMounted = true;
+    let ws: WebSocket | null = null;
+    let reconnectTimeout: NodeJS.Timeout;
+
     const connect = () => {
-      const ws = new WebSocket('ws://localhost:8000/api/system/logs/ws');
+      if (!isMounted) return;
+      ws = new WebSocket('ws://localhost:8000/api/system/logs/ws');
       ws.onmessage = (e) => {
         try {
           const entry: LogEntry = JSON.parse(e.data);
@@ -28,7 +34,9 @@ const ConsoleLogZone: React.FC = () => {
         } catch {}
       };
       ws.onclose = () => {
-        setTimeout(connect, 3000);
+        if (isMounted) {
+          reconnectTimeout = setTimeout(connect, 3000);
+        }
       };
       wsRef.current = ws;
     };
@@ -36,7 +44,12 @@ const ConsoleLogZone: React.FC = () => {
     connect();
     
     return () => {
-      if (wsRef.current) wsRef.current.close();
+      isMounted = false;
+      clearTimeout(reconnectTimeout);
+      if (ws) {
+        ws.onclose = null; // Prevent reconnect logic
+        ws.close();
+      }
     };
   }, []);
 
@@ -60,19 +73,41 @@ const ConsoleLogZone: React.FC = () => {
 
   const clearLogs = () => setLogs([]);
 
+  const containerClasses = isMaximized
+    ? "fixed inset-4 md:inset-8 z-[100] flex flex-col bg-slate-950/98 rounded-xl border border-slate-700/80 shadow-2xl overflow-hidden backdrop-blur-xl transition-all duration-200 animate-in fade-in"
+    : "w-full h-full flex flex-col bg-slate-950 rounded-xl border border-slate-800 shadow-inner overflow-hidden relative min-h-0";
+
   return (
-    <div className="w-full h-full flex flex-col bg-slate-950 rounded-xl border border-slate-800 shadow-inner overflow-hidden relative min-h-0">
+    <div className={containerClasses}>
       {/* Header */}
       <div className="shrink-0 px-4 py-2 flex items-center justify-between bg-slate-900 border-b border-slate-800">
         <h2 className="font-mono text-xs text-slate-400 flex items-center gap-2 uppercase tracking-widest">
           <Terminal size={14} className="text-slate-500" />
-          System Console
+          System Console {isMaximized ? '(Fullscreen Mode)' : ''}
         </h2>
         <div className="flex items-center gap-3">
-          <button onClick={clearLogs} className="text-slate-500 hover:text-slate-300 transition-colors" title="Clear Console">
+          <button onClick={clearLogs} className="text-slate-500 hover:text-slate-300 transition-colors p-1 rounded hover:bg-slate-800" title="Clear Console">
             <Trash2 size={14} />
           </button>
-          <div className="flex gap-1.5">
+          <button 
+            onClick={() => setIsMaximized(!isMaximized)} 
+            className={`transition-all flex items-center gap-1.5 text-xs rounded-md ${
+              isMaximized 
+                ? 'px-2.5 py-1 bg-blue-600 hover:bg-blue-500 text-white font-medium shadow-md shadow-blue-900/30' 
+                : 'p-1 text-slate-400 hover:text-white hover:bg-slate-800'
+            }`} 
+            title={isMaximized ? "Exit Fullscreen" : "Fullscreen Console"}
+          >
+            {isMaximized ? (
+              <>
+                <Minimize2 size={14} />
+                <span>Exit Fullscreen</span>
+              </>
+            ) : (
+              <Maximize2 size={14} />
+            )}
+          </button>
+          <div className="flex gap-1.5 ml-1">
             <div className="w-2.5 h-2.5 rounded-full bg-slate-700"></div>
             <div className="w-2.5 h-2.5 rounded-full bg-slate-700"></div>
             <div className="w-2.5 h-2.5 rounded-full bg-slate-700"></div>

@@ -7,22 +7,29 @@
 # Ensure we are in the app directory
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_DIR="$(dirname "$SCRIPT_DIR")"
+PROJECT_ROOT="$(dirname "$APP_DIR")"
 cd "$APP_DIR" || exit 1
 
 LOG_DIR="$APP_DIR/logs"
+DATA_DIR="$APP_DIR/data"
 BACKEND_LOG="$LOG_DIR/backend.log"
 FRONTEND_LOG="$LOG_DIR/frontend.log"
+
+# Determine target non-root user (for permission restoration)
+TARGET_USER="${SUDO_USER:-$(whoami)}"
+TARGET_GROUP="$(id -gn "$TARGET_USER" 2>/dev/null || echo "staff")"
 
 echo "=========================================="
 echo "Starting AiSprayer Application..."
 echo "Logs will be written to: $LOG_DIR"
+if [ -n "$SUDO_USER" ]; then
+    echo "🔒 Running in elevated mode (sudo) for full Orbbec Depth Camera access."
+    echo "🛡️ File ownership in data/ and logs/ will automatically restore to: $TARGET_USER"
+fi
 echo "=========================================="
 
-# Create logs directory if it doesn't exist
-mkdir -p "$LOG_DIR"
-
-# Cleanup previous run logs if desired (optional)
-# rm -f "$BACKEND_LOG" "$FRONTEND_LOG"
+# Create directories if they don't exist
+mkdir -p "$LOG_DIR" "$DATA_DIR"
 
 echo "[0/2] Cleaning up any existing AiSprayer processes..."
 pkill -f "python3 main.py" 2>/dev/null
@@ -36,9 +43,17 @@ lsof -t -i :5173 | xargs -r kill -9 2>/dev/null
 sleep 1
 
 echo "[1/2] Starting FastAPI Backend..."
-# Start backend in background. Python's internal logging handles both console and file output.
+# Use .venv python if available, fallback to system python3
+if [ -f "$APP_DIR/.venv/bin/python3" ]; then
+    PYTHON_BIN="$APP_DIR/.venv/bin/python3"
+    echo "Using virtual environment Python: $PYTHON_BIN"
+else
+    PYTHON_BIN="python3"
+    echo "Using system python: $PYTHON_BIN"
+fi
+
 cd "$APP_DIR/src" || exit 1
-PYTHONUNBUFFERED=1 python3 main.py &
+PYTHONUNBUFFERED=1 PYTHONPATH="$PROJECT_ROOT/src:$APP_DIR/src:$PYTHONPATH" "$PYTHON_BIN" main.py &
 BACKEND_PID=$!
 echo "Backend started with PID: $BACKEND_PID"
 
@@ -72,6 +87,12 @@ cleanup() {
     lsof -t -i :8000 | xargs -r kill -9 2>/dev/null
     lsof -t -i :5173 | xargs -r kill -9 2>/dev/null
     
+    # Restoring file ownership to target user so root files are never left behind
+    if [ -d "$DATA_DIR" ] || [ -d "$LOG_DIR" ]; then
+        echo "🛡️ Restoring file permissions in data/ and logs/ to user '$TARGET_USER'..."
+        chown -R "$TARGET_USER:$TARGET_GROUP" "$DATA_DIR" "$LOG_DIR" 2>/dev/null || true
+    fi
+
     # Double check and verify ports are free
     if lsof -t -i :8000 >/dev/null || lsof -t -i :5173 >/dev/null; then
         echo "Warning: Failed to free some ports."
@@ -83,7 +104,7 @@ cleanup() {
     exit 0
 }
 
-trap cleanup SIGINT SIGTERM
+trap cleanup SIGINT SIGTERM EXIT
 
 # Wait for background processes to finish
 wait $BACKEND_PID

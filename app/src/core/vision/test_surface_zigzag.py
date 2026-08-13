@@ -12,12 +12,12 @@ SRC_DIR = os.path.join(PROJECT_ROOT, "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from aisprayer.core.vision.reconstruction import PoissonReconstructor
-from aisprayer.core.vision.image2d.segmenter import SegmenterFactory
-from aisprayer.core.config import SprayerConfig
-from aisprayer.core.vision.surface_sampler import SurfaceZigzagSampler
-from aisprayer.core.vision.conformal_sampler import SurfaceConformalSampler
-from aisprayer.core.vision.normal_smoother import PathNormalSmoother
+from core.vision.reconstruction import PoissonReconstructor
+from core.vision.image2d.segmenter import SegmenterFactory
+from core.config import SprayerConfig
+from core.vision.surface_sampler import SurfaceZigzagSampler
+from core.vision.conformal_sampler import SurfaceConformalSampler
+from core.vision.normal_smoother import PathNormalSmoother
 
 
 def create_sphere_mesh(center, radius=0.003, color=[0.0, 1.0, 0.0]):

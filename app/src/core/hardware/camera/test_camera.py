@@ -9,7 +9,7 @@ import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 try:
-    from aisprayer.core.hardware.camera.orbbec_driver import OrbbecDriver
+    from core.hardware.camera.orbbec_driver import OrbbecDriver
     try:
         import pyorbbecsdk2 as sdk
     except ImportError:

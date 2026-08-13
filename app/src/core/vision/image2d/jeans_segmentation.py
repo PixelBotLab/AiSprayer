@@ -113,7 +113,7 @@ def process_jeans_with_segmentation(raw_point_cloud, yolo_mask_2d, config, outpu
     Splits the jeans mask (if needed) and processes them into 1 or 2 meshes.
     Returns a list of generated mesh paths.
     """
-    from aisprayer.core.vision.vision_processor import VisionProcessor, DEFAULT_DATA_DIR
+    from core.vision.vision_processor import VisionProcessor, DEFAULT_DATA_DIR
     if output_dir is None:
         output_dir = DEFAULT_DATA_DIR
         

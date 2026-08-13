@@ -10,8 +10,8 @@ import os
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../..")))
 
-from aisprayer.core.hardware.robot.factory import get_robot
-from aisprayer.core.hardware.robot.base_driver import RobotPose
+from core.hardware.robot.factory import get_robot
+from core.hardware.robot.base_driver import RobotPose
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)

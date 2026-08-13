@@ -18,11 +18,11 @@ def get_camera(camera_type="orbbec", width=1280, height=800):
     camera_type = camera_type.lower()
     
     if camera_type == "orbbec":
-        from aisprayer.core.hardware.camera.orbbec_driver import OrbbecDriver
+        from core.hardware.camera.orbbec_driver import OrbbecDriver
         return OrbbecDriver(width=width, height=height)
         
     elif camera_type == "realsense":
-        from aisprayer.core.hardware.camera.realsense_driver import RealSenseDriver
+        from core.hardware.camera.realsense_driver import RealSenseDriver
         return RealSenseDriver(width=width, height=height)
         
     else:
