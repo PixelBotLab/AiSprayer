@@ -3,6 +3,7 @@ import FloatingCameraZone from '../components/FloatingCameraZone';
 import RobotZone from '../components/RobotZone';
 import ConsoleLogZone from '../components/ConsoleLogZone';
 import CalibrationOp from '../components/operations/CalibrationOp';
+import InteractiveOp from '../components/operations/InteractiveOp';
 
 interface RobotState {
   pose: number[];
@@ -12,9 +13,15 @@ interface RobotState {
 
 interface WorkspaceViewProps {
   activeTab: string;
+  isCameraVisible?: boolean;
+  setIsCameraVisible?: (visible: boolean) => void;
 }
 
-const WorkspaceView: React.FC<WorkspaceViewProps> = ({ activeTab }) => {
+const WorkspaceView: React.FC<WorkspaceViewProps> = ({ 
+  activeTab, 
+  isCameraVisible = false, 
+  setIsCameraVisible 
+}) => {
   const [robotState, setRobotState] = useState<RobotState>({ pose: [0,0,0,0,0,0], joint: [0,0,0,0,0,0] });
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -40,7 +47,7 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({ activeTab }) => {
       case 'calib':
         return <CalibrationOp />;
       case 'interactive':
-        return <div className="p-8 text-slate-400 bg-slate-900/50 rounded-xl border border-slate-800 w-full h-full flex items-center justify-center">2D Interactive Teach (Coming Soon)</div>;
+        return <InteractiveOp />;
       case 'auto_planner':
         return <div className="p-8 text-slate-400 bg-slate-900/50 rounded-xl border border-slate-800 w-full h-full flex items-center justify-center">3D Auto Planner (Coming Soon)</div>;
       case 'digital_twin':
@@ -52,8 +59,10 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({ activeTab }) => {
 
   return (
     <div className="w-full h-full p-6 bg-slate-950 text-slate-200 overflow-hidden flex gap-6 relative">
-      {/* Floating Camera Window */}
-      <FloatingCameraZone />
+      {/* Floating Camera Window (Rendered cleanly without blocking tabs when open, or toggled from sidebar) */}
+      {isCameraVisible && (
+        <FloatingCameraZone onClose={() => setIsCameraVisible && setIsCameraVisible(false)} />
+      )}
       
       {/* Left Column (60% width) - Operations & Logs */}
       <div className="flex-[3] flex flex-col gap-6 min-w-0 h-full">

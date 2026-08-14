@@ -44,6 +44,11 @@ data/calib/*
 !data/calib/calib_20260812_230221
 !data/samples/
 !data/runs/0
+data/template_group/*
+!data/template_group/.gitkeep
+data/*.db
+*.db
+*.backup
 models/*
 !models/wissight.pt
 

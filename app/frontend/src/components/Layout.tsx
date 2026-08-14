@@ -1,13 +1,21 @@
 import React, { useState, useEffect } from 'react';
-import { Settings, Crosshair, MousePointer2, GitBranch, Box, Maximize2, Minimize2 } from 'lucide-react';
+import { Settings, Crosshair, MousePointer2, GitBranch, Box, Maximize2, Minimize2, Camera } from 'lucide-react';
 
 interface LayoutProps {
   children: React.ReactNode;
   activeTab: string;
   setActiveTab: (tab: string) => void;
+  isCameraVisible?: boolean;
+  setIsCameraVisible?: (visible: boolean) => void;
 }
 
-const Layout: React.FC<LayoutProps> = ({ children, activeTab, setActiveTab }) => {
+const Layout: React.FC<LayoutProps> = ({ 
+  children, 
+  activeTab, 
+  setActiveTab,
+  isCameraVisible = false,
+  setIsCameraVisible 
+}) => {
   const tabs = [
     { id: 'interactive', label: 'Interactive Teach', icon: MousePointer2 },
     { id: 'auto_planner', label: '3D Auto Planner', icon: GitBranch },
@@ -97,7 +105,31 @@ const Layout: React.FC<LayoutProps> = ({ children, activeTab, setActiveTab }) =>
           })}
         </nav>
 
-        <div className="border-t border-slate-800 p-3 shrink-0 space-y-1">
+        <div className="border-t border-slate-800 p-3 shrink-0 space-y-2">
+          {/* Live Camera Stream Toggle Button with Green Breathing Dot */}
+          {setIsCameraVisible && (
+            <button
+              onClick={() => setIsCameraVisible(!isCameraVisible)}
+              className={`flex w-full relative items-center justify-center gap-4 rounded-lg px-3 py-3 text-sm transition-all duration-200 group ${
+                isCameraVisible
+                  ? "bg-blue-500/20 text-blue-300 font-medium border border-blue-500/40 shadow-[0_0_12px_rgba(59,130,246,0.3)]"
+                  : "text-slate-400 hover:bg-slate-800 hover:text-white"
+              }`}
+            >
+              <div className="shrink-0 flex items-center justify-center relative ml-[-2px]">
+                <Camera size={18} className={isCameraVisible ? "text-blue-400" : "text-slate-400 group-hover:text-blue-300"} />
+                {/* Green Breathing Indicator Dot */}
+                <span className="absolute -top-1.5 -right-2 flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                </span>
+              </div>
+              <div className={tooltipClass}>
+                {isCameraVisible ? 'Hide Live Camera' : 'Show Live Camera'}
+              </div>
+            </button>
+          )}
+
           {/* Fullscreen Toggle Button */}
           <button
             onClick={toggleFullscreen}

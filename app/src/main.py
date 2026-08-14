@@ -63,6 +63,7 @@ logging.getLogger().addHandler(ws_log_handler)
 from db.database import engine, Base
 from apps.calib.api import calib_router
 from apps.system.api import sys_router
+from apps.interactive.api import router as interactive_router
 from contextlib import asynccontextmanager
 from services.camera_service import camera_service
 from services.robot_service import robot_service
@@ -99,9 +100,14 @@ app.add_middleware(
 
 app.include_router(calib_router)
 app.include_router(sys_router)
+app.include_router(interactive_router)
 
-# Mount URDF static files for frontend 3D rendering
+# Mount static files for frontend 3D rendering and images
 app.mount("/urdf", StaticFiles(directory=os.path.join(PROJECT_ROOT, "app/urdf")), name="urdf")
+
+template_group_path = os.path.join(PROJECT_ROOT, "data/template_group")
+os.makedirs(template_group_path, exist_ok=True)
+app.mount("/templates", StaticFiles(directory=template_group_path), name="templates")
 
 @app.get("/")
 def read_root():

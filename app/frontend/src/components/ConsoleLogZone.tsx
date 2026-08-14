@@ -14,10 +14,11 @@ const ConsoleLogZone: React.FC = () => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
+
   useEffect(() => {
     let isMounted = true;
     let ws: WebSocket | null = null;
-    let reconnectTimeout: NodeJS.Timeout;
+    let reconnectTimeout: ReturnType<typeof setTimeout>;
 
     const connect = () => {
       if (!isMounted) return;

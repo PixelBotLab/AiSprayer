@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, FolderPlus, Trash2, Image as ImageIcon, Camera, ChevronLeft, ChevronRight } from 'lucide-react';
+import { CustomModal, type ModalConfig } from '../common/CustomModal';
 
 const CalibrationOp: React.FC = () => {
   const [sessions, setSessions] = useState<string[]>([]);
@@ -10,6 +11,24 @@ const CalibrationOp: React.FC = () => {
   const [isRunning, setIsRunning] = useState(false);
   const [progressData, setProgressData] = useState<{current: number, total: number, status: string} | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Custom Modal State
+  const [modalConfig, setModalConfig] = useState<ModalConfig>({
+    isOpen: false,
+    type: 'info',
+    title: '',
+    message: ''
+  });
+
+  const showAlert = (title: string, message: string) => {
+    setModalConfig({
+      isOpen: true,
+      type: 'alert',
+      title,
+      message,
+      confirmText: 'Understood'
+    });
+  };
 
   const fetchSessions = async () => {
     try {
@@ -26,7 +45,7 @@ const CalibrationOp: React.FC = () => {
     }
   };
 
-let calibrationModeTimeout: any = null;
+  let calibrationModeTimeout: any = null;
 
   useEffect(() => {
     fetchSessions();
@@ -44,8 +63,6 @@ let calibrationModeTimeout: any = null;
     }).catch(console.error);
 
     return () => {
-      // Disable calibration mode when leaving this tab, with a slight delay
-      // to prevent React StrictMode race conditions (mount -> unmount -> remount)
       calibrationModeTimeout = setTimeout(() => {
         fetch('http://localhost:8000/api/system/camera/calibration_mode', {
           method: 'POST',
@@ -95,20 +112,29 @@ let calibrationModeTimeout: any = null;
     }
   };
 
-  const handleDeleteSession = async () => {
+  const handleDeleteSession = () => {
     if (!activeSession) return;
-    if (!window.confirm(`Are you sure you want to delete session ${activeSession}?`)) return;
-    try {
-      const res = await fetch(`http://localhost:8000/api/calib/sessions/${activeSession}`, { method: 'DELETE' });
-      if (res.ok) {
-        setActiveSession(null);
-        setActiveImage(null);
-        setSessionData({ samples: [], result: null });
-        fetchSessions();
+    setModalConfig({
+      isOpen: true,
+      type: 'confirm',
+      title: 'Delete Calibration Session',
+      message: `Are you sure you want to permanently delete session "${activeSession}"? All captured samples and calibration results will be removed.`,
+      confirmText: 'Delete Session',
+      isDanger: true,
+      onConfirm: async () => {
+        try {
+          const res = await fetch(`http://localhost:8000/api/calib/sessions/${activeSession}`, { method: 'DELETE' });
+          if (res.ok) {
+            setActiveSession(null);
+            setActiveImage(null);
+            setSessionData({ samples: [], result: null });
+            fetchSessions();
+          }
+        } catch (err) {
+          console.error('Failed to delete session:', err);
+        }
       }
-    } catch (err) {
-      console.error('Failed to delete session:', err);
-    }
+    });
   };
 
   const handleCapture = async () => {
@@ -117,7 +143,6 @@ let calibrationModeTimeout: any = null;
     try {
       const res = await fetch(`http://localhost:8000/api/calib/sessions/${activeSession}/samples`, { method: 'POST' });
       if (res.ok) {
-        // Refresh session data
         const dataRes = await fetch(`http://localhost:8000/api/calib/sessions/${activeSession}`);
         if (dataRes.ok) {
           const data = await dataRes.json();
@@ -127,15 +152,15 @@ let calibrationModeTimeout: any = null;
             mode: data.mode || undefined
           });
           if (data.samples?.length > 0) {
-            setActiveImage(data.samples[data.samples.length - 1].filename); // select latest
+            setActiveImage(data.samples[data.samples.length - 1].filename);
           }
         }
       } else {
         const err = await res.json();
-        alert(`Capture failed: ${err.detail}`);
+        showAlert('Sample Capture Failed', err.detail || 'Failed to capture sample from camera feed.');
       }
     } catch (err: any) {
-      alert(`Error capturing sample: ${err.message}`);
+      showAlert('Capture Error', err.message);
     } finally {
       setIsCapturing(false);
     }
@@ -144,7 +169,7 @@ let calibrationModeTimeout: any = null;
   const handleRunCalibration = async () => {
     if (!activeSession || isRunning) return;
     if (sessionData.samples.length < 3) {
-      alert('Need at least 3 samples to run calibration.');
+      showAlert('Insufficient Samples', 'At least 3 valid calibration samples are required to solve camera extrinsics.');
       return;
     }
     setIsRunning(true);
@@ -179,7 +204,7 @@ let calibrationModeTimeout: any = null;
           if (data.status === 'completed') {
             fetchSessionData(activeSession);
           } else {
-            alert('Calibration failed. Check logs.');
+            showAlert('Calibration Failed', 'Optimization failed to converge. Please inspect corner detections.');
           }
         }
       };
@@ -190,7 +215,7 @@ let calibrationModeTimeout: any = null;
         setProgressData(null);
       };
     } catch (err: any) {
-      alert(`Error starting calibration: ${err.message}`);
+      showAlert('Execution Error', err.message);
       setIsRunning(false);
       setProgressData(null);
     }
@@ -207,7 +232,11 @@ let calibrationModeTimeout: any = null;
   };
 
   return (
-    <div className="w-full h-full flex flex-col bg-slate-900/80 rounded-xl border border-slate-800 shadow-xl overflow-hidden backdrop-blur-sm">
+    <div className="w-full h-full flex flex-col bg-slate-900/80 rounded-xl border border-slate-800 shadow-xl overflow-hidden backdrop-blur-sm relative">
+      
+      {/* Custom Sleek Modal */}
+      <CustomModal config={modalConfig} onClose={() => setModalConfig(prev => ({ ...prev, isOpen: false }))} />
+
       {/* TOP BAR: Sessions */}
       <div className="h-14 shrink-0 border-b border-slate-800 bg-slate-950/50 flex items-center px-3 gap-2">
         <button onClick={() => scrollTabs('left')} className="p-1 hover:bg-slate-800 rounded text-slate-500 hover:text-slate-300">
@@ -256,23 +285,22 @@ let calibrationModeTimeout: any = null;
             </div>
           )}
 
-            
-            {/* Progress Overlay */}
-            {isRunning && progressData && (
-              <div className="absolute inset-x-0 bottom-0 bg-slate-950/80 backdrop-blur-sm p-4 border-t border-emerald-900/50 flex flex-col gap-2">
-                <div className="flex justify-between items-center text-xs">
-                  <span className="text-emerald-400 font-bold uppercase tracking-wider">{progressData.status}</span>
-                  <span className="text-slate-400 font-mono">{progressData.current} / {progressData.total}</span>
-                </div>
-                <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
-                  <div 
-                    className="h-full bg-emerald-500 transition-all duration-300"
-                    style={{ width: `${(progressData.current / Math.max(1, progressData.total)) * 100}%` }}
-                  />
-                </div>
+          {/* Progress Overlay */}
+          {isRunning && progressData && (
+            <div className="absolute inset-x-0 bottom-0 bg-slate-950/80 backdrop-blur-sm p-4 border-t border-emerald-900/50 flex flex-col gap-2">
+              <div className="flex justify-between items-center text-xs">
+                <span className="text-emerald-400 font-bold uppercase tracking-wider">{progressData.status}</span>
+                <span className="text-slate-400 font-mono">{progressData.current} / {progressData.total}</span>
               </div>
-            )}
-          </div>
+              <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
+                <div 
+                  className="h-full bg-emerald-500 transition-all duration-300"
+                  style={{ width: `${(progressData.current / Math.max(1, progressData.total)) * 100}%` }}
+                />
+              </div>
+            </div>
+          )}
+        </div>
 
         {/* Middle Column: Thumbnails */}
         <div className="w-36 shrink-0 border-r border-slate-800 p-3 overflow-y-auto custom-scrollbar flex flex-col gap-3 bg-slate-950/30">

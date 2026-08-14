@@ -5,6 +5,7 @@ import Layout from './components/Layout';
 
 function App() {
   const [activeTab, setActiveTab] = useState('interactive');
+  const [isCameraVisible, setIsCameraVisible] = useState(false);
 
   const renderContent = () => {
     switch (activeTab) {
@@ -13,12 +14,23 @@ function App() {
       default:
         // All other tabs (calib, interactive, auto_planner, digital_twin) 
         // share the unified WorkspaceView layout
-        return <WorkspaceView activeTab={activeTab} />;
+        return (
+          <WorkspaceView 
+            activeTab={activeTab} 
+            isCameraVisible={isCameraVisible}
+            setIsCameraVisible={setIsCameraVisible}
+          />
+        );
     }
   };
 
   return (
-    <Layout activeTab={activeTab} setActiveTab={setActiveTab}>
+    <Layout 
+      activeTab={activeTab} 
+      setActiveTab={setActiveTab}
+      isCameraVisible={isCameraVisible}
+      setIsCameraVisible={setIsCameraVisible}
+    >
       {renderContent()}
     </Layout>
   );
