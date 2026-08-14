@@ -20,7 +20,8 @@ import {
   FileCode2,
   HardDrive,
   ZoomIn,
-  ZoomOut
+  ZoomOut,
+  Box
 } from 'lucide-react';
 import { CustomModal, type ModalConfig } from '../common/CustomModal';
 
@@ -52,11 +53,22 @@ const COLORS = [
   { fill: 'rgba(6, 182, 212, 0.38)', stroke: '#06b6d4' },
 ];
 
-const InteractiveOp: React.FC = () => {
+interface InteractiveOpProps {
+  externalActiveTemplate?: string | null;
+  onTemplateChange?: (templateName: string | null) => void;
+  onMeshUpdated?: () => void;
+}
+
+const InteractiveOp: React.FC<InteractiveOpProps> = ({
+  externalActiveTemplate,
+  onTemplateChange,
+  onMeshUpdated
+}) => {
   const [templates, setTemplates] = useState<string[]>([]);
-  const [activeTemplate, setActiveTemplate] = useState<string | null>(null);
+  const [activeTemplate, setActiveTemplate] = useState<string | null>(externalActiveTemplate || null);
   const [files, setFiles] = useState<FileItem[]>([]);
   const [isCapturing, setIsCapturing] = useState(false);
+  const [isReconstructing, setIsReconstructing] = useState(false);
   const [imageVersion, setImageVersion] = useState(Date.now());
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -183,6 +195,19 @@ const InteractiveOp: React.FC = () => {
     });
   };
 
+  const selectTemplate = (templateName: string) => {
+    setActiveTemplate(templateName);
+    if (onTemplateChange) {
+      onTemplateChange(templateName);
+    }
+  };
+
+  useEffect(() => {
+    if (externalActiveTemplate && externalActiveTemplate !== activeTemplate) {
+      setActiveTemplate(externalActiveTemplate);
+    }
+  }, [externalActiveTemplate]);
+
   const fetchTemplates = async () => {
     try {
       const res = await fetch('http://localhost:8000/api/interactive/templates');
@@ -190,7 +215,7 @@ const InteractiveOp: React.FC = () => {
         const data = await res.json();
         setTemplates(data.templates || []);
         if (data.templates?.length > 0 && !activeTemplate) {
-          setActiveTemplate(data.templates[0]);
+          selectTemplate(data.templates[0]);
         }
       }
     } catch (err) {
@@ -271,7 +296,7 @@ const InteractiveOp: React.FC = () => {
           });
           if (res.ok) {
             await fetchTemplates();
-            setActiveTemplate(name);
+            selectTemplate(name);
           } else {
             const err = await res.json();
             showAlert('Creation Failed', err.detail || 'Failed to create template directory.');
@@ -301,6 +326,32 @@ const InteractiveOp: React.FC = () => {
     }
   };
 
+  const handleReconstruct = async () => {
+    if (!activeTemplate || isReconstructing) return;
+    setIsReconstructing(true);
+    try {
+      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/reconstruct`, { method: 'POST' });
+      if (res.ok) {
+        const data = await res.json();
+        fetchFiles(activeTemplate);
+        if (onMeshUpdated) {
+          onMeshUpdated();
+        }
+        showAlert(
+          'Reconstruction Completed', 
+          `Generated surface mesh: ${data.vertices} vertices, ${data.faces} faces.\nSource: ${data.calibration_source}`
+        );
+      } else {
+        const err = await res.json();
+        showAlert('Reconstruction Failed', err.detail || 'Failed to reconstruct 3D surface mesh.');
+      }
+    } catch (err: any) {
+      showAlert('Reconstruction Error', err.message);
+    } finally {
+      setIsReconstructing(false);
+    }
+  };
+
   const scrollTabs = (dir: 'left' | 'right') => {
     if (scrollRef.current) {
       scrollRef.current.scrollBy({ left: dir === 'left' ? -200 : 200, behavior: 'smooth' });
@@ -308,11 +359,12 @@ const InteractiveOp: React.FC = () => {
   };
 
   const hasImage = files.some(f => f.name === 'scan.jpg');
+  const hasDepth = files.some(f => f.name === 'scan.depth.npy');
+  const hasMasks = files.some(f => f.name === 'scan.masks.yaml');
+  
   const imageUrl = hasImage && activeTemplate
     ? `http://localhost:8000/templates/${activeTemplate}/scan.jpg?t=${imageVersion}`
     : null;
-
-
 
   const formatFileSize = (bytes: number) => {
     if (bytes < 1024) return `${bytes} B`;
@@ -331,6 +383,7 @@ const InteractiveOp: React.FC = () => {
   };
 
   const getFileBadge = (filename: string) => {
+    if (filename.includes('.ply') || filename.includes('.stl')) return { label: 'MESH', color: 'bg-purple-500/20 text-purple-300 border-purple-500/40' };
     if (filename === 'scan.masks.yaml') return { label: 'MASKS', color: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' };
     if (filename === 'scan.params.yaml') return { label: 'PARAMS', color: 'bg-amber-500/20 text-amber-300 border-amber-500/40' };
     if (filename === 'scan.pcd') return { label: '3D PCD', color: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40' };
@@ -340,12 +393,52 @@ const InteractiveOp: React.FC = () => {
   };
 
   const getFileIcon = (filename: string) => {
-    if (filename.endsWith('.jpg') || filename.endsWith('.png')) return <ImageIcon size={14} className="text-blue-400" />;
-    if (filename.endsWith('.yaml') || filename.endsWith('.json')) return <FileJson size={14} className="text-amber-400" />;
-    if (filename.endsWith('.pcd')) return <Grip size={14} className="text-cyan-400" />;
-    if (filename.endsWith('.npy')) return <Layers size={14} className="text-indigo-400" />;
-    return <FileCode2 size={14} className="text-slate-400" />;
+    if (filename.includes('.ply') || filename.includes('.stl')) return <Box size={13} className="text-purple-400" />;
+    if (filename.endsWith('.jpg') || filename.endsWith('.png')) return <ImageIcon size={13} className="text-blue-400" />;
+    if (filename.endsWith('.yaml') || filename.endsWith('.json')) return <FileJson size={13} className="text-amber-400" />;
+    if (filename.endsWith('.pcd')) return <Grip size={13} className="text-cyan-400" />;
+    if (filename.endsWith('.npy')) return <Layers size={13} className="text-indigo-400" />;
+    return <FileCode2 size={13} className="text-slate-400" />;
   };
+
+  // Grouping files into logical operational stages
+  const fileCategories = [
+    {
+      id: 'capture',
+      title: 'Capture',
+      icon: Camera,
+      iconColor: 'text-blue-400',
+      badgeColor: 'bg-blue-500/10 text-blue-400 border-blue-500/30',
+      files: files.filter(f => ['scan.jpg', 'scan.depth.npy', 'scan.pcd', 'scan.params.yaml'].includes(f.name))
+    },
+    {
+      id: 'segment',
+      title: 'Segment',
+      icon: Layers,
+      iconColor: 'text-emerald-400',
+      badgeColor: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30',
+      files: files.filter(f => ['scan.masks.yaml', 'scan.masks.jpg'].includes(f.name))
+    },
+    {
+      id: 'reconstruct',
+      title: 'Reconstruct',
+      icon: Box,
+      iconColor: 'text-purple-400',
+      badgeColor: 'bg-purple-500/10 text-purple-400 border-purple-500/30',
+      files: files.filter(f => f.name.startsWith('scan.mesh') || f.name.includes('.ply') || f.name.includes('.stl'))
+    },
+    {
+      id: 'other',
+      title: 'Other',
+      icon: FileCode2,
+      iconColor: 'text-slate-400',
+      badgeColor: 'bg-slate-800 text-slate-400 border-slate-700',
+      files: files.filter(f => 
+        !['scan.jpg', 'scan.depth.npy', 'scan.pcd', 'scan.params.yaml', 'scan.masks.yaml', 'scan.masks.jpg'].includes(f.name) &&
+        !f.name.startsWith('scan.mesh') && !f.name.includes('.ply') && !f.name.includes('.stl')
+      )
+    }
+  ];
 
   // --- Segmentation Logic ---
   
@@ -508,7 +601,7 @@ const InteractiveOp: React.FC = () => {
           {templates.map(template => (
             <button
               key={template}
-              onClick={() => setActiveTemplate(template)}
+              onClick={() => selectTemplate(template)}
               className={`px-3.5 h-8 shrink-0 rounded-md text-xs font-medium border transition-colors ${
                 activeTemplate === template
                   ? 'bg-blue-600/20 text-blue-400 border-blue-500/50 shadow-[0_0_8px_rgba(59,130,246,0.3)]'
@@ -858,8 +951,8 @@ const InteractiveOp: React.FC = () => {
           )}
         </div>
 
-        {/* Middle Column: Slim Compact File List (Sorted by Date Descending) */}
-        <div className="w-[175px] shrink-0 border-r border-slate-800 bg-slate-950/40 flex flex-col min-h-0">
+        {/* Middle Column: Categorized Grouped File List */}
+        <div className="w-[185px] shrink-0 border-r border-slate-800 bg-slate-950/40 flex flex-col min-h-0">
           <div className="h-9 px-2.5 border-b border-slate-800 bg-slate-900/90 flex justify-between items-center shrink-0">
             <div className="flex items-center gap-1.5 text-[11px] text-slate-300 font-medium">
               <HardDrive size={13} className="text-slate-400" />
@@ -870,55 +963,71 @@ const InteractiveOp: React.FC = () => {
             </span>
           </div>
 
-          <div className="flex-1 overflow-y-auto custom-scrollbar p-1.5 flex flex-col gap-1">
+          <div className="flex-1 overflow-y-auto overflow-x-hidden custom-scrollbar p-1.5 flex flex-col gap-2">
             {files.length === 0 ? (
               <div className="flex flex-col items-center justify-center h-32 text-slate-600 text-[11px] gap-1">
                 <FileCode2 size={20} className="opacity-30" />
                 <span>Empty</span>
               </div>
             ) : (
-              files.map(file => {
-                const badge = getFileBadge(file.name);
-                const isMaskYaml = file.name === 'scan.masks.yaml';
+              fileCategories.map(cat => {
+                if (cat.files.length === 0) return null;
+                const CatIcon = cat.icon;
                 return (
-                  <div 
-                    key={file.name} 
-                    className="relative group"
-                  >
-                    <div 
-                      className={`p-1.5 rounded-lg border transition-all flex flex-col gap-0.5 ${
-                        isMaskYaml 
-                          ? 'bg-emerald-950/20 border-emerald-500/40 shadow-sm' 
-                          : 'bg-slate-900/60 border-slate-800/80 hover:border-slate-700 hover:bg-slate-800/50'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-1">
-                        <div className="flex items-center gap-1.5 min-w-0">
-                          <div className="p-0.5 rounded bg-slate-800 shrink-0">
-                            {getFileIcon(file.name)}
-                          </div>
-                          <span className={`text-[11px] font-medium truncate ${isMaskYaml ? 'text-emerald-300' : 'text-slate-200'}`}>
-                            {file.name}
-                          </span>
-                        </div>
-                        {badge && (
-                          <span className={`text-[8px] px-1 py-0.2 rounded border font-mono shrink-0 ${badge.color}`}>
-                            {badge.label}
-                          </span>
-                        )}
+                  <div key={cat.id} className="flex flex-col gap-1">
+                    {/* Category Divider Header */}
+                    <div className="flex items-center justify-between px-1 pt-1 pb-0.5 border-b border-slate-800/80">
+                      <div className="flex items-center gap-1 text-[10px] font-semibold tracking-wider uppercase text-slate-400">
+                        <CatIcon size={11} className={cat.iconColor} />
+                        <span>{cat.title}</span>
                       </div>
-                      
-                      <div className="flex items-center justify-between text-[9px] text-slate-500 font-mono px-0.5">
-                        <span>{formatFileSize(file.size)}</span>
-                        <span>{formatFileDate(file.ctime)}</span>
-                      </div>
+                      <span className={`text-[8px] font-mono px-1 py-0.2 rounded border ${cat.badgeColor}`}>
+                        {cat.files.length}
+                      </span>
                     </div>
 
-                    {/* Unified Hover Tooltip for File Details */}
-                    <div className="absolute left-full ml-1.5 top-1/2 -translate-y-1/2 hidden group-hover:flex flex-col pointer-events-none z-50">
-                      <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2.5 py-1 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
-                        {file.name} · {formatFileSize(file.size)} · {formatFileDate(file.ctime)}
-                      </div>
+                    {/* Files in this Category */}
+                    <div className="flex flex-col gap-1">
+                      {cat.files.map(file => {
+                        const badge = getFileBadge(file.name);
+                        const isMaskYaml = file.name === 'scan.masks.yaml';
+                        const isMesh = file.name.includes('.ply') || file.name.includes('.stl');
+                        return (
+                          <div 
+                            key={file.name}
+                            className={`p-1.5 rounded-lg border transition-all flex flex-col gap-0.5 ${
+                              isMaskYaml 
+                                ? 'bg-emerald-950/25 border-emerald-500/40 shadow-sm' 
+                                : isMesh
+                                  ? 'bg-purple-950/25 border-purple-500/40 shadow-sm'
+                                  : 'bg-slate-900/60 border-slate-800/80 hover:border-slate-700 hover:bg-slate-800/50'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-1">
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                <div className="p-0.5 rounded bg-slate-800 shrink-0">
+                                  {getFileIcon(file.name)}
+                                </div>
+                                <span className={`text-[11px] font-medium truncate ${
+                                  isMaskYaml ? 'text-emerald-300' : (isMesh ? 'text-purple-300' : 'text-slate-200')
+                                }`}>
+                                  {file.name}
+                                </span>
+                              </div>
+                              {badge && (
+                                <span className={`text-[8px] px-1 py-0.2 rounded border font-mono shrink-0 ${badge.color}`}>
+                                  {badge.label}
+                                </span>
+                              )}
+                            </div>
+                            
+                            <div className="flex items-center justify-between text-[9px] text-slate-500 font-mono px-0.5">
+                              <span>{formatFileSize(file.size)}</span>
+                              <span>{formatFileDate(file.ctime)}</span>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 );
@@ -929,26 +1038,28 @@ const InteractiveOp: React.FC = () => {
 
         {/* Right Column: Narrow Action Buttons with Unified Tooltips */}
         <div className="w-[125px] shrink-0 bg-slate-950/60 flex flex-col justify-end p-2.5 border-l border-slate-800 gap-2">
+           {/* Capture Button */}
            <div className="relative group w-full">
              <button 
                onClick={handleCapture}
-               disabled={isCapturing || !activeTemplate || segMode}
+               disabled={isCapturing || isReconstructing || !activeTemplate || segMode}
                className="w-full py-2.5 bg-gradient-to-r from-slate-800 to-slate-900 hover:from-slate-700 hover:to-slate-800 text-slate-200 font-medium rounded-lg shadow transition-all flex items-center justify-center gap-1.5 text-xs active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed border border-slate-700"
              >
-               <Camera size={14} />
+               {isCapturing ? <RefreshCw size={14} className="animate-spin text-blue-400" /> : <Camera size={14} />}
                <span>{isCapturing ? 'Wait...' : 'Capture'}</span>
              </button>
              <div className="absolute bottom-full mb-2 right-0 hidden group-hover:flex flex-col items-end pointer-events-none z-50">
                <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2.5 py-1 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
-                 Capture 2D + 3D Camera Data
+                 Capture 2D Color + 3D Depth Data
                </div>
              </div>
            </div>
            
+           {/* Segment Button */}
            <div className="relative group w-full">
              <button 
                onClick={toggleSegMode}
-               disabled={!hasImage || isCapturing}
+               disabled={!hasImage || isCapturing || isReconstructing}
                className={`w-full py-2.5 font-medium rounded-lg shadow transition-all flex items-center justify-center gap-1.5 text-xs active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed border ${
                  segMode 
                    ? 'bg-red-600/20 text-red-300 border-red-500/50 hover:bg-red-600/30' 
@@ -961,6 +1072,23 @@ const InteractiveOp: React.FC = () => {
              <div className="absolute bottom-full mb-2 right-0 hidden group-hover:flex flex-col items-end pointer-events-none z-50">
                <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2.5 py-1 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
                  {segMode ? 'Exit Segmentation Mode' : 'MobileSAM Interactive Segmentation'}
+               </div>
+             </div>
+           </div>
+
+           {/* Surface Reconstruction Button */}
+           <div className="relative group w-full">
+             <button 
+               onClick={handleReconstruct}
+               disabled={!hasImage || !hasMasks || !hasDepth || isCapturing || isReconstructing || segMode}
+               className="w-full py-2.5 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-medium rounded-lg shadow-lg shadow-purple-900/30 transition-all flex items-center justify-center gap-1.5 text-xs active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed border border-purple-500/50"
+             >
+               {isReconstructing ? <RefreshCw size={14} className="animate-spin text-purple-200" /> : <Box size={14} />}
+               <span>{isReconstructing ? 'Rebuilding...' : 'Reconstruct'}</span>
+             </button>
+             <div className="absolute bottom-full mb-2 right-0 hidden group-hover:flex flex-col items-end pointer-events-none z-50">
+               <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2.5 py-1 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+                 {!hasMasks ? "Need scan.masks.yaml first" : "Surface Poisson 3D Mesh Reconstruction"}
                </div>
              </div>
            </div>

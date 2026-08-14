@@ -23,6 +23,8 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({
   setIsCameraVisible 
 }) => {
   const [robotState, setRobotState] = useState<RobotState>({ pose: [0,0,0,0,0,0], joint: [0,0,0,0,0,0] });
+  const [activeTemplate, setActiveTemplate] = useState<string | null>(null);
+  const [meshVersion, setMeshVersion] = useState<number>(Date.now());
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -47,7 +49,13 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({
       case 'calib':
         return <CalibrationOp />;
       case 'interactive':
-        return <InteractiveOp />;
+        return (
+          <InteractiveOp 
+            externalActiveTemplate={activeTemplate}
+            onTemplateChange={(tpl) => setActiveTemplate(tpl)}
+            onMeshUpdated={() => setMeshVersion(Date.now())}
+          />
+        );
       case 'auto_planner':
         return <div className="p-8 text-slate-400 bg-slate-900/50 rounded-xl border border-slate-800 w-full h-full flex items-center justify-center">3D Auto Planner (Coming Soon)</div>;
       case 'digital_twin':
@@ -59,7 +67,7 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({
 
   return (
     <div className="w-full h-full p-6 bg-slate-950 text-slate-200 overflow-hidden flex gap-6 relative">
-      {/* Floating Camera Window (Rendered cleanly without blocking tabs when open, or toggled from sidebar) */}
+      {/* Floating Camera Window */}
       {isCameraVisible && (
         <FloatingCameraZone onClose={() => setIsCameraVisible && setIsCameraVisible(false)} />
       )}
@@ -78,11 +86,15 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({
         </div>
       </div>
 
-      {/* Right Column (40% width) - Robot Zone Full Height */}
+      {/* Right Column (40% width) - Robot Zone Full Height with Reconstructed 3D Mesh */}
       <div className="flex-[2] flex flex-col gap-6 min-w-0 h-full">
         {/* Full Right: Robot Zone */}
         <div className="flex-1 min-h-0">
-          <RobotZone robotState={robotState} />
+          <RobotZone 
+            robotState={robotState} 
+            activeTemplate={activeTemplate}
+            meshVersion={meshVersion}
+          />
         </div>
       </div>
       

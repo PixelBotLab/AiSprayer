@@ -11,6 +11,7 @@ import open3d as o3d
 from services.camera_service import camera_service
 from core.vision.point_cloud_processor import depth_to_pcd
 from apps.interactive.sam_service import sam_service
+from apps.interactive.reconstruction_service import reconstruction_service
 
 router = APIRouter(prefix="/api/interactive", tags=["Interactive"])
 logger = logging.getLogger(__name__)
@@ -188,3 +189,23 @@ def save_sam(name: str, req: SaveMasksRequest):
     except Exception as e:
         logger.error(f"Save masks failed for template '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/templates/{name}/reconstruct")
+def reconstruct_surface(name: str):
+    template_path = os.path.join(TEMPLATE_GROUP_DIR, name)
+    if not os.path.exists(template_path):
+        raise HTTPException(status_code=404, detail="Template not found")
+        
+    try:
+        result = reconstruction_service.reconstruct_surface(template_path, name)
+        return result
+    except FileNotFoundError as e:
+        logger.error(f"Reconstruction file missing for '{name}': {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except ValueError as e:
+        logger.error(f"Reconstruction validation error for '{name}': {e}")
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Reconstruction failed for template '{name}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Reconstruction error: {str(e)}")
+

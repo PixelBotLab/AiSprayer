@@ -10,14 +10,20 @@ interface RobotState {
 
 interface RobotZoneProps {
   robotState: RobotState;
+  activeTemplate?: string | null;
+  meshVersion?: number;
 }
 
-const RobotZone: React.FC<RobotZoneProps> = ({ robotState }) => {
+const RobotZone: React.FC<RobotZoneProps> = ({ robotState, activeTemplate = null, meshVersion = 0 }) => {
   return (
     <div className="w-full h-full flex flex-col gap-4">
-      {/* Robot 3D Viewer */}
+      {/* Robot 3D Viewer with Surface Mesh Overlay */}
       <div className="flex-1 min-h-0 bg-slate-900/80 rounded-xl border border-slate-800 shadow-lg flex flex-col shrink-0 p-1 relative">
-        <Robot3DViewer jointAngles={robotState.joint} />
+        <Robot3DViewer 
+          jointAngles={robotState.joint} 
+          activeTemplate={activeTemplate}
+          meshVersion={meshVersion}
+        />
       </div>
 
       {/* Jog Control Panel & Connection */}
