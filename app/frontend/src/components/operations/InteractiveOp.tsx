@@ -835,12 +835,12 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
             </div>
           )}
           
-          {/* SEGMENTATION FLOATING TOOLBAR: Semi-transparent Frosted Glass with Unified Tooltips */}
+          {/* SEGMENTATION FLOATING TOOLBAR: Semi-transparent Frosted Glass with Unified Tooltips & Consistent Height (h-7) */}
           {segMode && !isInitializingSam && (
-            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-slate-950/45 hover:bg-slate-950/65 backdrop-blur-md border border-white/15 rounded-full px-3 py-1.5 flex items-center gap-2 shadow-2xl z-30 transition-all">
+            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-slate-950/45 hover:bg-slate-950/65 backdrop-blur-md border border-white/15 rounded-full px-2.5 h-7 flex items-center gap-1.5 shadow-2xl z-30 transition-all">
               
               {/* Click Indicator */}
-              <div className="flex items-center gap-2 px-1 text-[10px] text-slate-300 border-r border-white/10 pr-2.5">
+              <div className="flex items-center gap-1.5 px-0.5 text-[10px] text-slate-300 border-r border-white/10 pr-2">
                 <span className="flex items-center gap-1 text-emerald-400 font-medium"><span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block shadow-[0_0_6px_rgba(52,211,153,0.6)]" />L(+)</span>
                 <span className="flex items-center gap-1 text-red-400 font-medium"><span className="w-1.5 h-1.5 rounded-full bg-red-400 inline-block shadow-[0_0_6px_rgba(248,113,113,0.6)]" />R(-)</span>
                 {committedMasks.length > 0 && (
@@ -853,9 +853,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                 <button 
                   onClick={handleUndo} 
                   disabled={currentPoints.length === 0} 
-                  className="p-1.5 text-slate-300 hover:text-white hover:bg-white/10 rounded-full disabled:opacity-25 transition-colors"
+                  className="p-1 text-slate-300 hover:text-white hover:bg-white/10 rounded-full disabled:opacity-25 transition-colors"
                 >
-                  <Undo2 size={16} />
+                  <Undo2 size={13} />
                 </button>
                 <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
                   <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2.5 py-1 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
@@ -869,9 +869,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                 <button 
                   onClick={handleCommit} 
                   disabled={currentPoints.length === 0 || currentPolygons.length === 0} 
-                  className="p-1.5 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-400/20 rounded-full disabled:opacity-25 transition-colors"
+                  className="p-1 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-400/20 rounded-full disabled:opacity-25 transition-colors"
                 >
-                  <Check size={17} />
+                  <Check size={14} />
                 </button>
                 <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
                   <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2.5 py-1 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
@@ -880,16 +880,16 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                 </div>
               </div>
 
-              <div className="w-px h-4 bg-white/10" />
+              <div className="w-px h-3 bg-white/10 mx-0.5" />
 
               {/* Reset Current Object Button with Tooltip */}
               <div className="relative group flex items-center justify-center">
                 <button 
                   onClick={handleResetCurrent} 
                   disabled={currentPoints.length === 0} 
-                  className="p-1.5 text-amber-400 hover:text-amber-300 hover:bg-amber-400/20 rounded-full disabled:opacity-25 transition-colors"
+                  className="p-1 text-amber-400 hover:text-amber-300 hover:bg-amber-400/20 rounded-full disabled:opacity-25 transition-colors"
                 >
-                  <RefreshCw size={15} />
+                  <RefreshCw size={12} />
                 </button>
                 <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
                   <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2.5 py-1 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
@@ -903,9 +903,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                 <button 
                   onClick={handleClearAll} 
                   disabled={committedMasks.length === 0 && currentPoints.length === 0} 
-                  className="p-1.5 text-rose-400 hover:text-rose-300 hover:bg-rose-400/20 rounded-full disabled:opacity-25 transition-colors"
+                  className="p-1 text-rose-400 hover:text-rose-300 hover:bg-rose-400/20 rounded-full disabled:opacity-25 transition-colors"
                 >
-                  <Trash2 size={15} />
+                  <Trash2 size={12} />
                 </button>
                 <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
                   <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2.5 py-1 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
@@ -914,16 +914,16 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                 </div>
               </div>
 
-              <div className="w-px h-4 bg-white/10" />
+              <div className="w-px h-3 bg-white/10 mx-0.5" />
 
               {/* Save Masks Button with Tooltip */}
               <div className="relative group flex items-center justify-center">
                 <button 
                   onClick={handleSaveMasks} 
                   disabled={committedMasks.length === 0} 
-                  className="p-1.5 bg-blue-600/80 hover:bg-blue-600 text-white rounded-full shadow-lg shadow-blue-900/30 border border-blue-400/30 disabled:opacity-25 transition-all active:scale-95"
+                  className="p-1 bg-blue-600/80 hover:bg-blue-600 text-white rounded-full shadow-lg shadow-blue-900/30 border border-blue-400/30 disabled:opacity-25 transition-all active:scale-95"
                 >
-                  <Save size={15} />
+                  <Save size={12} />
                 </button>
                 <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
                   <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2.5 py-1 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
@@ -936,9 +936,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
               <div className="relative group flex items-center justify-center">
                 <button 
                   onClick={toggleSegMode} 
-                  className="p-1.5 text-slate-400 hover:text-slate-200 hover:bg-white/10 rounded-full transition-colors"
+                  className="p-1 text-slate-400 hover:text-slate-200 hover:bg-white/10 rounded-full transition-colors"
                 >
-                  <X size={16} />
+                  <X size={13} />
                 </button>
                 <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
                   <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2.5 py-1 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">

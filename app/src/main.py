@@ -78,9 +78,13 @@ async def lifespan(app: FastAPI):
     # Startup: Initialize logging broadcast
     log_service.initialize()
     
-    # Startup: Start hardware services
-    logger.info("Starting background services (Camera, Robot)...")
+    # Startup: Start hardware services & AI models
+    logger.info("Starting background services (Camera, Robot, MobileSAM)...")
     camera_service.start_stream(camera_type="orbbec")
+    
+    from apps.interactive.sam_service import sam_service
+    sam_service.initialize()
+    
     yield
     # Shutdown: Clean up hardware resources
     logger.info("Shutting down background services...")

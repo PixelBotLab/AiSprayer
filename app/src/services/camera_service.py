@@ -4,7 +4,7 @@ import logging
 import time
 import os
 import sys
-from typing import Optional, Generator
+from typing import Optional, Generator, Callable, List
 import numpy as np
 
 from core.hardware.camera.factory import get_camera
@@ -19,9 +19,29 @@ class CameraService:
         self._is_streaming = False
         self._thread = None
         self._draw_calibration_corners = False
+        self._last_frame_time: float = 0.0
+        self._camera_type: str = "orbbec"
+        self._last_online_state: bool = False
+        self._status_callbacks: List[Callable] = []
 
+    def register_status_callback(self, cb: Callable):
+        if cb not in self._status_callbacks:
+            self._status_callbacks.append(cb)
+
+    def unregister_status_callback(self, cb: Callable):
+        if cb in self._status_callbacks:
+            self._status_callbacks.remove(cb)
+
+    def _notify_status(self):
+        status = self.get_status()
+        for cb in list(self._status_callbacks):
+            try:
+                cb(status)
+            except Exception:
+                pass
 
     def start_stream(self, camera_type: str = "orbbec") -> bool:
+        self._camera_type = camera_type
         if self._is_streaming:
             self.stop_stream()
             
@@ -32,16 +52,35 @@ class CameraService:
         except Exception as e:
             logger.error(f"Failed to start camera {camera_type}: {e}")
             self._cam = None
+            self._last_online_state = False
+            self._notify_status()
             return False
             
         logger.info("Camera started successfully.")
         self._is_streaming = True
         self._thread = threading.Thread(target=self._update_frame, daemon=True)
         self._thread.start()
+        self._notify_status()
         return True
 
     def is_streaming(self) -> bool:
         return self._is_streaming
+
+    def get_status(self) -> dict:
+        now = time.time()
+        is_online = (
+            self._cam is not None 
+            and self._is_streaming 
+            and (self._latest_color_frame is not None)
+            and (now - self._last_frame_time < 3.0 if self._last_frame_time > 0 else False)
+        )
+        return {
+            "online": is_online,
+            "streaming": self._is_streaming,
+            "has_frame": self._latest_color_frame is not None,
+            "last_frame_age_s": round(now - self._last_frame_time, 2) if self._last_frame_time > 0 else None,
+            "camera_type": self._camera_type
+        }
 
     def stop_stream(self):
         self._is_streaming = False
@@ -52,6 +91,9 @@ class CameraService:
             self._cam = None
         self._latest_color_frame = None
         self._latest_depth_frame = None
+        self._last_frame_time = 0.0
+        self._last_online_state = False
+        self._notify_status()
 
     def _update_frame(self):
         while self._is_streaming and self._cam:
@@ -60,10 +102,20 @@ class CameraService:
                 if color is not None:
                     self._latest_color_frame = color
                     self._latest_depth_frame = depth
+                    self._last_frame_time = time.time()
+                    if not self._last_online_state:
+                        self._last_online_state = True
+                        self._notify_status()
                 else:
+                    if self._last_online_state and (time.time() - self._last_frame_time >= 3.0):
+                        self._last_online_state = False
+                        self._notify_status()
                     time.sleep(0.01)
             except Exception as e:
                 logger.warning(f"Failed to grab frame: {e}")
+                if self._last_online_state:
+                    self._last_online_state = False
+                    self._notify_status()
                 time.sleep(0.01)
                 
     def get_latest_frame(self) -> Optional[np.ndarray]:

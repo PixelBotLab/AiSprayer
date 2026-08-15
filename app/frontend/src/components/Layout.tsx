@@ -23,6 +23,48 @@ const Layout: React.FC<LayoutProps> = ({
     { id: 'calib', label: 'Calibration', icon: Crosshair },
   ];
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isCameraOnline, setIsCameraOnline] = useState(false);
+
+  useEffect(() => {
+    let ws: WebSocket | null = null;
+    let reconnectTimer: any = null;
+    let isDisposed = false;
+
+    const connectWs = () => {
+      if (isDisposed) return;
+      try {
+        ws = new WebSocket('ws://localhost:8000/api/system/camera/ws');
+        ws.onopen = () => {};
+        ws.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            setIsCameraOnline(Boolean(data.online));
+          } catch {}
+        };
+        ws.onclose = () => {
+          if (!isDisposed) {
+            setIsCameraOnline(false);
+            reconnectTimer = setTimeout(connectWs, 2000);
+          }
+        };
+        ws.onerror = () => {
+          if (ws) ws.close();
+        };
+      } catch {
+        if (!isDisposed) {
+          reconnectTimer = setTimeout(connectWs, 2000);
+        }
+      }
+    };
+
+    connectWs();
+
+    return () => {
+      isDisposed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (ws) ws.close();
+    };
+  }, []);
 
   useEffect(() => {
     const handleFullscreenChange = () => {
@@ -118,14 +160,22 @@ const Layout: React.FC<LayoutProps> = ({
             >
               <div className="shrink-0 flex items-center justify-center relative ml-[-2px]">
                 <Camera size={18} className={isCameraVisible ? "text-blue-400" : "text-slate-400 group-hover:text-blue-300"} />
-                {/* Green Breathing Indicator Dot */}
+                {/* Dynamic Camera Online/Offline Indicator Dot */}
                 <span className="absolute -top-1.5 -right-2 flex h-2 w-2">
-                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                  {isCameraOnline ? (
+                    <>
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.7)]"></span>
+                    </>
+                  ) : (
+                    <span className="relative inline-flex rounded-full h-2 w-2 bg-slate-600 shadow-sm"></span>
+                  )}
                 </span>
               </div>
               <div className={tooltipClass}>
-                {isCameraVisible ? 'Hide Live Camera' : 'Show Live Camera'}
+                {isCameraVisible 
+                  ? (isCameraOnline ? 'Hide Live Camera (Online)' : 'Hide Live Camera (Offline)') 
+                  : (isCameraOnline ? 'Show Live Camera (Online)' : 'Show Live Camera (Offline)')}
               </div>
             </button>
           )}

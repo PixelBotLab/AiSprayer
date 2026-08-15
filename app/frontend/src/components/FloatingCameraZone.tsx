@@ -106,8 +106,14 @@ const FloatingCameraZone: React.FC<FloatingCameraZoneProps> = ({ onClose }) => {
             Live Stream {isMaximized ? '(Fullscreen)' : ''}
           </h2>
           <span className="relative flex h-1.5 w-1.5 ml-1">
-            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-            <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500"></span>
+            {resolution ? (
+              <>
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.7)]"></span>
+              </>
+            ) : (
+              <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-slate-600"></span>
+            )}
           </span>
         </div>
 

@@ -14,9 +14,13 @@ class SAMService:
     def __init__(self):
         self.predictor = None
         self.sessions: Dict[str, MobileSAMSession] = {}
-        # Load the model eagerly on startup
+
+    def initialize(self):
+        """Loads the MobileSAM weights into predictor on server startup."""
+        if self.predictor is not None:
+            return
         try:
-            logger.info("Initializing MobileSAM model on system startup...")
+            logger.info("Initializing MobileSAM model on server startup...")
             t0 = time.time()
             self.predictor = load_mobilesam()
             if self.predictor:
@@ -27,6 +31,8 @@ class SAMService:
             logger.error(f"Failed to initialize MobileSAM: {e}", exc_info=True)
 
     def get_session(self, template_name: str) -> MobileSAMSession:
+        if self.predictor is None:
+            self.initialize()
         if template_name not in self.sessions:
             self.sessions[template_name] = MobileSAMSession(self.predictor)
         return self.sessions[template_name]

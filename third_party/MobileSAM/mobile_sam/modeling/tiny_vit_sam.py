@@ -12,9 +12,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.checkpoint as checkpoint
-from timm.models.layers import DropPath as TimmDropPath,\
-    to_2tuple, trunc_normal_
-from timm.models.registry import register_model
+try:
+    from timm.layers import DropPath as TimmDropPath, to_2tuple, trunc_normal_
+    from timm.models import register_model
+except ImportError:
+    from timm.models.layers import DropPath as TimmDropPath, to_2tuple, trunc_normal_
+    from timm.models.registry import register_model
 from typing import Tuple
 
 
@@ -653,7 +656,7 @@ def register_tiny_vit_model(fn):
 
     # rename the name of fn_wrapper
     fn_wrapper.__name__ = fn.__name__
-    return register_model(fn_wrapper)
+    return fn_wrapper
 
 
 @register_tiny_vit_model
