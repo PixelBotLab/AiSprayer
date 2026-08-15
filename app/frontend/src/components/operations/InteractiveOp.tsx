@@ -1212,7 +1212,6 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                           const dy = pt.normal_2d_proj?.[1] || -40;
                           const tcpU = u + dx;
                           const tcpV = v + dy;
-                          const isHovered = hoveredWaypoint?.index === pt.index && hoveredWaypoint?.pixel?.[0] === u;
 
                           return (
                             <g key={idx}
@@ -1235,37 +1234,57 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                               <text x={u} y={v + 0.5} textAnchor="middle" dominantBaseline="central" fill="white" fontSize={8} fontWeight="bold" style={{ pointerEvents: 'none' }}>
                                 {idx + 1}
                               </text>
-
-                              {/* Hover Tooltip — full data */}
-                              {isHovered && (
-                                <g transform={`translate(${Math.min(tcpU + 8, (natSize?.w || 1280) - 185)}, ${Math.max(tcpV - 68, 4)})`} pointerEvents="none">
-                                  <rect x={0} y={0} width={180} height={66} rx={5}
-                                    fill="rgba(2, 6, 23, 0.96)" stroke="#f59e0b" strokeWidth={1.2}
-                                    filter="drop-shadow(0px 4px 10px rgba(0,0,0,0.9))"
-                                  />
-                                  <text x={6} y={12} fill="#fcd34d" fontSize={7.5} fontFamily="monospace" fontWeight="bold">
-                                    Surf: [{pt.surface_point_base_mm?.[0]?.toFixed(1)}, {pt.surface_point_base_mm?.[1]?.toFixed(1)}, {pt.surface_point_base_mm?.[2]?.toFixed(1)}] mm
-                                  </text>
-                                  <text x={6} y={23} fill="#fbbf24" fontSize={7.5} fontFamily="monospace" fontWeight="bold">
-                                    TCP: [{pt.tcp_pose_base.x}, {pt.tcp_pose_base.y}, {pt.tcp_pose_base.z}] mm
-                                  </text>
-                                  <text x={6} y={34} fill="#cbd5e1" fontSize={7} fontFamily="monospace">
-                                    Ori: [{pt.tcp_pose_base.rx}°, {pt.tcp_pose_base.ry}°, {pt.tcp_pose_base.rz}°]
-                                  </text>
-                                  <text x={6} y={45} fill="#f87171" fontSize={7} fontFamily="monospace">
-                                    N: [{pt.surface_normal_base?.[0]?.toFixed(3)}, {pt.surface_normal_base?.[1]?.toFixed(3)}, {pt.surface_normal_base?.[2]?.toFixed(3)}]
-                                  </text>
-                                  <text x={6} y={56} fill="#94a3b8" fontSize={7} fontFamily="monospace">
-                                    Standoff: {pt.standoff_distance_mm}mm  ·  P{idx + 1}
-                                  </text>
-                                </g>
-                              )}
                             </g>
                           );
                         })}
                       </g>
                     );
                   })}
+
+                  {/* Topmost Tooltip Layer in VIEW mode — rendered at the very end of SVG so it is ALWAYS on top */}
+                  {!manualPathMode && hoveredWaypoint && (
+                    (() => {
+                      const pt = hoveredWaypoint;
+                      const [u, v] = pt.pixel;
+                      const dx = pt.normal_2d_proj?.[0] || 15;
+                      const dy = pt.normal_2d_proj?.[1] || -40;
+                      const tcpU = u + dx;
+                      const tcpV = v + dy;
+                      const tooltipX = Math.max(8, Math.min(tcpU + 8, (natSize?.w || 1280) - 190));
+                      const tooltipY = Math.max(8, Math.min(tcpV - 72, (natSize?.h || 800) - 76));
+
+                      return (
+                        <g transform={`translate(${tooltipX}, ${tooltipY})`} pointerEvents="none">
+                          <rect
+                            x={0}
+                            y={0}
+                            width={182}
+                            height={68}
+                            rx={6}
+                            fill="rgba(2, 6, 23, 0.97)"
+                            stroke="#f59e0b"
+                            strokeWidth={1.5}
+                            filter="drop-shadow(0px 8px 18px rgba(0,0,0,0.95))"
+                          />
+                          <text x={7} y={13} fill="#fcd34d" fontSize={7.8} fontFamily="monospace" fontWeight="bold">
+                            Surf: [{pt.surface_point_base_mm?.[0]?.toFixed(1)}, {pt.surface_point_base_mm?.[1]?.toFixed(1)}, {pt.surface_point_base_mm?.[2]?.toFixed(1)}] mm
+                          </text>
+                          <text x={7} y={25} fill="#fbbf24" fontSize={7.8} fontFamily="monospace" fontWeight="bold">
+                            TCP: [{pt.tcp_pose_base.x}, {pt.tcp_pose_base.y}, {pt.tcp_pose_base.z}] mm
+                          </text>
+                          <text x={7} y={37} fill="#cbd5e1" fontSize={7.2} fontFamily="monospace">
+                            Ori: [{pt.tcp_pose_base.rx}°, {pt.tcp_pose_base.ry}°, {pt.tcp_pose_base.rz}°]
+                          </text>
+                          <text x={7} y={49} fill="#f87171" fontSize={7.2} fontFamily="monospace">
+                            N: [{pt.surface_normal_base?.[0]?.toFixed(3)}, {pt.surface_normal_base?.[1]?.toFixed(3)}, {pt.surface_normal_base?.[2]?.toFixed(3)}]
+                          </text>
+                          <text x={7} y={61} fill="#94a3b8" fontSize={7.2} fontFamily="monospace">
+                            Standoff: {pt.standoff_distance_mm}mm · Point #{pt.index}
+                          </text>
+                        </g>
+                      );
+                    })()
+                  )}
                 </svg>
               )}
 
@@ -1472,41 +1491,54 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                             P{idx + 1}
                           </text>
                         </g>
-
-                        {/* Interactive Floating Tooltip on Hover — shows surf, TCP, rotation, normal, standoff */}
-                        {isHovered && (
-                          <g transform={`translate(${Math.min(tcpU + 8, (natSize?.w || 1280) - 180)}, ${Math.max(tcpV - 70, 4)})`} pointerEvents="none">
-                            <rect
-                              x={0}
-                              y={0}
-                              width={175}
-                              height={66}
-                              rx={5}
-                              fill="rgba(2, 6, 23, 0.96)"
-                              stroke="#f59e0b"
-                              strokeWidth={1.2}
-                              filter="drop-shadow(0px 4px 10px rgba(0,0,0,0.9))"
-                            />
-                            <text x={6} y={11} fill="#fcd34d" fontSize={7.5} fontFamily="monospace" fontWeight="bold">
-                              Surf: [{pt.surface_point_base_mm?.[0]?.toFixed(1)}, {pt.surface_point_base_mm?.[1]?.toFixed(1)}, {pt.surface_point_base_mm?.[2]?.toFixed(1)}] mm
-                            </text>
-                            <text x={6} y={22} fill="#fbbf24" fontSize={7.5} fontFamily="monospace" fontWeight="bold">
-                              TCP: [{pt.tcp_pose_base.x}, {pt.tcp_pose_base.y}, {pt.tcp_pose_base.z}] mm
-                            </text>
-                            <text x={6} y={33} fill="#cbd5e1" fontSize={7} fontFamily="monospace">
-                              Ori: [{pt.tcp_pose_base.rx}°, {pt.tcp_pose_base.ry}°, {pt.tcp_pose_base.rz}°]
-                            </text>
-                            <text x={6} y={44} fill="#f87171" fontSize={7} fontFamily="monospace">
-                              N: [{pt.surface_normal_base?.[0]?.toFixed(3)}, {pt.surface_normal_base?.[1]?.toFixed(3)}, {pt.surface_normal_base?.[2]?.toFixed(3)}]
-                            </text>
-                            <text x={6} y={55} fill="#94a3b8" fontSize={7} fontFamily="monospace">
-                              Standoff: {pt.standoff_distance_mm}mm
-                            </text>
-                          </g>
-                        )}
                       </g>
                     );
                   })}
+
+                  {/* Topmost Tooltip Layer in EDIT mode — rendered at the very end of SVG */}
+                  {manualPathMode && hoveredWaypoint && (
+                    (() => {
+                      const pt = hoveredWaypoint;
+                      const [u, v] = pt.pixel;
+                      const dx = pt.normal_2d_proj?.[0] || 15;
+                      const dy = pt.normal_2d_proj?.[1] || -40;
+                      const tcpU = u + dx;
+                      const tcpV = v + dy;
+                      const tooltipX = Math.max(8, Math.min(tcpU + 8, (natSize?.w || 1280) - 190));
+                      const tooltipY = Math.max(8, Math.min(tcpV - 72, (natSize?.h || 800) - 76));
+
+                      return (
+                        <g transform={`translate(${tooltipX}, ${tooltipY})`} pointerEvents="none">
+                          <rect
+                            x={0}
+                            y={0}
+                            width={182}
+                            height={68}
+                            rx={6}
+                            fill="rgba(2, 6, 23, 0.97)"
+                            stroke="#f59e0b"
+                            strokeWidth={1.5}
+                            filter="drop-shadow(0px 8px 18px rgba(0,0,0,0.95))"
+                          />
+                          <text x={7} y={13} fill="#fcd34d" fontSize={7.8} fontFamily="monospace" fontWeight="bold">
+                            Surf: [{pt.surface_point_base_mm?.[0]?.toFixed(1)}, {pt.surface_point_base_mm?.[1]?.toFixed(1)}, {pt.surface_point_base_mm?.[2]?.toFixed(1)}] mm
+                          </text>
+                          <text x={7} y={25} fill="#fbbf24" fontSize={7.8} fontFamily="monospace" fontWeight="bold">
+                            TCP: [{pt.tcp_pose_base.x}, {pt.tcp_pose_base.y}, {pt.tcp_pose_base.z}] mm
+                          </text>
+                          <text x={7} y={37} fill="#cbd5e1" fontSize={7.2} fontFamily="monospace">
+                            Ori: [{pt.tcp_pose_base.rx}°, {pt.tcp_pose_base.ry}°, {pt.tcp_pose_base.rz}°]
+                          </text>
+                          <text x={7} y={49} fill="#f87171" fontSize={7.2} fontFamily="monospace">
+                            N: [{pt.surface_normal_base?.[0]?.toFixed(3)}, {pt.surface_normal_base?.[1]?.toFixed(3)}, {pt.surface_normal_base?.[2]?.toFixed(3)}]
+                          </text>
+                          <text x={7} y={61} fill="#94a3b8" fontSize={7.2} fontFamily="monospace">
+                            Standoff: {pt.standoff_distance_mm}mm · Point #{pt.index}
+                          </text>
+                        </g>
+                      );
+                    })()
+                  )}
                 </svg>
               )}
             </div>
