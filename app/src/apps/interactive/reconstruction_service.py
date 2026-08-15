@@ -57,7 +57,7 @@ class InteractiveReconstructionService:
                                 
                             err = data.get("metadata", {}).get("reprojection_error_mm", 0.0)
                             desc = f"{sess} (Reprojection Error: {err:.3f} mm)"
-                            logger.info(f"Loaded latest calibration from: {res_path} ({desc})")
+                            logger.debug(f"Loaded latest calibration from: {res_path} ({desc})")
                             return T, intr_k, desc
                     except Exception as e:
                         logger.warning(f"Error reading calibration file {res_path}: {e}")
@@ -68,7 +68,7 @@ class InteractiveReconstructionService:
             if cfg.T_camera_to_base is not None:
                 T = np.array(cfg.T_camera_to_base, dtype=np.float64)
                 desc = f"Global config ({cfg.calib_path})"
-                logger.info(f"Loaded calibration from global config: {desc}")
+                logger.debug(f"Loaded calibration from global config: {desc}")
                 return T, None, desc
         except Exception as e:
             logger.warning(f"Error reading global SprayerConfig calibration: {e}")
@@ -84,8 +84,15 @@ class InteractiveReconstructionService:
         if not os.path.exists(masks_yaml_path):
             raise FileNotFoundError(f"Masks file not found: {masks_yaml_path}")
 
+        class SafeLoaderWithTuples(yaml.SafeLoader):
+            pass
+        def tuple_constructor(loader, node):
+            return list(loader.construct_sequence(node))
+        SafeLoaderWithTuples.add_constructor('tag:yaml.org,2002:python/tuple', tuple_constructor)
+        SafeLoaderWithTuples.add_constructor('!tuple', tuple_constructor)
+
         with open(masks_yaml_path, 'r', encoding='utf-8') as f:
-            data = yaml.safe_load(f) or {}
+            data = yaml.load(f, Loader=SafeLoaderWithTuples) or {}
 
         mask_items = data.get("masks", [])
         if not mask_items:

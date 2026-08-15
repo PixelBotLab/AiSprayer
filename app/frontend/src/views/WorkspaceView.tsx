@@ -25,6 +25,7 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({
   const [robotState, setRobotState] = useState<RobotState>({ pose: [0,0,0,0,0,0], joint: [0,0,0,0,0,0] });
   const [activeTemplate, setActiveTemplate] = useState<string | null>(null);
   const [meshVersion, setMeshVersion] = useState<number>(Date.now());
+  const [pathsVersion, setPathsVersion] = useState<number>(Date.now());
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
@@ -54,6 +55,7 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({
             externalActiveTemplate={activeTemplate}
             onTemplateChange={(tpl) => setActiveTemplate(tpl)}
             onMeshUpdated={() => setMeshVersion(Date.now())}
+            onPathsUpdated={() => setPathsVersion(Date.now())}
           />
         );
       case 'auto_planner':
@@ -86,7 +88,7 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({
         </div>
       </div>
 
-      {/* Right Column (40% width) - Robot Zone Full Height with Reconstructed 3D Mesh */}
+      {/* Right Column (40% width) - Robot Zone Full Height with Reconstructed 3D Mesh & 3D TCP Paths */}
       <div className="flex-[2] flex flex-col gap-6 min-w-0 h-full">
         {/* Full Right: Robot Zone */}
         <div className="flex-1 min-h-0">
@@ -94,6 +96,7 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({
             robotState={robotState} 
             activeTemplate={activeTemplate}
             meshVersion={meshVersion}
+            pathsVersion={pathsVersion}
           />
         </div>
       </div>

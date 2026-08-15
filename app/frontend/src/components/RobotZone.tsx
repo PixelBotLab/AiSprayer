@@ -12,17 +12,19 @@ interface RobotZoneProps {
   robotState: RobotState;
   activeTemplate?: string | null;
   meshVersion?: number;
+  pathsVersion?: number;
 }
 
-const RobotZone: React.FC<RobotZoneProps> = ({ robotState, activeTemplate = null, meshVersion = 0 }) => {
+const RobotZone: React.FC<RobotZoneProps> = ({ robotState, activeTemplate = null, meshVersion = 0, pathsVersion = 0 }) => {
   return (
     <div className="w-full h-full flex flex-col gap-4">
-      {/* Robot 3D Viewer with Surface Mesh Overlay */}
+      {/* Robot 3D Viewer with Surface Mesh Overlay & 3D TCP Trajectories */}
       <div className="flex-1 min-h-0 bg-slate-900/80 rounded-xl border border-slate-800 shadow-lg flex flex-col shrink-0 p-1 relative">
         <Robot3DViewer 
           jointAngles={robotState.joint} 
           activeTemplate={activeTemplate}
           meshVersion={meshVersion}
+          pathsVersion={pathsVersion}
         />
       </div>
 

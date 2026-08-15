@@ -12,6 +12,7 @@ cd "$APP_DIR" || exit 1
 
 LOG_DIR="$APP_DIR/logs"
 DATA_DIR="$APP_DIR/data"
+ROOT_DATA_DIR="$PROJECT_ROOT/data"
 BACKEND_LOG="$LOG_DIR/backend.log"
 FRONTEND_LOG="$LOG_DIR/frontend.log"
 
@@ -29,7 +30,13 @@ fi
 echo "=========================================="
 
 # Create directories if they don't exist
-mkdir -p "$LOG_DIR" "$DATA_DIR"
+mkdir -p "$LOG_DIR" "$DATA_DIR" "$ROOT_DATA_DIR"
+
+# Restore permissions at startup as well
+if [ -n "$SUDO_USER" ]; then
+    chown -R "$TARGET_USER:$TARGET_GROUP" "$ROOT_DATA_DIR" "$DATA_DIR" "$LOG_DIR" 2>/dev/null || true
+    chmod -R u+rwX,g+rwX,a+rwX "$ROOT_DATA_DIR" "$DATA_DIR" "$LOG_DIR" 2>/dev/null || true
+fi
 
 echo "[0/2] Cleaning up any existing AiSprayer processes..."
 pkill -f "python3 main.py" 2>/dev/null
@@ -88,10 +95,9 @@ cleanup() {
     lsof -t -i :5173 | xargs -r kill -9 2>/dev/null
     
     # Restoring file ownership to target user so root files are never left behind
-    if [ -d "$DATA_DIR" ] || [ -d "$LOG_DIR" ]; then
-        echo "🛡️ Restoring file permissions in data/ and logs/ to user '$TARGET_USER'..."
-        chown -R "$TARGET_USER:$TARGET_GROUP" "$DATA_DIR" "$LOG_DIR" 2>/dev/null || true
-    fi
+    echo "🛡️ Restoring file permissions in data/ and logs/ to user '$TARGET_USER'..."
+    chown -R "$TARGET_USER:$TARGET_GROUP" "$ROOT_DATA_DIR" "$DATA_DIR" "$LOG_DIR" 2>/dev/null || true
+    chmod -R u+rwX,g+rwX,a+rwX "$ROOT_DATA_DIR" "$DATA_DIR" "$LOG_DIR" 2>/dev/null || true
 
     # Double check and verify ports are free
     if lsof -t -i :8000 >/dev/null || lsof -t -i :5173 >/dev/null; then

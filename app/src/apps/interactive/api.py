@@ -12,6 +12,7 @@ from services.camera_service import camera_service
 from core.vision.point_cloud_processor import depth_to_pcd
 from apps.interactive.sam_service import sam_service
 from apps.interactive.reconstruction_service import reconstruction_service
+from apps.interactive.path_service import manual_path_service
 
 router = APIRouter(prefix="/api/interactive", tags=["Interactive"])
 logger = logging.getLogger(__name__)
@@ -186,8 +187,11 @@ def save_sam(name: str, req: SaveMasksRequest):
         if not success:
             raise HTTPException(status_code=500, detail="Failed to save masks")
         return {"message": "Masks saved successfully"}
+    except PermissionError as e:
+        logger.warning(f"Save masks permission error for template '{name}': {e}")
+        raise HTTPException(status_code=403, detail=f"Permission denied: {str(e)}")
     except Exception as e:
-        logger.error(f"Save masks failed for template '{name}': {e}", exc_info=True)
+        logger.warning(f"Save masks failed for template '{name}': {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/templates/{name}/reconstruct")
@@ -200,12 +204,122 @@ def reconstruct_surface(name: str):
         result = reconstruction_service.reconstruct_surface(template_path, name)
         return result
     except FileNotFoundError as e:
-        logger.error(f"Reconstruction file missing for '{name}': {e}")
+        logger.warning(f"Reconstruction file missing for '{name}': {e}")
         raise HTTPException(status_code=400, detail=str(e))
     except ValueError as e:
-        logger.error(f"Reconstruction validation error for '{name}': {e}")
+        logger.warning(f"Reconstruction validation error for '{name}': {e}")
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Reconstruction failed for template '{name}': {e}", exc_info=True)
+        logger.warning(f"Reconstruction failed for template '{name}': {e}")
         raise HTTPException(status_code=500, detail=f"Reconstruction error: {str(e)}")
+
+
+class SamplePointRequest(BaseModel):
+    u: int
+    v: int
+    standoff_dist_mm: float = 150.0
+
+@router.post("/templates/{name}/sample_point")
+def sample_point(name: str, req: SamplePointRequest):
+    template_path = os.path.join(TEMPLATE_GROUP_DIR, name)
+    if not os.path.exists(template_path):
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    try:
+        result = manual_path_service.sample_point_pose(name, req.u, req.v, req.standoff_dist_mm)
+        return result
+    except Exception as e:
+        logger.warning(f"Sample point calculation failed for '{name}' at ({req.u},{req.v}): {e}")
+        raise HTTPException(status_code=500, detail=f"Point sampling failed: {str(e)}")
+
+@router.get("/templates/{name}/manual_paths")
+def get_manual_paths(name: str):
+    try:
+        return manual_path_service.load_manual_paths(name)
+    except Exception as e:
+        logger.warning(f"Get manual paths failed for template '{name}': {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to load manual paths: {str(e)}")
+
+class SaveManualPathsRequest(BaseModel):
+    paths: list
+    standoff_distance_mm: float = 150.0
+
+@router.post("/templates/{name}/manual_paths")
+def save_manual_paths(name: str, req: SaveManualPathsRequest):
+    try:
+        data = {
+            "paths": req.paths,
+            "standoff_distance_mm": req.standoff_distance_mm
+        }
+        manual_path_service.save_manual_paths(name, data)
+        return {"message": "Manual paths saved successfully"}
+    except PermissionError as e:
+        logger.warning(f"Save manual paths permission error for '{name}': {e}")
+        raise HTTPException(status_code=403, detail=f"Permission denied: {str(e)}")
+    except Exception as e:
+        logger.warning(f"Save manual paths error for '{name}': {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to save manual paths: {str(e)}")
+
+
+@router.get("/templates/{name}/session_data")
+def get_session_data(name: str):
+    """
+    One-shot endpoint: returns all data needed for fully client-side normal computation.
+    - depth_flat: base64-encoded float32 array (row-major, h*w values in mm)
+    - width, height: depth image dimensions
+    - intrinsics: {fx, fy, cx, cy}
+    - T_base_camera: 4x4 row-major float list (translation in mm)
+    - calib_source: description string
+    """
+    import base64
+    from apps.interactive.reconstruction_service import reconstruction_service
+
+    template_path = os.path.join(TEMPLATE_GROUP_DIR, name)
+    if not os.path.exists(template_path):
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    # Load depth
+    depth_npy = os.path.join(template_path, "scan.depth.npy")
+    depth_png = os.path.join(template_path, "scan.depth.png")
+    if os.path.exists(depth_npy):
+        depth_map = np.load(depth_npy).astype(np.float32)
+    elif os.path.exists(depth_png):
+        depth_map = cv2.imread(depth_png, cv2.IMREAD_UNCHANGED).astype(np.float32)
+    else:
+        raise HTTPException(status_code=400, detail="Depth map not found for this template")
+
+    if depth_map is None:
+        raise HTTPException(status_code=400, detail="Failed to load depth map")
+
+    h, w = depth_map.shape[:2]
+
+    # Load calibration
+    try:
+        T_cam_to_base_m, k_matrix, calib_desc = reconstruction_service.get_latest_calibration()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to load calibration: {str(e)}")
+
+    # Intrinsics
+    if k_matrix is not None:
+        fx, fy = float(k_matrix[0, 0]), float(k_matrix[1, 1])
+        cx, cy = float(k_matrix[0, 2]), float(k_matrix[1, 2])
+    else:
+        fx, fy, cx, cy = 900.0, 900.0, 640.0, 400.0
+
+    # Convert transform: translate meters -> mm
+    T_base_camera = T_cam_to_base_m.copy()
+    T_base_camera[0:3, 3] *= 1000.0
+
+    # Encode depth map as base64 float32
+    depth_bytes = depth_map.flatten().astype(np.float32).tobytes()
+    depth_b64 = base64.b64encode(depth_bytes).decode('ascii')
+
+    return {
+        "width": w,
+        "height": h,
+        "depth_flat_b64": depth_b64,
+        "intrinsics": {"fx": fx, "fy": fy, "cx": cx, "cy": cy},
+        "T_base_camera": T_base_camera.flatten().tolist(),
+        "calib_source": calib_desc
+    }
 

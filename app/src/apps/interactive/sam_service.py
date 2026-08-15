@@ -122,14 +122,29 @@ class SAMService:
         ]
         
         for idx, mask_data in enumerate(committed_masks):
-            # Convert to plain lists of ints to avoid PyYAML !!python/tuple tags
-            pts = [[int(p[0]), int(p[1])] for p in mask_data.get("points", [])]
-            pts_tuples = [(p[0], p[1]) for p in pts]
-            lbls = [int(l) for l in mask_data.get("labels", [])]
+            # Parse points robustly: handles [x, y], {"x": ..., "y": ...}, etc.
+            raw_pts = mask_data.get("points", [])
+            pts = []
+            for p in raw_pts:
+                if isinstance(p, (list, tuple)) and len(p) >= 2 and p[0] is not None and p[1] is not None:
+                    pts.append([int(p[0]), int(p[1])])
+                elif isinstance(p, dict) and "x" in p and "y" in p and p["x"] is not None and p["y"] is not None:
+                    pts.append([int(p["x"]), int(p["y"])])
+            
+            raw_lbls = mask_data.get("labels", [])
+            lbls = []
+            for l in raw_lbls:
+                if l is not None:
+                    lbls.append(int(l))
+            
+            # If labels length doesn't match pts length, default to 1 (foreground)
+            if len(lbls) < len(pts):
+                lbls.extend([1] * (len(pts) - len(lbls)))
             
             if not pts:
                 continue
                 
+            pts_tuples = [(p[0], p[1]) for p in pts]
             mask, score = session.predict(pts_tuples, lbls)
             if mask is not None and mask.any():
                 color = np.array(colors[idx % len(colors)], dtype=np.float32)
