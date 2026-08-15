@@ -89,36 +89,6 @@ interface InteractiveOpProps {
 }
 
 // ─── Math helpers for client-side normal computation ───────────────────────
-function smallestEigenvector3x3(cov: number[][]): [number, number, number] {
-  // Power iteration on (maxEig*I - cov) to find smallest eigenvector of 3x3 symmetric matrix
-  // Find approximate largest eigenvalue via Gershgorin
-  let maxEig = 0;
-  for (let i = 0; i < 3; i++) {
-    let row = Math.abs(cov[i][i]);
-    for (let j = 0; j < 3; j++) if (j !== i) row += Math.abs(cov[i][j]);
-    if (row > maxEig) maxEig = row;
-  }
-  // Shift matrix: A' = maxEig*I - cov
-  const A: number[][] = [
-    [maxEig - cov[0][0], -cov[0][1], -cov[0][2]],
-    [-cov[1][0], maxEig - cov[1][1], -cov[1][2]],
-    [-cov[2][0], -cov[2][1], maxEig - cov[2][2]]
-  ];
-  // Power iteration on A' converges to eigenvector of largest eigenvalue of A' = smallest of cov
-  let v: [number, number, number] = [0.57735, 0.57735, 0.57735];
-  for (let iter = 0; iter < 32; iter++) {
-    const nv: [number, number, number] = [
-      A[0][0]*v[0]+A[0][1]*v[1]+A[0][2]*v[2],
-      A[1][0]*v[0]+A[1][1]*v[1]+A[1][2]*v[2],
-      A[2][0]*v[0]+A[2][1]*v[1]+A[2][2]*v[2]
-    ];
-    const len = Math.sqrt(nv[0]**2+nv[1]**2+nv[2]**2);
-    if (len < 1e-10) break;
-    v = [nv[0]/len, nv[1]/len, nv[2]/len];
-  }
-  return v;
-}
-
 function computeToolEuler(normal_base: [number, number, number]): [number, number, number] {
   // Tool Z points towards surface: -normal_base
   let zx = -normal_base[0], zy = -normal_base[1], zz = -normal_base[2];
@@ -289,7 +259,33 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const sessionRef = useRef<SessionData | null>(null);
   const sessionLoadedForRef = useRef<string | null>(null); // template name
 
-  // ─── Pure JS client-side normal computation (mirrors verify_tab draw_point_normal logic) ───
+  // ─── Pure JS client-side normal computation (100% matches verify_tab.py / geometry_utils.py) ───
+  const getRobustDepth = (depth: Float32Array, width: number, height: number, u: number, v: number, maxR: number = 3): number => {
+    u = Math.round(u); v = Math.round(v);
+    if (u < 0 || u >= width || v < 0 || v >= height) return 0;
+    const z0 = depth[v * width + u];
+    if (z0 > 100 && z0 < 3000) return z0;
+    for (let r = 1; r <= maxR; r++) {
+      const valid: number[] = [];
+      for (let du = -r; du <= r; du++) {
+        for (let dv = -r; dv <= r; dv++) {
+          if (Math.abs(du) === r || Math.abs(dv) === r) {
+            const nu = u + du, nv = v + dv;
+            if (nu >= 0 && nu < width && nv >= 0 && nv < height) {
+              const val = depth[nv * width + nu];
+              if (val > 100 && val < 3000) valid.push(val);
+            }
+          }
+        }
+      }
+      if (valid.length > 0) {
+        valid.sort((a, b) => a - b);
+        return valid[Math.floor(valid.length / 2)];
+      }
+    }
+    return 0;
+  };
+
   const computeNormalClientSide = (u: number, v: number, standoffMm: number): {
     normal_cam: [number, number, number];
     normal_base: [number, number, number];
@@ -306,77 +302,65 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     u = Math.max(0, Math.min(width - 1, Math.round(u)));
     v = Math.max(0, Math.min(height - 1, Math.round(v)));
 
-    // Gather neighborhood depth (21x21 window, outlier-rejected)
-    const WIN = 10;
-    const center_z = depth[v * width + u];
-    const validZ = (center_z > 100 && center_z < 3000) ? center_z : 0;
-    const pts3d: number[][] = [];
-    for (let dv = -WIN; dv <= WIN; dv++) {
-      for (let du = -WIN; du <= WIN; du++) {
-        const pu = u + du, pv = v + dv;
-        if (pu < 0 || pu >= width || pv < 0 || pv >= height) continue;
-        const z = depth[pv * width + pu];
-        if (z < 100 || z > 3000) continue;
-        if (validZ > 0 && Math.abs(z - validZ) > 40) continue;
-        const x = (pu - cx) * z / fx;
-        const y = (pv - cy) * z / fy;
-        pts3d.push([x, y, z]);
-      }
-    }
+    const center_z = getRobustDepth(depth, width, height, u, v, 5);
+    if (center_z <= 0) return null;
 
-    const center_z_use = validZ > 0 ? validZ : (pts3d.length > 0 ? pts3d.reduce((s, p) => s + p[2], 0) / pts3d.length : 800);
     const surf_cam: [number, number, number] = [
-      (u - cx) * center_z_use / fx,
-      (v - cy) * center_z_use / fy,
-      center_z_use
+      (u - cx) * center_z / fx,
+      (v - cy) * center_z / fy,
+      center_z
     ];
 
+    // Cross-neighborhood sampling (step = 5) matching verify_tab compute_local_normal
+    const step = 5;
+    const zL = getRobustDepth(depth, width, height, u - step, v, 3);
+    const zR = getRobustDepth(depth, width, height, u + step, v, 3);
+    const zU = getRobustDepth(depth, width, height, u, v - step, 3);
+    const zD = getRobustDepth(depth, width, height, u, v + step, 3);
+
     let normal_cam: [number, number, number] = [0, 0, -1];
-    if (pts3d.length >= 6) {
-      // Compute centroid
-      const n = pts3d.length;
-      let mx = 0, my = 0, mz = 0;
-      for (const p of pts3d) { mx += p[0]; my += p[1]; mz += p[2]; }
-      mx /= n; my /= n; mz /= n;
-      // 3x3 covariance via outer products
-      let c00=0,c01=0,c02=0,c11=0,c12=0,c22=0;
-      for (const p of pts3d) {
-        const dx=p[0]-mx, dy=p[1]-my, dz=p[2]-mz;
-        c00+=dx*dx; c01+=dx*dy; c02+=dx*dz;
-        c11+=dy*dy; c12+=dy*dz; c22+=dz*dz;
+    if (zL > 0 && zR > 0 && zU > 0 && zD > 0) {
+      const pL = [(u - step - cx) * zL / fx, (v - cy) * zL / fy, zL];
+      const pR = [(u + step - cx) * zR / fx, (v - cy) * zR / fy, zR];
+      const pU = [(u - cx) * zU / fx, (v - step - cy) * zU / fy, zU];
+      const pD = [(u - cx) * zD / fx, (v + step - cy) * zD / fy, zD];
+
+      const v1 = [pR[0] - pL[0], pR[1] - pL[1], pR[2] - pL[2]];
+      const v2 = [pD[0] - pU[0], pD[1] - pU[1], pD[2] - pU[2]];
+
+      // n = v1 x v2
+      let nx = v1[1] * v2[2] - v1[2] * v2[1];
+      let ny = v1[2] * v2[0] - v1[0] * v2[2];
+      let nz = v1[0] * v2[1] - v1[1] * v2[0];
+
+      let len = Math.sqrt(nx * nx + ny * ny + nz * nz);
+      if (len > 1e-6) {
+        nx /= len; ny /= len; nz /= len;
+        // Normal must point towards camera (Z < 0)
+        if (nz > 0) { nx = -nx; ny = -ny; nz = -nz; }
+        normal_cam = [nx, ny, nz];
       }
-      // Power-iteration to find smallest eigenvector (normal)
-      // Use Jacobi-like approach for 3x3 symmetric: simplified — just pick the cross-product of 2 principal axes
-      // For real SVD we approximate: build 2 tangent vectors and cross them
-      // Method: use PCA via iteration
-      const cov = [[c00,c01,c02],[c01,c11,c12],[c02,c12,c22]];
-      const eigvec = smallestEigenvector3x3(cov);
-      let nx = eigvec[0], ny = eigvec[1], nz = eigvec[2];
-      if (nz > 0) { nx=-nx; ny=-ny; nz=-nz; } // point towards camera
-      const len = Math.sqrt(nx*nx+ny*ny+nz*nz);
-      if (len > 1e-6) { nx/=len; ny/=len; nz/=len; }
-      normal_cam = [nx, ny, nz];
     }
 
-    // Transform to base frame using T_base_camera (4x4 row-major)
+    // Transform to base frame using T_base_camera (4x4 row-major, translation in mm)
     const R = [
-      [T[0],T[1],T[2]], [T[4],T[5],T[6]], [T[8],T[9],T[10]]
+      [T[0], T[1], T[2]], [T[4], T[5], T[6]], [T[8], T[9], T[10]]
     ];
     const t = [T[3], T[7], T[11]];
     const applyR = (v3: number[]) => [
-      R[0][0]*v3[0]+R[0][1]*v3[1]+R[0][2]*v3[2],
-      R[1][0]*v3[0]+R[1][1]*v3[1]+R[1][2]*v3[2],
-      R[2][0]*v3[0]+R[2][1]*v3[1]+R[2][2]*v3[2]
+      R[0][0] * v3[0] + R[0][1] * v3[1] + R[0][2] * v3[2],
+      R[1][0] * v3[0] + R[1][1] * v3[1] + R[1][2] * v3[2],
+      R[2][0] * v3[0] + R[2][1] * v3[1] + R[2][2] * v3[2]
     ];
-    const surf_base_arr = applyR(surf_cam).map((v, i) => v + t[i]);
+    const surf_base_arr = applyR(surf_cam).map((val, i) => val + t[i]);
     const surf_base: [number, number, number] = [surf_base_arr[0], surf_base_arr[1], surf_base_arr[2]];
     const nb_arr = applyR(normal_cam);
-    const nb_len = Math.sqrt(nb_arr[0]**2+nb_arr[1]**2+nb_arr[2]**2);
+    const nb_len = Math.sqrt(nb_arr[0] ** 2 + nb_arr[1] ** 2 + nb_arr[2] ** 2);
     const normal_base: [number, number, number] = nb_len > 1e-6
-      ? [nb_arr[0]/nb_len, nb_arr[1]/nb_len, nb_arr[2]/nb_len]
+      ? [nb_arr[0] / nb_len, nb_arr[1] / nb_len, nb_arr[2] / nb_len]
       : [0, 0, 1];
 
-    // TCP = surf + standoff * normal
+    // TCP in base frame (mm): P_tcp = P_surf + standoff * N_base
     const tcp_base: [number, number, number] = [
       surf_base[0] + standoffMm * normal_base[0],
       surf_base[1] + standoffMm * normal_base[1],
@@ -386,23 +370,20 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     // Euler angles
     const euler_deg = computeToolEuler(normal_base);
 
-    // 2D projection: verify_tab method — project tcp_cam point back to image
-    const tcp_cam = [
-      surf_cam[0] + standoffMm * normal_cam[0],
-      surf_cam[1] + standoffMm * normal_cam[1],
-      surf_cam[2] + standoffMm * normal_cam[2]
+    // True Perspective 2D Projection (matches verify_tab draw_point_normal without forced fixed length):
+    // p_cam_normal_tip = p_cam_origin + n_cam * standoffMm
+    const p_cam_normal_tip = [
+      surf_cam[0] + normal_cam[0] * standoffMm,
+      surf_cam[1] + normal_cam[1] * standoffMm,
+      surf_cam[2] + normal_cam[2] * standoffMm
     ];
-    let proj_dx = 0, proj_dy = -36;
-    if (tcp_cam[2] > 50) {
-      const u_tcp = fx * tcp_cam[0] / tcp_cam[2] + cx;
-      const v_tcp = fy * tcp_cam[1] / tcp_cam[2] + cy;
-      const raw_dx = u_tcp - u;
-      const raw_dy = v_tcp - v;
-      const mag = Math.sqrt(raw_dx**2 + raw_dy**2);
-      if (mag > 1.2) {
-        proj_dx = (raw_dx / mag) * 36;
-        proj_dy = (raw_dy / mag) * 36;
-      }
+
+    let proj_dx = 0, proj_dy = 0;
+    if (p_cam_normal_tip[2] > 50) {
+      const u_tip = fx * p_cam_normal_tip[0] / p_cam_normal_tip[2] + cx;
+      const v_tip = fy * p_cam_normal_tip[1] / p_cam_normal_tip[2] + cy;
+      proj_dx = u_tip - u;
+      proj_dy = v_tip - v;
     }
 
     return { normal_cam, normal_base, surf_cam, surf_base, tcp_base, euler_deg, proj_dx, proj_dy };
@@ -892,6 +873,15 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     loadSessionData(activeTemplate);
   };
 
+  const handleManualMouseMove = (e: MouseEvent<SVGSVGElement>) => {
+    if (!natSize || isPanning) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const u = Math.round(((e.clientX - rect.left) / rect.width) * natSize.w);
+    const v = Math.round(((e.clientY - rect.top) / rect.height) * natSize.h);
+    setMousePixel({ u, v });
+    fetchLiveNormal(u, v);
+  };
+
   const handleManualImageClick = (e: MouseEvent<SVGSVGElement>) => {
     if (!manualPathMode || !natSize || isPanning || isSamplingPoint || !activeTemplate) return;
     e.preventDefault();
@@ -1208,10 +1198,11 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                         {/* Each Waypoint in Path */}
                         {pts.map((pt, idx) => {
                           const [u, v] = pt.pixel;
-                          const dx = pt.normal_2d_proj?.[0] || 15;
-                          const dy = pt.normal_2d_proj?.[1] || -40;
+                          const dx = pt.normal_2d_proj?.[0] ?? 0;
+                          const dy = pt.normal_2d_proj?.[1] ?? 0;
                           const tcpU = u + dx;
                           const tcpV = v + dy;
+                          const arrowLen = Math.hypot(dx, dy);
 
                           return (
                             <g key={idx}
@@ -1219,13 +1210,17 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                               onMouseLeave={() => setHoveredWaypoint(null)}
                               style={{ cursor: 'pointer' }}
                             >
-                              {/* Red Normal Offset Arrow */}
-                              <line
-                                x1={u} y1={v} x2={tcpU} y2={tcpV}
-                                stroke="#ef4444" strokeWidth={2.2} strokeLinecap="round"
-                                markerEnd="url(#view-normal-arrow)"
-                                style={{ pointerEvents: 'none' }}
-                              />
+                              {/* Red Normal Offset Arrow (Perspective Foreshortened) */}
+                              {arrowLen >= 3.0 ? (
+                                <line
+                                  x1={u} y1={v} x2={tcpU} y2={tcpV}
+                                  stroke="#ef4444" strokeWidth={2.2} strokeLinecap="round"
+                                  markerEnd="url(#view-normal-arrow)"
+                                  style={{ pointerEvents: 'none' }}
+                                />
+                              ) : (
+                                <circle cx={u} cy={v} r={3.5} fill="#ef4444" opacity={0.85} style={{ pointerEvents: 'none' }} />
+                              )}
 
                               {/* Physical Surface Point Marker — large hit area */}
                               <circle cx={u} cy={v} r={14} fill="transparent" />
@@ -1246,8 +1241,8 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                     (() => {
                       const pt = hoveredWaypoint;
                       const [u, v] = pt.pixel;
-                      const dx = pt.normal_2d_proj?.[0] || 15;
-                      const dy = pt.normal_2d_proj?.[1] || -40;
+                      const dx = pt.normal_2d_proj?.[0] ?? 0;
+                      const dy = pt.normal_2d_proj?.[1] ?? 0;
                       const tcpU = u + dx;
                       const tcpV = v + dy;
                       const tooltipX = Math.max(8, Math.min(tcpU + 8, (natSize?.w || 1280) - 190));
@@ -1332,25 +1327,19 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                   className="absolute inset-0 w-full h-full cursor-crosshair"
                   viewBox={`0 0 ${natSize.w} ${natSize.h}`}
                   onClick={handleManualImageClick}
-                  onMouseMove={(e) => {
-                    if (!natSize || isPanning) return;
-                    const rect = e.currentTarget.getBoundingClientRect();
-                    const u = Math.round(((e.clientX - rect.left) / rect.width) * natSize.w);
-                    const v = Math.round(((e.clientY - rect.top) / rect.height) * natSize.h);
-                    setMousePixel({ u, v });
-                    fetchLiveNormal(u, v);
-                  }}
+                  onMouseMove={handleManualMouseMove}
                   onMouseLeave={() => {
                     setMousePixel(null);
+                    setLiveNormal(null);
                     setHoveredWaypoint(null);
                   }}
                 >
                   <defs>
-                    <marker id="edit-traj-arrow" markerWidth="5.5" markerHeight="5.5" refX="4.2" refY="2.75" orient="auto">
-                      <path d="M0,0.6 L0,4.9 L4.9,2.75 z" fill="#f59e0b" />
-                    </marker>
                     <marker id="normal-arrow" markerWidth="4" markerHeight="4" refX="3.2" refY="2" orient="auto">
                       <path d="M0,0.6 L0,3.4 L3.4,2 z" fill="#ef4444" />
+                    </marker>
+                    <marker id="edit-traj-arrow" markerWidth="5.5" markerHeight="5.5" refX="4.2" refY="2.75" orient="auto">
+                      <path d="M0,0.6 L0,4.9 L4.9,2.75 z" fill="#f59e0b" />
                     </marker>
                   </defs>
 
@@ -1425,16 +1414,25 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                   {/* 2.8 Real-time Live Normal Vector Arrow at Cursor */}
                   {mousePixel && (
                     <g pointerEvents="none">
-                      <line
-                        x1={mousePixel.u}
-                        y1={mousePixel.v}
-                        x2={mousePixel.u + (liveNormal?.dx || 15)}
-                        y2={mousePixel.v + (liveNormal?.dy || -40)}
-                        stroke="#ef4444"
-                        strokeWidth={2}
-                        strokeLinecap="round"
-                        markerEnd="url(#normal-arrow)"
-                      />
+                      {(() => {
+                        const ldx = liveNormal?.dx ?? 0;
+                        const ldy = liveNormal?.dy ?? 0;
+                        const lLen = Math.hypot(ldx, ldy);
+                        return lLen >= 3.0 ? (
+                          <line
+                            x1={mousePixel.u}
+                            y1={mousePixel.v}
+                            x2={mousePixel.u + ldx}
+                            y2={mousePixel.v + ldy}
+                            stroke="#ef4444"
+                            strokeWidth={2}
+                            strokeLinecap="round"
+                            markerEnd="url(#normal-arrow)"
+                          />
+                        ) : (
+                          <circle cx={mousePixel.u} cy={mousePixel.v} r={3.5} fill="#ef4444" opacity={0.8} />
+                        );
+                      })()}
                       {/* Aiming Cursor Target */}
                       <circle cx={mousePixel.u} cy={mousePixel.v} r={4.5} fill="#f59e0b" />
                       <circle cx={mousePixel.u} cy={mousePixel.v} r={8.5} fill="none" stroke="#f59e0b" strokeWidth={1.5} opacity={0.7} />
@@ -1444,11 +1442,12 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                   {/* 3. Render Active Current Waypoints & Red Normal Vectors */}
                   {currentManualPoints.map((pt, idx) => {
                     const [u, v] = pt.pixel;
-                    const dx = pt.normal_2d_proj?.[0] || 15;
-                    const dy = pt.normal_2d_proj?.[1] || -40;
+                    const dx = pt.normal_2d_proj?.[0] ?? 0;
+                    const dy = pt.normal_2d_proj?.[1] ?? 0;
                     const tcpU = u + dx;
                     const tcpV = v + dy;
                     const isHovered = hoveredWaypoint?.index === pt.index;
+                    const arrowLen = Math.hypot(dx, dy);
 
                     return (
                       <g 
@@ -1457,16 +1456,20 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                         onMouseLeave={() => setHoveredWaypoint(null)}
                       >
                         {/* Red Surface Normal Arrow pointing from surface to TCP (Sleek) */}
-                        <line
-                          x1={u}
-                          y1={v}
-                          x2={tcpU}
-                          y2={tcpV}
-                          stroke="#ef4444"
-                          strokeWidth={2.2}
-                          strokeLinecap="round"
-                          markerEnd="url(#normal-arrow)"
-                        />
+                        {arrowLen >= 3.0 ? (
+                          <line
+                            x1={u}
+                            y1={v}
+                            x2={tcpU}
+                            y2={tcpV}
+                            stroke="#ef4444"
+                            strokeWidth={2.2}
+                            strokeLinecap="round"
+                            markerEnd="url(#normal-arrow)"
+                          />
+                        ) : (
+                          <circle cx={u} cy={v} r={3.5} fill="#ef4444" opacity={0.85} />
+                        )}
 
                         {/* Physical Surface Point Circle (Dark Green) */}
                         <circle cx={u} cy={v} r={8.5} fill="white" filter="drop-shadow(0px 0px 4px rgba(0,0,0,0.9))" />
@@ -1500,8 +1503,8 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                     (() => {
                       const pt = hoveredWaypoint;
                       const [u, v] = pt.pixel;
-                      const dx = pt.normal_2d_proj?.[0] || 15;
-                      const dy = pt.normal_2d_proj?.[1] || -40;
+                      const dx = pt.normal_2d_proj?.[0] ?? 0;
+                      const dy = pt.normal_2d_proj?.[1] ?? 0;
                       const tcpU = u + dx;
                       const tcpV = v + dy;
                       const tooltipX = Math.max(8, Math.min(tcpU + 8, (natSize?.w || 1280) - 190));

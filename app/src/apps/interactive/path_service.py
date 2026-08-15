@@ -90,47 +90,54 @@ class ManualPathService:
         T_base_camera[0:3, 3] *= 1000.0  # Convert meters to mm
         R_base_camera = T_base_camera[0:3, 0:3]
 
-        # 2. Extract local depth around (u, v) with a robust window & outlier rejection
-        win_size = 21
-        half_w = win_size // 2
-        u_min, u_max = max(0, u - half_w), min(w, u + half_w + 1)
-        v_min, v_max = max(0, v - half_w), min(h, v + half_w + 1)
-        
-        roi_depth = depth_map[v_min:v_max, u_min:u_max].astype(np.float32)
-        center_raw_z = float(depth_map[v, u])
-        
-        if 100 < center_raw_z < 3000:
-            valid_mask = (roi_depth > 100) & (roi_depth < 3000) & (np.abs(roi_depth - center_raw_z) < 40.0)
-            center_z = center_raw_z
-        else:
-            valid_mask = (roi_depth > 100) & (roi_depth < 3000)
-            center_z = float(np.median(roi_depth[valid_mask])) if np.any(valid_mask) else 800.0
+        # 2. Extract local normal matching verify_tab.py compute_local_normal (cross-pattern step=5)
+        def get_robust_depth_py(depth, ui, vi, max_r=3):
+            if ui < 0 or ui >= w or vi < 0 or vi >= h:
+                return 0.0
+            z0 = float(depth[vi, ui])
+            if 100 < z0 < 3000:
+                return z0
+            for r in range(1, max_r + 1):
+                valid = []
+                for du in range(-r, r + 1):
+                    for dv in range(-r, r + 1):
+                        if abs(du) == r or abs(dv) == r:
+                            nui, nvi = ui + du, vi + dv
+                            if 0 <= nui < w and 0 <= nvi < h:
+                                val = float(depth[nvi, nui])
+                                if 100 < val < 3000:
+                                    valid.append(val)
+                if valid:
+                    return float(np.median(valid))
+            return 0.0
 
-        if not np.any(valid_mask) or np.count_nonzero(valid_mask) < 6:
-            normal_cam = np.array([0.0, 0.0, -1.0], dtype=np.float32)
-        else:
-            grid_v, grid_u = np.mgrid[v_min:v_max, u_min:u_max]
-            grid_u = grid_u[valid_mask]
-            grid_v = grid_v[valid_mask]
-            grid_z = roi_depth[valid_mask]
+        center_z = get_robust_depth_py(depth_map, u, v, max_r=5)
+        if center_z <= 0:
+            center_z = 800.0
 
-            grid_x = (grid_u - cx) * grid_z / fx
-            grid_y = (grid_v - cy) * grid_z / fy
-            pts_3d = np.column_stack((grid_x, grid_y, grid_z))
+        step = 5
+        zL = get_robust_depth_py(depth_map, u - step, v, max_r=3)
+        zR = get_robust_depth_py(depth_map, u + step, v, max_r=3)
+        zU = get_robust_depth_py(depth_map, u, v - step, max_r=3)
+        zD = get_robust_depth_py(depth_map, u, v + step, max_r=3)
 
-            # Plane fitting via SVD on centered points
-            pts_centered = pts_3d - pts_3d.mean(axis=0)
-            _, _, vh = np.linalg.svd(pts_centered)
-            normal_cam = vh[2, :]  # Last singular vector is surface normal
-            
-            # Normal must point towards camera (N_z < 0)
-            if normal_cam[2] > 0:
-                normal_cam = -normal_cam
-            norm_len = np.linalg.norm(normal_cam)
-            if norm_len > 1e-6:
-                normal_cam /= norm_len
+        if zL > 0 and zR > 0 and zU > 0 and zD > 0:
+            pL = np.array([(u - step - cx) * zL / fx, (v - cy) * zL / fy, zL])
+            pR = np.array([(u + step - cx) * zR / fx, (v - cy) * zR / fy, zR])
+            pU = np.array([(u - cx) * zU / fx, (v - step - cy) * zU / fy, zU])
+            pD = np.array([(u - cx) * zD / fx, (v + step - cy) * zD / fy, zD])
+            v1 = pR - pL
+            v2 = pD - pU
+            normal_cam = np.cross(v1, v2)
+            n_len = np.linalg.norm(normal_cam)
+            if n_len > 1e-6:
+                normal_cam /= n_len
+                if normal_cam[2] > 0:
+                    normal_cam = -normal_cam
             else:
                 normal_cam = np.array([0.0, 0.0, -1.0], dtype=np.float32)
+        else:
+            normal_cam = np.array([0.0, 0.0, -1.0], dtype=np.float32)
 
         # 3. 3D surface point in camera coordinates (mm)
         p_surf_cam = np.array([
@@ -149,11 +156,9 @@ class ManualPathService:
             normal_base = np.array([0.0, 0.0, 1.0], dtype=np.float32)
 
         # 5. Compute Standoff-Offset TCP Target Position (mm)
-        # TCP is positioned at distance d along surface normal: P_tcp = P_surf + d * N_base
         p_tcp_base = p_surf_base + float(standoff_dist_mm) * normal_base
 
         # 6. Compute Tool 6D Orientation Euler Angles (deg)
-        # Spray approach direction is -normal_base (towards surface)
         z_tool = -normal_base / (np.linalg.norm(normal_base) + 1e-6)
         x_ref = np.array([0.0, 0.0, 1.0], dtype=np.float32)
         if abs(np.dot(z_tool, x_ref)) > 0.92:
@@ -167,27 +172,17 @@ class ManualPathService:
         r_mat = np.column_stack((x_tool, y_tool, z_tool))
         euler_deg = R_tool.from_matrix(r_mat).as_euler('xyz', degrees=True)
 
-        # 7. Compute Physically Accurate 2D Normal vector projection on image
+        # 7. Compute Physically Accurate 2D Normal vector projection on image (matches verify_tab.py)
         # In camera frame, TCP point is P_tcp_cam = P_surf_cam + standoff * normal_cam
         p_tcp_cam = p_surf_cam + float(standoff_dist_mm) * normal_cam
         if p_tcp_cam[2] > 50.0:
             proj_u_tcp = (fx * p_tcp_cam[0] / p_tcp_cam[2]) + cx
             proj_v_tcp = (fy * p_tcp_cam[1] / p_tcp_cam[2]) + cy
-            raw_dx = proj_u_tcp - u
-            raw_dy = proj_v_tcp - v
+            proj_dx = float(proj_u_tcp - u)
+            proj_dy = float(proj_v_tcp - v)
         else:
-            raw_dx = normal_cam[0] * 35.0
-            raw_dy = normal_cam[1] * 35.0
-
-        raw_mag = float(np.sqrt(raw_dx**2 + raw_dy**2))
-        arrow_len = 36.0
-        if raw_mag > 1.2:
-            proj_dx = (raw_dx / raw_mag) * arrow_len
-            proj_dy = (raw_dy / raw_mag) * arrow_len
-        else:
-            # Flat facing camera: point cleanly upward along -Y with slight tilt
             proj_dx = 0.0
-            proj_dy = -arrow_len
+            proj_dy = 0.0
 
         return {
             "pixel": [int(u), int(v)],
