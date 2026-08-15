@@ -12,7 +12,9 @@ from services.camera_service import camera_service
 from core.vision.point_cloud_processor import depth_to_pcd
 from apps.interactive.sam_service import sam_service
 from apps.interactive.reconstruction_service import reconstruction_service
-from apps.interactive.path_service import manual_path_service
+from apps.interactive.manual_path_service import manual_path_service
+from apps.interactive.path_verification_service import path_verification_service
+
 
 router = APIRouter(prefix="/api/interactive", tags=["Interactive"])
 logger = logging.getLogger(__name__)
@@ -233,12 +235,13 @@ def sample_point(name: str, req: SamplePointRequest):
         raise HTTPException(status_code=500, detail=f"Point sampling failed: {str(e)}")
 
 @router.get("/templates/{name}/manual_paths")
-def get_manual_paths(name: str):
+def get_manual_paths(name: str, use_opt: bool = False):
     try:
-        return manual_path_service.load_manual_paths(name)
+        return manual_path_service.load_manual_paths(name, use_opt=use_opt)
     except Exception as e:
         logger.warning(f"Get manual paths failed for template '{name}': {e}")
         raise HTTPException(status_code=500, detail=f"Failed to load manual paths: {str(e)}")
+
 
 class SaveManualPathsRequest(BaseModel):
     paths: list
@@ -322,4 +325,67 @@ def get_session_data(name: str):
         "T_base_camera": T_base_camera.flatten().tolist(),
         "calib_source": calib_desc
     }
+
+
+class KinematicsOptions(BaseModel):
+    step_size_mm: float = 1.5
+    linear_velocity_mm_s: float = 120.0
+    tcp_offset_xyz_mm: list[float] | None = None  # e.g. [50.0, 0.0, 0.0]
+    tcp_offset_rpy_deg: list[float] | None = None  # e.g. [0.0, 90.0, 0.0]
+    max_joint_vel_deg_s: list[float] | None = None  # e.g. [150.0, 150.0, 150.0, 180.0, 180.0, 300.0]
+
+
+class VerifyPathRequest(BaseModel):
+    use_opt: bool = False
+    options: KinematicsOptions = KinematicsOptions()
+
+
+class OptimizePathRequest(BaseModel):
+    options: KinematicsOptions = KinematicsOptions()
+
+
+@router.post("/templates/{name}/verify_paths")
+def verify_paths(name: str, req: VerifyPathRequest = VerifyPathRequest()):
+    try:
+        res = path_verification_service.verify_template_paths(
+            name, 
+            use_opt=req.use_opt,
+            options=req.options.model_dump()
+        )
+        return res
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Verification error for '{name}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Verification failed: {str(e)}")
+
+
+@router.post("/templates/{name}/optimize_paths")
+def optimize_paths(name: str, req: OptimizePathRequest = OptimizePathRequest()):
+    try:
+        res = path_verification_service.optimize_template_paths(
+            name,
+            options=req.options.model_dump()
+        )
+        return res
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Optimization error for '{name}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Optimization failed: {str(e)}")
+
+
+@router.get("/templates/{name}/verification_report")
+def get_verification_report(name: str, use_opt: bool = False):
+    """
+    Retrieves saved verification report from disk if exists.
+    """
+    report = path_verification_service.get_saved_report(name, use_opt=use_opt)
+    if report is not None:
+        return report
+    raise HTTPException(status_code=404, detail="No saved verification report found.")
+
+
+
+
 

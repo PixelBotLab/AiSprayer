@@ -14,7 +14,6 @@ const ConsoleLogZone: React.FC = () => {
   const scrollRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<WebSocket | null>(null);
 
-
   useEffect(() => {
     let isMounted = true;
     let ws: WebSocket | null = null;
@@ -28,7 +27,6 @@ const ConsoleLogZone: React.FC = () => {
           const entry: LogEntry = JSON.parse(e.data);
           setLogs(prev => {
             const newLogs = [...prev, entry];
-            // Keep maximum 500 lines to prevent DOM bloat
             if (newLogs.length > 500) return newLogs.slice(newLogs.length - 500);
             return newLogs;
           });
@@ -48,7 +46,7 @@ const ConsoleLogZone: React.FC = () => {
       isMounted = false;
       clearTimeout(reconnectTimeout);
       if (ws) {
-        ws.onclose = null; // Prevent reconnect logic
+        ws.onclose = null;
         ws.close();
       }
     };
@@ -83,8 +81,11 @@ const ConsoleLogZone: React.FC = () => {
       {/* Header */}
       <div className="shrink-0 px-4 py-2 flex items-center justify-between bg-slate-900 border-b border-slate-800">
         <h2 className="font-mono text-xs text-slate-400 flex items-center gap-2 uppercase tracking-widest">
-          <Terminal size={14} className="text-slate-500" />
-          System Console {isMaximized ? '(Fullscreen Mode)' : ''}
+          <Terminal size={14} className="text-cyan-400" />
+          <span>System Console {isMaximized ? '(Fullscreen Mode)' : ''}</span>
+          <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-slate-950/80 text-slate-400 font-mono">
+            {logs.length}
+          </span>
         </h2>
         <div className="flex items-center gap-3">
           <button onClick={clearLogs} className="text-slate-500 hover:text-slate-300 transition-colors p-1 rounded hover:bg-slate-800" title="Clear Console">
@@ -102,7 +103,7 @@ const ConsoleLogZone: React.FC = () => {
             {isMaximized ? (
               <>
                 <Minimize2 size={14} />
-                <span>Exit Fullscreen</span>
+                <span className="hidden sm:inline">Exit Fullscreen</span>
               </>
             ) : (
               <Maximize2 size={14} />
@@ -118,16 +119,23 @@ const ConsoleLogZone: React.FC = () => {
 
       {/* Logs Area */}
       <div ref={scrollRef} className="flex-1 p-4 font-mono text-[11px] text-slate-300 leading-relaxed overflow-y-auto custom-scrollbar flex flex-col gap-1 scroll-smooth">
-        <div className="text-slate-500 mb-2"># AiSprayer Backend Log Stream</div>
+        <div className="text-slate-500 mb-2 flex items-center justify-between">
+          <span># AiSprayer Backend Log Stream</span>
+          <span className="text-[10px] text-slate-600">Auto-scroll active</span>
+        </div>
         
-        {logs.map((log, idx) => (
-          <div key={idx} className="flex gap-3 hover:bg-slate-900/50 px-1 -mx-1 rounded transition-colors break-all">
-            <span className="text-slate-500 shrink-0 select-none">[{log.time}]</span>
-            <span className={`${getLevelColor(log.level)} font-semibold shrink-0 select-none w-16`}>[{log.level}]</span>
-            <span className="text-slate-500 shrink-0 select-none hidden md:inline-block w-32 truncate" title={log.logger}>{log.logger}:</span>
-            <span className="text-slate-200">{log.message}</span>
-          </div>
-        ))}
+        {logs.length === 0 ? (
+          <div className="text-slate-600 italic py-8 text-center">No logs captured yet.</div>
+        ) : (
+          logs.map((log, idx) => (
+            <div key={idx} className="flex gap-3 hover:bg-slate-900/50 px-1 -mx-1 rounded transition-colors break-all">
+              <span className="text-slate-500 shrink-0 select-none">[{log.time}]</span>
+              <span className={`${getLevelColor(log.level)} font-semibold shrink-0 select-none w-16`}>[{log.level}]</span>
+              <span className="text-slate-500 shrink-0 select-none hidden md:inline-block w-32 truncate" title={log.logger}>{log.logger}:</span>
+              <span className="text-slate-200">{log.message}</span>
+            </div>
+          ))
+        )}
         
         {/* Blinking cursor */}
         <div className="mt-2 flex items-center text-slate-500 shrink-0">

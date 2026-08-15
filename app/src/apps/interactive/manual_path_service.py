@@ -15,6 +15,10 @@ from apps.interactive.reconstruction_service import reconstruction_service
 logger = logging.getLogger(__name__)
 
 class ManualPathService:
+    """
+    Dedicated service for interactive manual TCP path generation, 2D image sampling,
+    surface normal extraction, standoff offset calculations, and YAML persistence.
+    """
     def __init__(self):
         self.template_group_dir = os.path.abspath(os.path.join(PROJECT_ROOT, "data", "template_group"))
         self._depth_cache = {}  # { template_name: (mtime, depth_map) }
@@ -203,20 +207,27 @@ class ManualPathService:
             "calib_source": calib_desc
         }
 
-    def load_manual_paths(self, template_name: str) -> dict:
-        """Loads scan.manual_paths.yaml for a given template."""
+    def load_manual_paths(self, template_name: str, use_opt: bool = False) -> dict:
+        """Loads scan.manual_paths.yaml or scan.manual_opt_paths.yaml for a given template."""
         template_dir = os.path.join(self.template_group_dir, template_name)
-        paths_file = os.path.join(template_dir, "scan.manual_paths.yaml")
+        target_file = "scan.manual_opt_paths.yaml" if use_opt else "scan.manual_paths.yaml"
+        paths_file = os.path.join(template_dir, target_file)
+        
         if not os.path.exists(paths_file):
-            return {
-                "template": template_name,
-                "type": "manual",
-                "paths": [],
-                "standoff_distance_mm": 150.0
-            }
+            if use_opt:
+                # Fallback to raw manual paths
+                paths_file = os.path.join(template_dir, "scan.manual_paths.yaml")
+            if not os.path.exists(paths_file):
+                return {
+                    "template": template_name,
+                    "type": "manual",
+                    "paths": [],
+                    "standoff_distance_mm": 150.0
+                }
         try:
             with open(paths_file, 'r', encoding='utf-8') as f:
                 data = yaml.safe_load(f) or {}
+            data["loaded_from"] = os.path.basename(paths_file)
             return data
         except Exception as e:
             logger.error(f"Failed to load manual paths from {paths_file}: {e}")
@@ -226,6 +237,86 @@ class ManualPathService:
                 "paths": [],
                 "standoff_distance_mm": 150.0
             }
+
+    def smooth_path_waypoints(self, points: list[dict]) -> list[dict]:
+        """
+        Smooths surface normal vectors across waypoints to remove depth sensor noise spikes
+        and builds tangent-consistent tool frames to eliminate 180° flip discontinuities.
+        """
+        if len(points) < 2:
+            return points
+
+        n = len(points)
+        normals = np.array([p["surface_normal_base"] for p in points], dtype=np.float64)
+        
+        # 1. 1D Gaussian / Laplacian moving average on normal vectors
+        smoothed_normals = np.zeros_like(normals)
+        for i in range(n):
+            if i == 0:
+                smoothed_normals[i] = 0.7 * normals[0] + 0.3 * normals[min(1, n - 1)]
+            elif i == n - 1:
+                smoothed_normals[i] = 0.7 * normals[-1] + 0.3 * normals[max(0, n - 2)]
+            else:
+                smoothed_normals[i] = 0.25 * normals[i - 1] + 0.5 * normals[i] + 0.25 * normals[i + 1]
+            
+            n_len = np.linalg.norm(smoothed_normals[i])
+            if n_len > 1e-6:
+                smoothed_normals[i] /= n_len
+            else:
+                smoothed_normals[i] = normals[i]
+
+        # 2. Tangent-Consistent Frame Construction (prevents 180° Euler angle flips)
+        new_points = []
+        prev_x_tool = None
+
+        for i, p in enumerate(points):
+            wp = dict(p)
+            norm_base = smoothed_normals[i]
+            wp["surface_normal_base"] = [round(float(x), 4) for x in norm_base]
+
+            # Tool Z points opposite to surface normal into the target
+            z_tool = -norm_base / (np.linalg.norm(norm_base) + 1e-6)
+
+            if prev_x_tool is None:
+                x_ref = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+                if abs(np.dot(z_tool, x_ref)) > 0.92:
+                    x_ref = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+            else:
+                x_ref = prev_x_tool
+
+            y_tool = np.cross(z_tool, x_ref)
+            y_len = np.linalg.norm(y_tool)
+            if y_len > 1e-6:
+                y_tool /= y_len
+            else:
+                y_tool = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+
+            x_tool = np.cross(y_tool, z_tool)
+            x_len = np.linalg.norm(x_tool)
+            if x_len > 1e-6:
+                x_tool /= x_len
+            else:
+                x_tool = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+            prev_x_tool = x_tool
+
+            r_mat = np.column_stack((x_tool, y_tool, z_tool))
+            euler_deg = R_tool.from_matrix(r_mat).as_euler('xyz', degrees=True)
+
+            p_surf_base = np.array(wp["surface_point_base_mm"], dtype=np.float64)
+            standoff = float(wp.get("standoff_distance_mm", 150.0))
+            p_tcp_base = p_surf_base + standoff * norm_base
+
+            wp["tcp_pose_base"] = {
+                "x": round(float(p_tcp_base[0]), 2),
+                "y": round(float(p_tcp_base[1]), 2),
+                "z": round(float(p_tcp_base[2]), 2),
+                "rx": round(float(euler_deg[0]), 2),
+                "ry": round(float(euler_deg[1]), 2),
+                "rz": round(float(euler_deg[2]), 2),
+            }
+            new_points.append(wp)
+
+        return new_points
 
     def save_manual_paths(self, template_name: str, paths_data: dict) -> bool:
         """Saves manual paths to scan.manual_paths.yaml with dense surface tracing."""
@@ -238,6 +329,10 @@ class ManualPathService:
         paths_data["type"] = "manual"
         paths_data["updated_at"] = int(time.time())
         paths_data["coordinate_frame"] = "base_link"
+
+        # Apply normal smoothing and tangent frame consistency to all paths
+        for path in paths_data.get("paths", []):
+            path["points"] = self.smooth_path_waypoints(path.get("points", []))
 
         # Compute dense 3D surface points along each path segment using depth map
         try:
@@ -291,6 +386,17 @@ class ManualPathService:
             with open(paths_file, 'w', encoding='utf-8') as f:
                 yaml.dump(paths_data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
             logger.info(f"Successfully saved manual TCP paths to: {paths_file}")
+
+            # Invalidate/remove stale optimization and report files since raw paths changed
+            for stale_file in ["scan.manual_opt_paths.yaml", "scan.manual_paths.report.json", "scan.manual_opt_paths.report.json"]:
+                stale_path = os.path.join(template_dir, stale_file)
+                if os.path.exists(stale_path):
+                    try:
+                        os.remove(stale_path)
+                        logger.info(f"🧹 [ManualPathService] Cleaned stale file: {stale_file}")
+                    except Exception as ex:
+                        logger.warning(f"Could not remove stale file {stale_file}: {ex}")
+
             return True
         except PermissionError as e:
             logger.warning(f"Permission denied writing manual paths to {paths_file}: {e}")
@@ -298,5 +404,6 @@ class ManualPathService:
         except Exception as e:
             logger.warning(f"Failed to save manual paths to {paths_file}: {e}")
             raise IOError(f"File error saving manual paths: {e}") from e
+
 
 manual_path_service = ManualPathService()

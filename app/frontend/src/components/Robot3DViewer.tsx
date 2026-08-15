@@ -14,16 +14,17 @@ import {
   MeshPhongMaterial,
   MeshStandardMaterial,
   SphereGeometry,
-  ConeGeometry,
   Color,
   DoubleSide,
   BufferGeometry,
   Vector3,
-  Quaternion,
+  Euler,
   Sprite,
   SpriteMaterial,
   CanvasTexture
 } from 'three';
+
+
 import { ColladaLoader } from 'three/examples/jsm/loaders/ColladaLoader.js';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader.js';
@@ -36,9 +37,11 @@ interface RobotModelProps {
   isMeshVisible: boolean;
   isWireframe: boolean;
   isPathsVisible: boolean;
+  useOptPaths?: boolean;
   onMeshLoaded?: (vertexCount: number) => void;
   onPathsLoaded?: (pathCount: number, pointCount: number) => void;
 }
+
 
 // Joint names in CR5 URDF matching the order J1..J6
 const JOINT_NAMES = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6'];
@@ -104,9 +107,11 @@ const RobotModel: React.FC<RobotModelProps> = ({
   isMeshVisible,
   isWireframe,
   isPathsVisible,
+  useOptPaths = false,
   onMeshLoaded,
   onPathsLoaded
 }) => {
+
   const [robot, setRobot] = useState<Object3D | null>(null);
   const surfaceMeshRef = useRef<Mesh | null>(null);
   const surfaceMaterialRef = useRef<MeshStandardMaterial | null>(null);
@@ -261,11 +266,12 @@ const RobotModel: React.FC<RobotModelProps> = ({
 
     const fetchPaths = async () => {
       try {
-        const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/manual_paths?t=${pathsVersion}`);
+        const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/manual_paths?use_opt=${useOptPaths ? 'true' : 'false'}&t=${pathsVersion}`);
         if (!res.ok) {
           if (onPathsLoaded) onPathsLoaded(0, 0);
           return;
         }
+
 
         const data = await res.json();
         const paths = data.paths || [];
@@ -345,7 +351,7 @@ const RobotModel: React.FC<RobotModelProps> = ({
             lineMesh.renderOrder = 999;
             group.add(lineMesh);
 
-            // Also draw TCP-level connecting line (dashed appearance via segments)
+            // Also draw TCP-level connecting line (distinct color for Raw vs Opt)
             const tcpLinePoints: Vector3[] = [];
             pts.forEach((p: any) => {
               tcpLinePoints.push(new Vector3(
@@ -355,13 +361,16 @@ const RobotModel: React.FC<RobotModelProps> = ({
               ));
             });
             const tcpLineGeom = new BufferGeometry().setFromPoints(tcpLinePoints);
-            const tcpLineMat = new LineBasicMaterial({ color: 0x22c55e, linewidth: 1 });
+            const tcpLineMat = new LineBasicMaterial({ 
+              color: useOptPaths ? 0x14b8a6 : 0xf59e0b, 
+              linewidth: 2 
+            });
             const tcpLineMesh = new Line(tcpLineGeom, tcpLineMat);
             tcpLineMesh.renderOrder = 1000;
             group.add(tcpLineMesh);
           }
 
-          // Helper to create a crisp 2D billboard sprite with point number (Dark Green Badge)
+          // Helper to create a crisp 2D billboard sprite with point number
           const createNumberSprite = (num: number): Sprite => {
             const canvas = document.createElement('canvas');
             canvas.width = 64;
@@ -370,10 +379,10 @@ const RobotModel: React.FC<RobotModelProps> = ({
             if (ctx) {
               ctx.beginPath();
               ctx.arc(32, 32, 28, 0, Math.PI * 2);
-              ctx.fillStyle = '#064e3b'; // Deep forest green for high contrast
+              ctx.fillStyle = useOptPaths ? '#0f766e' : '#92400e'; 
               ctx.fill();
               ctx.lineWidth = 4;
-              ctx.strokeStyle = '#ffffff'; // Crisp white border
+              ctx.strokeStyle = '#ffffff';
               ctx.stroke();
 
               ctx.fillStyle = '#ffffff';
@@ -389,7 +398,7 @@ const RobotModel: React.FC<RobotModelProps> = ({
             return sprite;
           };
 
-          // B. Each Waypoint Details
+          // B. Each Waypoint Details with 3D Tool Orientation Coordinate Axes (RGB)
           pts.forEach((p: any, idx: number) => {
             const surfPos = new Vector3(
               p.surface_point_base_mm[0] / 1000.0,
@@ -410,37 +419,62 @@ const RobotModel: React.FC<RobotModelProps> = ({
             surfSphere.position.copy(surfPos);
             group.add(surfSphere);
 
-            // 2. Normal Line from surface to TCP — pure red
+            // 2. Normal Line from surface to TCP
             const normalLineGeom = new BufferGeometry().setFromPoints([surfPos, tcpPos]);
-            const normalLineMat = new LineBasicMaterial({ color: 0xef4444, linewidth: 2 });
+            const normalLineMat = new LineBasicMaterial({ 
+              color: useOptPaths ? 0x2dd4bf : 0xfbbf24, 
+              linewidth: 1.5 
+            });
             const normalLine = new Line(normalLineGeom, normalLineMat);
             group.add(normalLine);
 
-            // 3. TCP Target Point Sphere — bright green, clearly distinct
+            // 3. TCP Target Point Sphere
             const tcpSphereGeom = new SphereGeometry(0.007, 12, 12);
-            const tcpSphereMat = new MeshStandardMaterial({ color: 0x22c55e, roughness: 0.2, metalness: 0.5, emissive: 0x166534, emissiveIntensity: 0.3 });
+            const tcpSphereMat = new MeshStandardMaterial({ 
+              color: useOptPaths ? 0x10b981 : 0xf59e0b, 
+              roughness: 0.2, 
+              metalness: 0.5, 
+              emissive: useOptPaths ? 0x064e3b : 0x78350f, 
+              emissiveIntensity: 0.4 
+            });
             const tcpSphere = new Mesh(tcpSphereGeom, tcpSphereMat);
             tcpSphere.position.copy(tcpPos);
             group.add(tcpSphere);
 
-            // 3.5 Numbered Digital Badge Billboard on TCP Point
-            const numSprite = createNumberSprite(p.index || (idx + 1));
-            numSprite.position.set(tcpPos.x, tcpPos.y, tcpPos.z + 0.012);
-            group.add(numSprite);
+            // 4. 3D Tool Orientation Coordinate Axes Triad (Red=X, Green=Y, Blue=Z)
+            // Displays real 3D Euler attitude so orientation optimization is 100% visible in 3D!
+            const rxRad = ((p.tcp_pose_base.rx ?? 0) * Math.PI) / 180.0;
+            const ryRad = ((p.tcp_pose_base.ry ?? 0) * Math.PI) / 180.0;
+            const rzRad = ((p.tcp_pose_base.rz ?? 0) * Math.PI) / 180.0;
+            const euler = new Euler(rxRad, ryRad, rzRad, 'XYZ');
 
-            // 4. Spray approach cone at TCP pointing towards surface — pure red
-            const dir = new Vector3().subVectors(surfPos, tcpPos).normalize();
-            const coneGeom = new ConeGeometry(0.004, 0.014, 8);
-            coneGeom.translate(0, -0.007, 0);
-            const coneMat = new MeshStandardMaterial({ color: 0xf87171 });
-            const cone = new Mesh(coneGeom, coneMat);
-            cone.position.copy(tcpPos);
-            const up = new Vector3(0, -1, 0);
-            const q = new Quaternion().setFromUnitVectors(up, dir);
-            cone.setRotationFromQuaternion(q);
-            group.add(cone);
+            const axisLen = 0.025; // 25mm length
+            const xAxis = new Vector3(axisLen, 0, 0).applyEuler(euler);
+            const yAxis = new Vector3(0, axisLen, 0).applyEuler(euler);
+            const zAxis = new Vector3(0, 0, axisLen).applyEuler(euler);
+
+            // Red: Tool X axis
+            const xLineGeom = new BufferGeometry().setFromPoints([tcpPos, new Vector3().addVectors(tcpPos, xAxis)]);
+            const xLineMat = new LineBasicMaterial({ color: 0xef4444, linewidth: 2 });
+            group.add(new Line(xLineGeom, xLineMat));
+
+            // Green: Tool Y axis
+            const yLineGeom = new BufferGeometry().setFromPoints([tcpPos, new Vector3().addVectors(tcpPos, yAxis)]);
+            const yLineMat = new LineBasicMaterial({ color: 0x22c55e, linewidth: 2 });
+            group.add(new Line(yLineGeom, yLineMat));
+
+            // Blue: Tool Z (Approach) axis
+            const zLineGeom = new BufferGeometry().setFromPoints([tcpPos, new Vector3().addVectors(tcpPos, zAxis)]);
+            const zLineMat = new LineBasicMaterial({ color: 0x3b82f6, linewidth: 2 });
+            group.add(new Line(zLineGeom, zLineMat));
+
+            // 5. Numbered Digital Badge Billboard on TCP Point
+            const numSprite = createNumberSprite(p.index || (idx + 1));
+            numSprite.position.set(tcpPos.x, tcpPos.y, tcpPos.z + 0.014);
+            group.add(numSprite);
           });
         });
+
 
         baseLink.add(group);
         pathsGroupRef.current = group;
@@ -460,7 +494,8 @@ const RobotModel: React.FC<RobotModelProps> = ({
         pathsGroupRef.current = null;
       }
     };
-  }, [robot, activeTemplate, pathsVersion]);
+  }, [robot, activeTemplate, pathsVersion, useOptPaths]);
+
 
   // 5. Handle Visibility and Wireframe Changes
   useEffect(() => {
@@ -491,6 +526,7 @@ interface Robot3DViewerProps {
   activeTemplate?: string | null;
   meshVersion?: number;
   pathsVersion?: number;
+  useOptPaths?: boolean;
 }
 
 const TOOLTIP_CLASSES = "bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2.5 py-1 rounded-md shadow-2xl border border-white/10 whitespace-nowrap z-50 pointer-events-none";
@@ -499,7 +535,8 @@ const Robot3DViewer: React.FC<Robot3DViewerProps> = ({
   jointAngles = [0, 0, 0, 0, 0, 0],
   activeTemplate = null,
   meshVersion = 0,
-  pathsVersion = 0
+  pathsVersion = 0,
+  useOptPaths = false
 }) => {
   const [isMaximized, setIsMaximized] = useState(false);
   const [isMeshVisible, setIsMeshVisible] = useState(true);
@@ -508,6 +545,11 @@ const Robot3DViewer: React.FC<Robot3DViewerProps> = ({
   const [meshVertexCount, setMeshVertexCount] = useState<number>(0);
   const [pathsCount, setPathsCount] = useState<number>(0);
   const [pointsCount, setPointsCount] = useState<number>(0);
+  const [internalUseOpt, setInternalUseOpt] = useState(useOptPaths);
+
+  useEffect(() => {
+    setInternalUseOpt(useOptPaths);
+  }, [useOptPaths]);
 
   const containerClasses = isMaximized
     ? "fixed inset-0 z-[100] bg-slate-950/95 backdrop-blur-md p-4 flex flex-col items-center justify-center animate-in fade-in duration-200"
@@ -533,6 +575,8 @@ const Robot3DViewer: React.FC<Robot3DViewerProps> = ({
           isMeshVisible={isMeshVisible}
           isWireframe={isWireframe}
           isPathsVisible={isPathsVisible}
+          useOptPaths={internalUseOpt}
+
           onMeshLoaded={(count) => setMeshVertexCount(count)}
           onPathsLoaded={(pCount, ptCount) => {
             setPathsCount(pCount);
@@ -540,15 +584,21 @@ const Robot3DViewer: React.FC<Robot3DViewerProps> = ({
           }}
         />
 
-        {/* Base Floor Grid */}
-        <Grid
-          infiniteGrid
-          fadeDistance={10}
-          sectionColor="#64748b"
-          cellColor="#334155"
-          position={[0, -0.01, 0]}
+        <OrbitControls 
+          enableDamping 
+          dampingFactor={0.05} 
+          minDistance={0.3} 
+          maxDistance={8} 
+          target={[0, 0, 0.2]} 
         />
-        <OrbitControls makeDefault target={[0.3, 0.4, 0]} />
+        <Grid 
+          infiniteGrid 
+          cellSize={0.1} 
+          sectionSize={0.5} 
+          cellColor="#334155" 
+          sectionColor="#64748b" 
+          fadeDistance={5} 
+        />
       </Canvas>
 
       {/* Top Left: Compact Model Badges (CR5, Mesh, TCP Info) */}
@@ -566,9 +616,13 @@ const Robot3DViewer: React.FC<Robot3DViewerProps> = ({
         )}
 
         {pathsCount > 0 && (
-          <div className="h-6 px-2 rounded-full text-[9px] font-mono text-amber-300 bg-amber-950/60 backdrop-blur-md border border-amber-500/40 shadow-sm flex items-center gap-1">
-            <Route size={10} className="text-amber-400" />
-            <span>TCP: {pathsCount}P ({pointsCount} pts)</span>
+          <div className={`h-6 px-2 rounded-full text-[9px] font-mono backdrop-blur-md border shadow-sm flex items-center gap-1 ${
+            internalUseOpt 
+              ? 'text-teal-300 bg-teal-950/60 border-teal-500/40'
+              : 'text-amber-300 bg-amber-950/60 border-amber-500/40'
+          }`}>
+            <Route size={10} className={internalUseOpt ? "text-teal-400" : "text-amber-400"} />
+            <span>TCP ({internalUseOpt ? 'Opt' : 'Raw'}): {pathsCount}P ({pointsCount} pts)</span>
           </div>
         )}
       </div>
@@ -577,21 +631,41 @@ const Robot3DViewer: React.FC<Robot3DViewerProps> = ({
       <div className="absolute top-2.5 right-2.5 flex items-center gap-1 z-10">
         {/* TCP Paths Toggle Button */}
         {pathsCount > 0 && (
-          <div className="relative group flex items-center">
-            <button
-              onClick={() => setIsPathsVisible(!isPathsVisible)}
-              className={`h-6 px-2 rounded-full text-[9px] font-medium border flex items-center gap-1 backdrop-blur-md transition-all shadow-sm ${
-                isPathsVisible
-                  ? 'bg-amber-950/60 hover:bg-amber-900/70 border-amber-500/50 text-amber-300 shadow-amber-950/30'
-                  : 'bg-slate-950/50 hover:bg-slate-900/70 border-white/10 text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              <Route size={11} className={isPathsVisible ? "text-amber-400" : "text-slate-400"} />
-              <span>TCP</span>
-            </button>
-            <div className="absolute top-full mt-1.5 right-0 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className={TOOLTIP_CLASSES}>
-                {isPathsVisible ? 'Hide 3D TCP Trajectories' : 'Show 3D TCP Trajectories'}
+          <div className="flex items-center gap-1">
+            <div className="relative group flex items-center">
+              <button
+                onClick={() => setIsPathsVisible(!isPathsVisible)}
+                className={`h-6 px-2 rounded-full text-[9px] font-medium border flex items-center gap-1 backdrop-blur-md transition-all shadow-sm ${
+                  isPathsVisible
+                    ? 'bg-amber-950/60 hover:bg-amber-900/70 border-amber-500/50 text-amber-300 shadow-amber-950/30'
+                    : 'bg-slate-950/50 hover:bg-slate-900/70 border-white/10 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Route size={11} className={isPathsVisible ? "text-amber-400" : "text-slate-400"} />
+                <span>TCP</span>
+              </button>
+              <div className="absolute top-full mt-1.5 right-0 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
+                <div className={TOOLTIP_CLASSES}>
+                  {isPathsVisible ? 'Hide 3D TCP Trajectories' : 'Show 3D TCP Trajectories'}
+                </div>
+              </div>
+            </div>
+
+            <div className="relative group flex items-center">
+              <button
+                onClick={() => setInternalUseOpt(!internalUseOpt)}
+                className={`h-6 px-2 rounded-full text-[9px] font-medium border flex items-center gap-1 backdrop-blur-md transition-all shadow-sm ${
+                  internalUseOpt
+                    ? 'bg-teal-950/70 hover:bg-teal-900/80 border-teal-500/50 text-teal-300 shadow-teal-950/30'
+                    : 'bg-slate-950/50 hover:bg-slate-900/70 border-white/10 text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <span>{internalUseOpt ? '✨ Opt' : '🛤️ Raw'}</span>
+              </button>
+              <div className="absolute top-full mt-1.5 right-0 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
+                <div className={TOOLTIP_CLASSES}>
+                  {internalUseOpt ? 'Switch to Raw Paths' : 'Switch to Optimized Paths'}
+                </div>
               </div>
             </div>
           </div>

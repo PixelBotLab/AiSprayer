@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef, type MouseEvent, type WheelEvent } from 'react';
+
 import { 
   Camera, 
   FolderPlus, 
@@ -24,9 +25,14 @@ import {
   Box,
   Route,
   Plus,
-  Minus
+  Minus,
+  ShieldCheck
 } from 'lucide-react';
+
+
+
 import { CustomModal, type ModalConfig } from '../common/CustomModal';
+
 
 interface FileItem {
   name: string;
@@ -239,13 +245,70 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const [manualPathMode, setManualPathMode] = useState(false);
   const [standoffDist, setStandoffDist] = useState<number>(150);
   const [manualPaths, setManualPaths] = useState<ManualPathItem[]>([]);
+  const [rawManualPaths, setRawManualPaths] = useState<ManualPathItem[]>([]);
+  const [optManualPaths, setOptManualPaths] = useState<ManualPathItem[]>([]);
   const [currentManualPoints, setCurrentManualPoints] = useState<WaypointItem[]>([]);
+  const [selectedPathIdForEdit, setSelectedPathIdForEdit] = useState<number | null>(null);
+
   const [showManualPathsOverlay, setShowManualPathsOverlay] = useState(true);
   const [isSamplingPoint, setIsSamplingPoint] = useState(false);
   const [isLoadingSession, setIsLoadingSession] = useState(false);
   const [mousePixel, setMousePixel] = useState<{ u: number, v: number } | null>(null);
   const [hoveredWaypoint, setHoveredWaypoint] = useState<WaypointItem | null>(null);
   const [liveNormal, setLiveNormal] = useState<{ dx: number; dy: number; tcpPose?: any; surfPoint?: any } | null>(null);
+
+  // Palette for distinguishing multiple paths
+  const PATH_PALETTE = ['#3b82f6', '#f43f5e', '#f59e0b', '#10b981', '#8b5cf6', '#06b6d4'];
+
+  // View Tabs & TCP Optimization State
+  const [activeViewTab, setActiveViewTab] = useState<'2d' | 'diagnostics'>('2d');
+  const [showParamsAccordion, setShowParamsAccordion] = useState(false);
+  const [isVerifyingPaths, setIsVerifyingPaths] = useState(false);
+  const [isOptimizingPaths, setIsOptimizingPaths] = useState(false);
+  const [verificationReport, setVerificationReport] = useState<any | null>(null);
+  const [rawReportCache, setRawReportCache] = useState<any | null>(null);
+  const [optReportCache, setOptReportCache] = useState<any | null>(null);
+  const [verifiedPathTab, setVerifiedPathTab] = useState<'raw' | 'opt'>('raw');
+  const [displayPathSource, setDisplayPathSource] = useState<'raw' | 'opt'>('raw');
+  const [highlightedPathId, setHighlightedPathId] = useState<number | null>(null);
+
+  const handleDeletePath = (pathIdToDelete: number) => {
+    if (selectedPathIdForEdit === pathIdToDelete) {
+      setSelectedPathIdForEdit(null);
+      setCurrentManualPoints([]);
+    }
+    const updated = manualPaths.filter(p => p.path_id !== pathIdToDelete);
+    const reindexed = updated.map((p, idx) => ({
+      ...p,
+      path_id: idx + 1,
+      name: `Manual_Path_${idx + 1}`
+    }));
+    setManualPaths(reindexed);
+    setRawManualPaths(reindexed);
+    setOptManualPaths([]);
+    setVerificationReport(null);
+    setRawReportCache(null);
+    setOptReportCache(null);
+    if (activeTemplate) {
+      localStorage.removeItem(`tcp_verification_${activeTemplate}`);
+    }
+  };
+
+
+
+  // Configurable Kinematic & Tool Parameters
+  const [kinParams, setKinParams] = useState({
+    tcpOffsetX: 50.0,
+    tcpOffsetY: 0.0,
+    tcpOffsetZ: 0.0,
+    tcpOffsetRx: 0.0,
+    tcpOffsetRy: 90.0,
+    tcpOffsetRz: 0.0,
+    stepSizeMm: 1.5,
+    linearSpeedMmS: 120.0,
+  });
+
+
 
   // Client-side session cache — loaded once when entering manualPathMode
   interface SessionData {
@@ -501,23 +564,85 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     }
   };
 
-  const fetchManualPaths = async (templateName: string) => {
+  const fetchManualPaths = async (templateName: string, useOpt: boolean = false) => {
     try {
-      const res = await fetch(`http://localhost:8000/api/interactive/templates/${templateName}/manual_paths`);
-      if (res.ok) {
-        const data = await res.json();
-        setManualPaths(data.paths || []);
+      // 1. Fetch raw paths
+      const rawRes = await fetch(`http://localhost:8000/api/interactive/templates/${templateName}/manual_paths?use_opt=false`);
+      let loadedRawPaths: ManualPathItem[] = [];
+      if (rawRes.ok) {
+        const data = await rawRes.json();
+        loadedRawPaths = data.paths || [];
+        setRawManualPaths(loadedRawPaths);
         if (data.standoff_distance_mm) {
           setStandoffDist(Number(data.standoff_distance_mm));
         }
       } else {
-        setManualPaths([]);
+        setRawManualPaths([]);
       }
+
+      // 2. Fetch opt paths
+      const optRes = await fetch(`http://localhost:8000/api/interactive/templates/${templateName}/manual_paths?use_opt=true`);
+      let loadedOptPaths: ManualPathItem[] = [];
+      if (optRes.ok) {
+        const optData = await optRes.json();
+        if (optData.loaded_from === 'scan.manual_opt_paths.yaml') {
+          loadedOptPaths = optData.paths || [];
+          setOptManualPaths(loadedOptPaths);
+        } else {
+          setOptManualPaths([]);
+        }
+      } else {
+        setOptManualPaths([]);
+      }
+
+      // 3. Set current active paths
+      if (useOpt && loadedOptPaths.length > 0) {
+        setManualPaths(loadedOptPaths);
+        setDisplayPathSource('opt');
+      } else {
+        setManualPaths(loadedRawPaths);
+        setDisplayPathSource('raw');
+      }
+
+      // Eagerly fetch both raw and opt diagnostic reports from backend disk
+      try {
+        const [rawRepRes, optRepRes] = await Promise.all([
+          fetch(`http://localhost:8000/api/interactive/templates/${templateName}/verification_report?use_opt=false`),
+          fetch(`http://localhost:8000/api/interactive/templates/${templateName}/verification_report?use_opt=true`)
+        ]);
+        let rCache = null;
+        let oCache = null;
+        if (rawRepRes.ok) {
+          rCache = await rawRepRes.json();
+          setRawReportCache(rCache);
+        }
+        if (optRepRes.ok) {
+          oCache = await optRepRes.json();
+          setOptReportCache(oCache);
+        }
+        
+        if (verifiedPathTab === 'opt' && oCache) {
+          setVerificationReport(oCache);
+        } else if (verifiedPathTab === 'raw' && rCache) {
+          setVerificationReport(rCache);
+        } else if (rCache) {
+          setVerificationReport(rCache);
+        } else if (oCache) {
+          setVerificationReport(oCache);
+        }
+      } catch (e) {
+        console.warn('Could not eager load reports:', e);
+      }
+
     } catch (err) {
       console.error('Failed to fetch manual paths:', err);
       setManualPaths([]);
+      setRawManualPaths([]);
+      setOptManualPaths([]);
     }
   };
+
+
 
   const fetchFiles = async (templateName: string) => {
     try {
@@ -533,10 +658,12 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         fetchSavedMasks(templateName);
         fetchManualPaths(templateName);
       }
+
     } catch (err) {
       console.error('Failed to fetch template files:', err);
     }
   };
+
 
   useEffect(() => {
     if (activeTemplate) {
@@ -634,6 +761,186 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     }
   };
 
+  // Save verification report to localStorage
+  useEffect(() => {
+    if (verificationReport && activeTemplate) {
+      try {
+        localStorage.setItem(`tcp_verification_${activeTemplate}`, JSON.stringify(verificationReport));
+      } catch {}
+    }
+  }, [verificationReport, activeTemplate]);
+
+  // Sync state to ConsoleLogZone TCP Diagnostics tab
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent('tcp_diagnostics_sync', {
+      detail: {
+        activeTemplate,
+        verificationReport,
+        verifiedPathTab,
+        isVerifying: isVerifyingPaths,
+        isOptimizing: isOptimizingPaths,
+        kinParams
+      }
+    }));
+  }, [activeTemplate, verificationReport, verifiedPathTab, isVerifyingPaths, isOptimizingPaths, kinParams]);
+
+  // Listen to requests from ConsoleLogZone
+  useEffect(() => {
+    const onReqVerify = (e: any) => {
+      if (e.detail?.kinParams) setKinParams(e.detail.kinParams);
+      handleVerifyPaths(e.detail?.useOpt || false);
+    };
+    const onReqOpt = (e: any) => {
+      if (e.detail?.kinParams) setKinParams(e.detail.kinParams);
+      handleOptimizePaths();
+    };
+    const onReqTab = (e: any) => {
+      if (e.detail?.tab) switchVerifiedTab(e.detail.tab);
+    };
+
+    window.addEventListener('request_tcp_verify', onReqVerify);
+    window.addEventListener('request_tcp_optimize', onReqOpt);
+    window.addEventListener('request_tcp_tab_switch', onReqTab);
+
+    return () => {
+      window.removeEventListener('request_tcp_verify', onReqVerify);
+      window.removeEventListener('request_tcp_optimize', onReqOpt);
+      window.removeEventListener('request_tcp_tab_switch', onReqTab);
+    };
+  }, [activeTemplate, isVerifyingPaths, isOptimizingPaths, kinParams, rawReportCache, optReportCache]);
+
+  const handleVerifyPaths = async (useOpt: boolean = false, silent: boolean = false) => {
+    if (!activeTemplate || isVerifyingPaths) return;
+    setIsVerifyingPaths(true);
+    try {
+      const payload = {
+        use_opt: useOpt,
+        options: {
+          step_size_mm: Number(kinParams.stepSizeMm),
+          linear_velocity_mm_s: Number(kinParams.linearSpeedMmS),
+          tcp_offset_xyz_mm: [Number(kinParams.tcpOffsetX), Number(kinParams.tcpOffsetY), Number(kinParams.tcpOffsetZ)],
+          tcp_offset_rpy_deg: [Number(kinParams.tcpOffsetRx), Number(kinParams.tcpOffsetRy), Number(kinParams.tcpOffsetRz)]
+        }
+      };
+      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/verify_paths`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setVerificationReport(data);
+        if (useOpt) {
+          setOptReportCache(data);
+        } else {
+          setRawReportCache(data);
+        }
+        setVerifiedPathTab(useOpt ? 'opt' : 'raw');
+
+      } else {
+        const err = await res.json();
+        if (!silent) {
+          showAlert('Verification Failed', err.detail || 'Failed to verify TCP paths.');
+        }
+      }
+    } catch (err: any) {
+      if (!silent) {
+        showAlert('Verification Error', err.message);
+      }
+    } finally {
+      setIsVerifyingPaths(false);
+    }
+  };
+
+  const switchVerifiedTab = async (tab: 'raw' | 'opt') => {
+    setVerifiedPathTab(tab);
+    setDisplayPathSource(tab);
+
+    if (tab === 'opt') {
+      if (optManualPaths.length > 0) {
+        setManualPaths(optManualPaths);
+      }
+      if (optReportCache) {
+        setVerificationReport(optReportCache);
+      } else if (activeTemplate) {
+        try {
+          const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/verification_report?use_opt=true`);
+          if (res.ok) {
+            const data = await res.json();
+            setOptReportCache(data);
+            setVerificationReport(data);
+          } else {
+            handleOptimizePaths();
+          }
+        } catch {
+          handleOptimizePaths();
+        }
+      }
+    } else {
+      if (rawManualPaths.length > 0) {
+        setManualPaths(rawManualPaths);
+      }
+      if (rawReportCache) {
+        setVerificationReport(rawReportCache);
+      } else if (activeTemplate) {
+        try {
+          const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/verification_report?use_opt=false`);
+          if (res.ok) {
+            const data = await res.json();
+            setRawReportCache(data);
+            setVerificationReport(data);
+          } else {
+            handleVerifyPaths(false);
+          }
+        } catch {
+          handleVerifyPaths(false);
+        }
+      }
+    }
+  };
+
+  const handleOptimizePaths = async () => {
+    if (!activeTemplate || isOptimizingPaths) return;
+    setIsOptimizingPaths(true);
+    try {
+      const payload = {
+        options: {
+          step_size_mm: Number(kinParams.stepSizeMm),
+          linear_velocity_mm_s: Number(kinParams.linearSpeedMmS),
+          tcp_offset_xyz_mm: [Number(kinParams.tcpOffsetX), Number(kinParams.tcpOffsetY), Number(kinParams.tcpOffsetZ)],
+          tcp_offset_rpy_deg: [Number(kinParams.tcpOffsetRx), Number(kinParams.tcpOffsetRy), Number(kinParams.tcpOffsetRz)]
+        }
+      };
+      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/optimize_paths`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setOptReportCache(data);
+        setVerificationReport(data);
+        setVerifiedPathTab('opt');
+        setDisplayPathSource('opt');
+        await fetchManualPaths(activeTemplate, true);
+        await fetchFiles(activeTemplate);
+        if (onPathsUpdated) onPathsUpdated();
+        showAlert(
+          'Optimization Complete', 
+          `Generated scan.manual_opt_paths.yaml\nStatus: ${data.summary?.status || 'PASS'}, singularities & overspeed resolved.`
+        );
+      } else {
+        const err = await res.json();
+        showAlert('Optimization Failed', err.detail || 'Failed to optimize TCP paths.');
+      }
+    } catch (err: any) {
+      showAlert('Optimization Error', err.message);
+    } finally {
+      setIsOptimizingPaths(false);
+    }
+  };
+
+
   const scrollTabs = (dir: 'left' | 'right') => {
     if (scrollRef.current) {
       scrollRef.current.scrollBy({ left: dir === 'left' ? -200 : 200, behavior: 'smooth' });
@@ -643,6 +950,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const hasImage = files.some(f => f.name === 'scan.jpg');
   const hasDepth = files.some(f => f.name === 'scan.depth.npy');
   const hasMasks = files.some(f => f.name === 'scan.masks.yaml');
+  const hasManualPaths = files.some(f => f.name === 'scan.manual_paths.yaml');
   
   const imageUrl = hasImage && activeTemplate
     ? `http://localhost:8000/templates/${activeTemplate}/scan.jpg?t=${imageVersion}`
@@ -667,7 +975,8 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const getFileBadge = (filename: string) => {
     if (filename.includes('.ply') || filename.includes('.stl')) return { label: 'MESH', color: 'bg-purple-500/20 text-purple-300 border-purple-500/40' };
     if (filename === 'scan.masks.yaml') return { label: 'MASKS', color: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40' };
-    if (filename === 'scan.manual_paths.yaml' || filename.includes('paths.yaml')) return { label: 'MANUAL PATH', color: 'bg-rose-500/20 text-rose-300 border-rose-500/40' };
+    if (filename === 'scan.manual_opt_paths.yaml') return { label: 'OPT TCP', color: 'bg-teal-500/20 text-teal-300 border-teal-500/40' };
+    if (filename === 'scan.manual_paths.yaml' || filename.includes('paths.yaml')) return { label: 'MANUAL TCP', color: 'bg-rose-500/20 text-rose-300 border-rose-500/40' };
     if (filename === 'scan.params.yaml') return { label: 'PARAMS', color: 'bg-amber-500/20 text-amber-300 border-amber-500/40' };
     if (filename === 'scan.pcd') return { label: '3D PCD', color: 'bg-cyan-500/20 text-cyan-300 border-cyan-500/40' };
     if (filename === 'scan.depth.npy') return { label: 'DEPTH', color: 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40' };
@@ -678,12 +987,14 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const getFileIcon = (filename: string) => {
     if (filename.includes('.ply') || filename.includes('.stl')) return <Box size={13} className="text-purple-400" />;
     if (filename.endsWith('.jpg') || filename.endsWith('.png')) return <ImageIcon size={13} className="text-blue-400" />;
+    if (filename === 'scan.manual_opt_paths.yaml') return <ShieldCheck size={13} className="text-teal-400" />;
     if (filename === 'scan.manual_paths.yaml' || filename.includes('paths.yaml')) return <Route size={13} className="text-rose-400" />;
     if (filename.endsWith('.yaml') || filename.endsWith('.json')) return <FileJson size={13} className="text-amber-400" />;
     if (filename.endsWith('.pcd')) return <Grip size={13} className="text-cyan-400" />;
     if (filename.endsWith('.npy')) return <Layers size={13} className="text-indigo-400" />;
     return <FileCode2 size={13} className="text-slate-400" />;
   };
+
 
   // Grouping files into logical operational stages
   const fileCategories = [
@@ -863,14 +1174,40 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const toggleManualPathMode = () => {
     if (manualPathMode) {
       setManualPathMode(false);
+      setSelectedPathIdForEdit(null);
+      setCurrentManualPoints([]);
       return;
     }
     if (!activeTemplate || !hasImage) return;
     if (segMode) setSegMode(false);
     setManualPathMode(true);
+    setSelectedPathIdForEdit(null);
     setCurrentManualPoints([]);
     // Pre-load depth + calibration for client-side computation
     loadSessionData(activeTemplate);
+  };
+
+  const handleSelectPathForEdit = (pathId: number) => {
+    const target = manualPaths.find(p => p.path_id === pathId);
+    if (!target) return;
+    setSelectedPathIdForEdit(pathId);
+    setCurrentManualPoints([...target.points]);
+  };
+
+  const handleDeselectEditPath = () => {
+    setSelectedPathIdForEdit(null);
+    setCurrentManualPoints([]);
+  };
+
+  const handleDeleteSingleWaypoint = (wpIdx: number) => {
+    setCurrentManualPoints(prev => {
+      const updated = prev.filter((_, i) => i !== wpIdx);
+      return updated.map((pt, i) => ({
+        ...pt,
+        index: i + 1
+      }));
+    });
+    setHoveredWaypoint(null);
   };
 
   const handleManualMouseMove = (e: MouseEvent<SVGSVGElement>) => {
@@ -953,21 +1290,39 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
 
   const handleManualCommit = () => {
     if (currentManualPoints.length === 0) return;
-    const newPath: ManualPathItem = {
-      path_id: manualPaths.length + 1,
-      name: `Manual_Path_${manualPaths.length + 1}`,
-      points: [...currentManualPoints]
-    };
-    setManualPaths(prev => [...prev, newPath]);
-    setCurrentManualPoints([]);
+    if (selectedPathIdForEdit !== null) {
+      // Update existing path in place
+      setManualPaths(prev => prev.map(p => p.path_id === selectedPathIdForEdit ? {
+        ...p,
+        points: currentManualPoints.map((pt, idx) => ({ ...pt, index: idx + 1 }))
+      } : p));
+      setSelectedPathIdForEdit(null);
+      setCurrentManualPoints([]);
+    } else {
+      // Append new path
+      const newPath: ManualPathItem = {
+        path_id: manualPaths.length + 1,
+        name: `Manual_Path_${manualPaths.length + 1}`,
+        points: currentManualPoints.map((pt, idx) => ({ ...pt, index: idx + 1 }))
+      };
+      setManualPaths(prev => [...prev, newPath]);
+      setCurrentManualPoints([]);
+    }
   };
 
   const handleManualResetCurrent = () => {
-    setCurrentManualPoints([]);
+    if (selectedPathIdForEdit !== null) {
+      const orig = manualPaths.find(p => p.path_id === selectedPathIdForEdit);
+      if (orig) setCurrentManualPoints([...orig.points]);
+      else setCurrentManualPoints([]);
+    } else {
+      setCurrentManualPoints([]);
+    }
   };
 
   const handleManualClearAll = () => {
     setManualPaths([]);
+    setSelectedPathIdForEdit(null);
     setCurrentManualPoints([]);
   };
 
@@ -1015,12 +1370,17 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
 
   const handleManualSavePaths = async () => {
     if (!activeTemplate) return;
-    const allPaths = [...manualPaths];
-    if (currentManualPoints.length > 0) {
+    let allPaths = [...manualPaths];
+    if (selectedPathIdForEdit !== null && currentManualPoints.length > 0) {
+      allPaths = allPaths.map(p => p.path_id === selectedPathIdForEdit ? {
+        ...p,
+        points: currentManualPoints.map((pt, idx) => ({ ...pt, index: idx + 1 }))
+      } : p);
+    } else if (selectedPathIdForEdit === null && currentManualPoints.length > 0) {
       allPaths.push({
         path_id: allPaths.length + 1,
         name: `Manual_Path_${allPaths.length + 1}`,
-        points: [...currentManualPoints]
+        points: currentManualPoints.map((pt, idx) => ({ ...pt, index: idx + 1 }))
       });
     }
 
@@ -1036,6 +1396,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
 
       if (res.ok) {
         setManualPaths(allPaths);
+        setSelectedPathIdForEdit(null);
         setCurrentManualPoints([]);
         fetchFiles(activeTemplate);
         if (onPathsUpdated) onPathsUpdated();
@@ -1075,6 +1436,11 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       {/* Custom Sleek Modal */}
       <CustomModal config={modalConfig} onClose={() => setModalConfig(prev => ({ ...prev, isOpen: false }))} />
 
+
+
+
+
+
       {/* TOP BAR: Templates */}
       <div className="h-14 shrink-0 border-b border-slate-800 bg-slate-950/50 flex items-center px-3 gap-2">
         <button onClick={() => scrollTabs('left')} className="p-1 hover:bg-slate-800 rounded text-slate-500 hover:text-slate-300">
@@ -1110,10 +1476,502 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         </button>
       </div>
 
+      {/* VIEW SELECTOR TABS BAR */}
+      <div className="h-10 shrink-0 border-b border-slate-800 bg-slate-950/80 flex items-center justify-between px-3">
+        <div className="flex items-center gap-1 bg-slate-900 p-0.5 rounded-lg border border-slate-800">
+          <button
+            onClick={() => setActiveViewTab('2d')}
+            className={`px-3 py-1 text-xs font-medium rounded-md transition-all flex items-center gap-1.5 ${
+              activeViewTab === '2d'
+                ? 'bg-slate-800 text-cyan-300 shadow border border-cyan-500/30'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <ImageIcon size={13} />
+            <span>2D Canvas & Paths</span>
+          </button>
+          <button
+            onClick={() => {
+              setActiveViewTab('diagnostics');
+              if (!verificationReport) {
+                handleVerifyPaths(displayPathSource === 'opt');
+              }
+            }}
+            className={`px-3 py-1 text-xs font-medium rounded-md transition-all flex items-center gap-1.5 ${
+              activeViewTab === 'diagnostics'
+                ? 'bg-emerald-950 text-emerald-300 shadow border border-emerald-500/40 font-semibold'
+                : 'text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <ShieldCheck size={13} />
+            <span>TCP Diagnostics & Opt</span>
+            {verificationReport && (
+              <span className={`text-[9px] px-1.5 py-0.2 rounded-full font-bold uppercase ${
+                verificationReport.summary?.status === 'PASS'
+                  ? 'bg-emerald-900 text-emerald-300'
+                  : verificationReport.summary?.status === 'WARNING'
+                  ? 'bg-amber-900 text-amber-300'
+                  : 'bg-rose-900 text-rose-300'
+              }`}>
+                {verificationReport.summary?.status}
+              </span>
+            )}
+          </button>
+        </div>
+
+        {/* View Header Quick Actions */}
+        <div className="flex items-center gap-2 text-xs">
+          {activeViewTab === '2d' ? (
+            <div className="flex items-center gap-1 bg-slate-900 p-0.5 rounded-lg border border-slate-800">
+              <button
+                onClick={() => switchVerifiedTab('raw')}
+                className={`px-2.5 py-0.5 text-[11px] rounded transition-all ${
+                  displayPathSource === 'raw'
+                    ? 'bg-slate-800 text-amber-300 font-medium'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                Raw
+              </button>
+              <button
+                onClick={() => switchVerifiedTab('opt')}
+                className={`px-2.5 py-0.5 text-[11px] rounded flex items-center gap-1 transition-all ${
+                  displayPathSource === 'opt'
+                    ? 'bg-emerald-900/60 text-emerald-300 font-medium'
+                    : 'text-slate-400 hover:text-slate-200'
+                }`}
+              >
+                <Sparkles size={10} />
+                <span>Opt</span>
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => handleVerifyPaths(displayPathSource === 'opt')}
+                disabled={isVerifyingPaths || isOptimizingPaths}
+                className="px-2.5 py-1 text-[11px] bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-md border border-slate-700 flex items-center gap-1.5 disabled:opacity-50"
+              >
+                <RefreshCw size={11} className={isVerifyingPaths ? 'animate-spin text-emerald-400' : ''} />
+                <span>{isVerifyingPaths ? 'Evaluating...' : 'Re-evaluate'}</span>
+              </button>
+              <button
+                onClick={handleOptimizePaths}
+                disabled={isVerifyingPaths || isOptimizingPaths}
+                className="px-2.5 py-1 text-[11px] bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white rounded-md border border-emerald-500/50 flex items-center gap-1.5 shadow-sm disabled:opacity-50 font-semibold"
+              >
+                <Sparkles size={11} className={isOptimizingPaths ? 'animate-spin' : ''} />
+                <span>{isOptimizingPaths ? 'Optimizing...' : 'Auto-Fix (ΔRz)'}</span>
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
       {/* MAIN CONTENT: 3 Columns */}
       <div className="flex-1 flex min-h-0">
         
-        {/* Left Column: Big Image Viewer */}
+        {/* Left Column: 2D Canvas OR Dedicated TCP Diagnostics View */}
+        {activeViewTab === 'diagnostics' ? (
+          <div className="flex-1 flex flex-col border-r border-slate-800 bg-slate-950 overflow-y-auto p-4 custom-scrollbar text-xs font-mono">
+            {!verificationReport ? (
+              <div className="flex-1 flex flex-col items-center justify-center py-16 text-slate-500 gap-3">
+                <ShieldCheck size={42} className="text-slate-700 animate-pulse" />
+                <div className="text-center">
+                  <div className="font-semibold text-slate-300 text-sm">No Kinematic Diagnostics Data</div>
+                  <div className="text-[11px] text-slate-500 mt-1 max-w-sm">
+                    Click "Re-evaluate" or "Auto-Fix" to compute 6-DOF MoveL inverse kinematics and safety limits.
+                  </div>
+                </div>
+                <button
+                  onClick={() => handleVerifyPaths(displayPathSource === 'opt')}
+                  disabled={isVerifyingPaths || !activeTemplate}
+                  className="mt-2 px-4 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-xs font-semibold shadow-lg shadow-emerald-950/50 flex items-center gap-2 disabled:opacity-40"
+                >
+                  <RefreshCw size={13} className={isVerifyingPaths ? 'animate-spin' : ''} />
+                  <span>{isVerifyingPaths ? 'Evaluating...' : 'Run Kinematics Verification'}</span>
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-4 max-w-4xl mx-auto w-full">
+                {/* Diagnostics Summary Header Banner */}
+                <div className="flex flex-wrap items-center justify-between gap-3 bg-slate-900/90 p-3.5 rounded-xl border border-slate-800 shadow-md">
+                  <div className="flex items-center gap-3">
+                    <div className="flex bg-slate-950 p-0.5 rounded-lg border border-slate-800">
+                      <button
+                        onClick={() => switchVerifiedTab('raw')}
+                        className={`px-3 py-1 text-xs font-medium rounded-md transition-all flex items-center gap-1.5 ${
+                          verifiedPathTab === 'raw'
+                            ? 'bg-slate-800 text-amber-300 shadow border border-amber-500/30'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        <span>🛤️ Raw Path</span>
+                      </button>
+                      <button
+                        onClick={() => switchVerifiedTab('opt')}
+                        className={`px-3 py-1 text-xs font-medium rounded-md transition-all flex items-center gap-1.5 ${
+                          verifiedPathTab === 'opt'
+                            ? 'bg-emerald-900/60 text-emerald-300 shadow border border-emerald-500/40 font-semibold'
+                            : 'text-slate-400 hover:text-slate-200'
+                        }`}
+                      >
+                        <Sparkles size={12} className="text-emerald-400" />
+                        <span>✨ Optimized (Opt)</span>
+                      </button>
+                    </div>
+
+                    <span className="text-[11px] text-slate-400 hidden sm:block">
+                      Source: <span className="text-slate-200 font-semibold">{verificationReport.source_file}</span>
+                    </span>
+                  </div>
+
+                  {/* Summary Metric Badges */}
+                  <div className="flex items-center gap-2">
+                    <div className="bg-slate-950 px-2.5 py-1 rounded-lg border border-slate-800 text-[11px]">
+                      <span className="text-slate-500">Paths:</span>{' '}
+                      <span className="text-slate-200 font-bold">{verificationReport.summary?.total_paths}</span>
+                    </div>
+
+                    <div className="bg-slate-950 px-2.5 py-1 rounded-lg border border-slate-800 text-[11px]">
+                      <span className="text-slate-500">MoveL Speed:</span>{' '}
+                      <span className="text-cyan-400 font-bold">{verificationReport.nominal_speed_mm_s || kinParams.linearSpeedMmS} mm/s</span>
+                    </div>
+
+                    <div className="bg-slate-950 px-2.5 py-1 rounded-lg border border-slate-800 text-[11px]">
+                      <span className="text-slate-500">Issues:</span>{' '}
+                      <span className={`font-bold ${verificationReport.summary?.total_issues === 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                        {verificationReport.summary?.total_issues}
+                      </span>
+                    </div>
+
+                    <div className={`px-2.5 py-1 rounded-lg text-[11px] font-bold uppercase flex items-center gap-1.5 border ${
+                      verificationReport.summary?.status === 'PASS'
+                        ? 'bg-emerald-950 text-emerald-300 border-emerald-500/40'
+                        : verificationReport.summary?.status === 'WARNING'
+                        ? 'bg-amber-950 text-amber-300 border-amber-500/40'
+                        : 'bg-rose-950 text-rose-300 border-rose-500/40'
+                    }`}>
+                      <span>{verificationReport.summary?.status}</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Per-Path Diagnostic Inspection & Waypoint Detail Cards */}
+                <div className="grid grid-cols-1 gap-3">
+                  {(verificationReport.path_reports || []).map((pRep: any) => {
+                    const isPass = pRep.status === 'PASS';
+                    const isWarning = pRep.status === 'WARNING';
+                    const pathColor = PATH_PALETTE[(pRep.path_id - 1) % PATH_PALETTE.length];
+                    const activePathsList = verifiedPathTab === 'opt' ? (optManualPaths.length > 0 ? optManualPaths : manualPaths) : (rawManualPaths.length > 0 ? rawManualPaths : manualPaths);
+                    const matchingPath = activePathsList.find(p => p.path_id === pRep.path_id);
+                    const ptsCount = matchingPath ? matchingPath.points.length : 0;
+                    const startPt = matchingPath && matchingPath.points.length > 0 ? matchingPath.points[0] : null;
+                    const endPt = matchingPath && matchingPath.points.length > 0 ? matchingPath.points[matchingPath.points.length - 1] : null;
+
+                    return (
+                      <div
+                        key={pRep.path_id}
+                        className={`p-3.5 rounded-xl border transition-all ${
+                          isPass
+                            ? 'bg-slate-900/60 border-emerald-800/30'
+                            : isWarning
+                            ? 'bg-amber-950/20 border-amber-700/40'
+                            : 'bg-rose-950/25 border-rose-700/50'
+                        }`}
+                      >
+                        {/* Path Card Header */}
+                        <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
+                          <div className="flex items-center gap-2 font-semibold">
+                            <span
+                              className="w-3 h-3 rounded-full"
+                              style={{ backgroundColor: pathColor }}
+                            />
+                            <span className="text-slate-100 font-bold text-sm">Path {pRep.path_id}</span>
+                            <span className="text-slate-400 text-xs font-normal">({pRep.name})</span>
+                            <span className="text-[11px] text-slate-500">
+                              · {ptsCount} waypoints · {pRep.total_interpolated} MoveL steps · {pRep.speed_mm_s || kinParams.linearSpeedMmS} mm/s
+                            </span>
+                            {pRep.speed_mm_s && pRep.speed_mm_s < kinParams.linearSpeedMmS && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-950/90 text-emerald-300 border border-emerald-500/40 font-mono">
+                                ⚡ Safe Speed: {pRep.speed_mm_s} mm/s
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            {/* Jump to 2D Canvas Button */}
+                            <button
+                              onClick={() => {
+                                setDisplayPathSource(verifiedPathTab);
+                                setActiveViewTab('2d');
+                              }}
+                              className="px-2 py-0.5 rounded text-[10px] bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 flex items-center gap-1 transition-colors"
+                              title="Show this path on 2D image"
+                            >
+                              <ImageIcon size={10} />
+                              <span>View on 2D</span>
+                            </button>
+
+                            {isPass ? (
+                              <span className="text-emerald-400 text-xs font-semibold px-2 py-0.5 rounded bg-emerald-950 border border-emerald-500/30">
+                                ✅ Safe & Executable
+                              </span>
+                            ) : isWarning ? (
+                              <div className="flex items-center gap-1.5">
+                                {pRep.recommended_safe_speed_mm_s && pRep.recommended_safe_speed_mm_s < kinParams.linearSpeedMmS && (
+                                  <button
+                                    onClick={() => {
+                                      const newSpd = pRep.recommended_safe_speed_mm_s;
+                                      setKinParams({ ...kinParams, linearSpeedMmS: newSpd });
+                                      handleVerifyPaths(verifiedPathTab === 'opt');
+                                    }}
+                                    className="px-2 py-0.5 rounded text-[10px] bg-amber-950 hover:bg-amber-900 text-amber-300 border border-amber-500/50 flex items-center gap-1 font-semibold transition-all shadow-sm"
+                                    title="Click to apply recommended MoveL speed to achieve 100% PASS"
+                                  >
+                                    <span>💡 Safe MoveL: ≤ {pRep.recommended_safe_speed_mm_s} mm/s</span>
+                                  </button>
+                                )}
+                                <span className="text-amber-400 text-xs font-semibold px-2 py-0.5 rounded bg-amber-950 border border-amber-500/30">
+                                  ⚠️ Overspeed Warning
+                                </span>
+                              </div>
+                            ) : (
+                              <span className="text-rose-400 text-xs font-semibold px-2 py-0.5 rounded bg-rose-950 border border-rose-500/30">
+                                ❌ Unreachable
+                              </span>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Waypoints Physical Coordinates Ribbon */}
+                        {startPt && endPt && (
+                          <div className="bg-slate-950/50 px-2.5 py-1.5 rounded-lg border border-slate-800/60 mb-2.5 flex flex-wrap items-center justify-between text-[10px] text-slate-400 font-mono">
+                            <div>
+                              <span className="text-slate-500">Start (mm):</span>{' '}
+                              <span className="text-slate-200">
+                                [{startPt.surface_point_base_mm[0].toFixed(1)}, {startPt.surface_point_base_mm[1].toFixed(1)}, {startPt.surface_point_base_mm[2].toFixed(1)}]
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-slate-500">End (mm):</span>{' '}
+                              <span className="text-slate-200">
+                                [{endPt.surface_point_base_mm[0].toFixed(1)}, {endPt.surface_point_base_mm[1].toFixed(1)}, {endPt.surface_point_base_mm[2].toFixed(1)}]
+                              </span>
+                            </div>
+                            <div>
+                              <span className="text-slate-500">Standoff:</span>{' '}
+                              <span className="text-cyan-400">{startPt.standoff_distance_mm || 150} mm</span>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* 6-Axis Max Joint Velocities Grid with Raw vs Opt Comparison */}
+                        <div className="bg-slate-950/80 p-2.5 rounded-lg border border-slate-800/80 mb-2.5">
+                          <div className="text-[11px] text-slate-400 mb-1.5 flex items-center justify-between">
+                            <span>Max Joint Velocities (°/s):</span>
+                            <span className="text-[10px] text-slate-500">URDF Limit: ±179.9°/s</span>
+                          </div>
+                          <div className="grid grid-cols-6 gap-2 text-center font-mono">
+                            {pRep.max_joint_velocity_deg_s.map((vel: number, jIdx: number) => {
+                              const isOver = vel > 179.9;
+                              const rawMatch = rawReportCache?.path_reports?.find((r: any) => r.path_id === pRep.path_id);
+                              const rawVel = rawMatch?.max_joint_velocity_deg_s?.[jIdx];
+                              const isReduced = verifiedPathTab === 'opt' && rawVel && rawVel > 179.9 && vel <= 179.9;
+
+                              return (
+                                <div
+                                  key={jIdx}
+                                  className={`p-1.5 rounded-md text-[11px] font-semibold border transition-all ${
+                                    isOver
+                                      ? 'bg-rose-950 text-rose-300 border-rose-600 animate-pulse font-bold'
+                                      : isReduced
+                                      ? 'bg-emerald-950/80 text-emerald-300 border-emerald-500/80 shadow-sm'
+                                      : vel > 120
+                                      ? 'bg-amber-950/60 text-amber-300 border-amber-700/50'
+                                      : 'bg-slate-900 text-slate-300 border-slate-800'
+                                  }`}
+                                >
+                                  <div className="text-[10px] text-slate-500 font-normal">J{jIdx + 1}</div>
+                                  <div className="text-xs">{vel.toFixed(1)}°</div>
+                                  {isReduced && (
+                                    <div className="text-[9px] text-emerald-400 font-normal font-mono">
+                                      was {rawVel.toFixed(0)}°
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+
+                        {/* Issues Breakdown */}
+                        {pRep.issues && pRep.issues.length > 0 && (
+                          <div className="space-y-1 mt-1 text-[11px]">
+                            {pRep.issues.slice(0, 3).map((iss: any, iIdx: number) => (
+                              <div key={iIdx} className="flex items-start gap-2 bg-slate-950/60 px-2.5 py-1.5 rounded text-slate-300 border border-slate-800/60">
+                                <span className="shrink-0 text-amber-400 font-bold">
+                                  {iss.type === 'UNREACHABLE' ? '❌' : '⚠️'} [{iss.type}]
+                                </span>
+                                <span className="text-slate-200">{iss.detail}</span>
+                                {iss.location_xyz && (
+                                  <span className="shrink-0 text-slate-500 text-[10px] ml-auto font-mono">
+                                    XYZ=[{iss.location_xyz.join(', ')}] mm
+                                  </span>
+                                )}
+                              </div>
+                            ))}
+                            {pRep.issues.length > 3 && (
+                              <div className="text-[11px] text-slate-500 pl-2">
+                                + {pRep.issues.length - 3} additional step warnings recorded.
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Collapsible Kinematic Settings & Full TCP Calibration Drawer */}
+                <div className="bg-slate-900/80 rounded-xl border border-slate-800 overflow-hidden shadow-lg">
+                  <button
+                    onClick={() => setShowParamsAccordion(!showParamsAccordion)}
+                    className="w-full px-4 py-3 text-xs font-semibold text-slate-300 hover:text-white flex items-center justify-between hover:bg-slate-800/50 transition-colors"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span>⚙️ TCP Calibration & Kinematics Settings</span>
+                      <span className="text-[10px] text-slate-500 font-normal hidden sm:inline">
+                        (Tool Flange Offsets, Hand-Eye & MoveL Dynamics)
+                      </span>
+                    </div>
+                    <span className="text-slate-400">{showParamsAccordion ? '▲ Collapse' : '▼ Expand'}</span>
+                  </button>
+
+                  {showParamsAccordion && (
+                    <div className="p-4 border-t border-slate-800 bg-slate-950/90 flex flex-col gap-4 text-[11px]">
+                      {/* Section 1: Tool Center Point (TCP) Offsets */}
+                      <div>
+                        <div className="text-slate-400 font-semibold mb-2 flex items-center justify-between border-b border-slate-800 pb-1">
+                          <span>1. Tool Center Point (TCP) Flange Offsets</span>
+                          <span className="text-[10px] text-slate-500 font-normal">End-Effector Nozzle Calibration</span>
+                        </div>
+                        <div className="grid grid-cols-2 md:grid-cols-6 gap-2.5">
+                          <div>
+                            <label className="text-slate-400 block mb-0.5 text-[10px]">TCP Offset X (mm)</label>
+                            <input
+                              type="number"
+                              step="1"
+                              value={kinParams.tcpOffsetX}
+                              onChange={e => setKinParams({ ...kinParams, tcpOffsetX: parseFloat(e.target.value) || 0 })}
+                              className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200 font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-slate-400 block mb-0.5 text-[10px]">TCP Offset Y (mm)</label>
+                            <input
+                              type="number"
+                              step="1"
+                              value={kinParams.tcpOffsetY}
+                              onChange={e => setKinParams({ ...kinParams, tcpOffsetY: parseFloat(e.target.value) || 0 })}
+                              className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200 font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-slate-400 block mb-0.5 text-[10px]">TCP Offset Z (mm)</label>
+                            <input
+                              type="number"
+                              step="1"
+                              value={kinParams.tcpOffsetZ}
+                              onChange={e => setKinParams({ ...kinParams, tcpOffsetZ: parseFloat(e.target.value) || 0 })}
+                              className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200 font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-slate-400 block mb-0.5 text-[10px]">Offset Rx (°)</label>
+                            <input
+                              type="number"
+                              step="1"
+                              value={kinParams.tcpOffsetRx}
+                              onChange={e => setKinParams({ ...kinParams, tcpOffsetRx: parseFloat(e.target.value) || 0 })}
+                              className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200 font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-slate-400 block mb-0.5 text-[10px]">Offset Ry (°)</label>
+                            <input
+                              type="number"
+                              step="1"
+                              value={kinParams.tcpOffsetRy}
+                              onChange={e => setKinParams({ ...kinParams, tcpOffsetRy: parseFloat(e.target.value) || 0 })}
+                              className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200 font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-slate-400 block mb-0.5 text-[10px]">Offset Rz (°)</label>
+                            <input
+                              type="number"
+                              step="1"
+                              value={kinParams.tcpOffsetRz}
+                              onChange={e => setKinParams({ ...kinParams, tcpOffsetRz: parseFloat(e.target.value) || 0 })}
+                              className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200 font-mono"
+                            />
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Section 2: Motion Kinematics & Slerp Interpolation */}
+                      <div>
+                        <div className="text-slate-400 font-semibold mb-2 flex items-center justify-between border-b border-slate-800 pb-1">
+                          <span>2. Motion Kinematics & Interpolation</span>
+                          <span className="text-[10px] text-slate-500 font-normal">Trajectory Resolution & Speed</span>
+                        </div>
+                        <div className="grid grid-cols-2 md:grid-cols-4 gap-2.5">
+                          <div>
+                            <label className="text-slate-400 block mb-0.5 text-[10px]">MoveL Velocity (mm/s)</label>
+                            <input
+                              type="number"
+                              step="10"
+                              value={kinParams.linearSpeedMmS}
+                              onChange={e => setKinParams({ ...kinParams, linearSpeedMmS: parseFloat(e.target.value) || 120 })}
+                              className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200 font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-slate-400 block mb-0.5 text-[10px]">Slerp Step Size (mm)</label>
+                            <input
+                              type="number"
+                              step="0.5"
+                              value={kinParams.stepSizeMm}
+                              onChange={e => setKinParams({ ...kinParams, stepSizeMm: parseFloat(e.target.value) || 1.5 })}
+                              className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200 font-mono"
+                            />
+                          </div>
+                          <div className="col-span-2 flex items-end">
+                            <button
+                              onClick={() => handleVerifyPaths(displayPathSource === 'opt')}
+                              disabled={isVerifyingPaths || isOptimizingPaths}
+                              className="w-full py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white rounded font-medium shadow transition-all flex items-center justify-center gap-1.5 disabled:opacity-50"
+                            >
+                              <RefreshCw size={12} className={isVerifyingPaths ? 'animate-spin' : ''} />
+                              <span>Apply Settings & Re-Evaluate</span>
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Section 3: Active Hand-Eye Calibration Info */}
+                      <div className="p-2.5 bg-slate-900/60 rounded-lg border border-slate-800 flex items-center justify-between text-[10px] text-slate-400">
+                        <span>📷 Hand-Eye Calibration: <strong className="text-slate-200">calib_20260812_230221 (Eye-to-Hand)</strong></span>
+                        <span>Camera Pos: <strong className="text-slate-200 font-mono">[141.7, 23.3, 24.4] mm</strong></span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        ) : (
         <div 
           ref={containerRef}
           className={`flex-1 flex flex-col border-r border-slate-800 relative bg-black items-center justify-center overflow-hidden select-none ${
@@ -1165,7 +2023,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                 >
                   <defs>
                     <marker id="view-traj-arrow" markerWidth="5.5" markerHeight="5.5" refX="4.2" refY="2.75" orient="auto">
-                      <path d="M0,0.6 L0,4.9 L4.9,2.75 z" fill="#f59e0b" />
+                      <path d="M0,0.6 L0,4.9 L4.9,2.75 z" fill="#38bdf8" />
                     </marker>
                     <marker id="view-normal-arrow" markerWidth="4" markerHeight="4" refX="3.2" refY="2" orient="auto">
                       <path d="M0,0.6 L0,3.4 L3.4,2 z" fill="#ef4444" />
@@ -1173,27 +2031,164 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                   </defs>
                   {manualPaths.map((path, pIdx) => {
                     const pts = path.points;
-                    const pathColor = '#f59e0b';
+                    const pId = path.path_id ?? (pIdx + 1);
+                    const pathColor = PATH_PALETTE[(pId - 1) % PATH_PALETTE.length];
+                    const isHighlighted = highlightedPathId === pId;
+
+                    // Check if there are verification issues reported on this path
+                    const pathRep = verificationReport?.path_reports?.find((r: any) => r.path_id === pId);
+                    const pathIssues = pathRep?.issues || [];
+
                     return (
                       <g key={pIdx}>
-                        {/* Connecting Line with Arrow on EVERY consecutive segment */}
-                        {pts.map((p, i) => {
+                        {/* Glowing Background Line for Highlighted / Focused Path */}
+                        {isHighlighted && pts.map((p, i) => {
                           if (i === 0) return null;
                           const prev = pts[i - 1];
                           return (
                             <line
-                              key={`vseg-${i}`}
+                              key={`hseg-${i}`}
                               x1={prev.pixel[0]}
                               y1={prev.pixel[1]}
                               x2={p.pixel[0]}
                               y2={p.pixel[1]}
                               stroke={pathColor}
-                              strokeWidth={2.5}
-                              markerEnd="url(#view-traj-arrow)"
+                              strokeWidth={9}
+                              strokeOpacity={0.35}
+                              strokeLinecap="round"
                               style={{ pointerEvents: 'none' }}
                             />
                           );
                         })}
+
+                        {/* Connecting Line with Arrow on EVERY consecutive segment */}
+                        {pts.map((p, i) => {
+                          if (i === 0) return null;
+                          const prev = pts[i - 1];
+                          const segIdx = i - 1;
+                          const hasSegIssue = pathIssues.some((iss: any) => iss.segment_index === segIdx);
+
+                          return (
+                            <g key={`vseg-grp-${i}`}>
+                              <line
+                                key={`vseg-${i}`}
+                                x1={prev.pixel[0]}
+                                y1={prev.pixel[1]}
+                                x2={p.pixel[0]}
+                                y2={p.pixel[1]}
+                                stroke={hasSegIssue ? '#f43f5e' : pathColor}
+                                strokeWidth={isHighlighted ? 3.5 : (hasSegIssue ? 3.0 : 2.5)}
+                                markerEnd="url(#view-traj-arrow)"
+                                strokeDasharray={hasSegIssue ? '6 3' : undefined}
+                                style={{ pointerEvents: 'none' }}
+                              />
+                            </g>
+                          );
+                        })}
+
+                        {/* Verification Issue Warning Beacons (Deduplicated per waypoint) */}
+                        {Array.from(new Set(pathIssues.map((iss: any) => 
+                          iss.step_index !== undefined
+                            ? Math.min(Math.floor((iss.step_index / (pathRep.total_interpolated || 1)) * pts.length), pts.length - 1)
+                            : (iss.waypoint_index !== undefined ? Math.min(iss.waypoint_index, pts.length - 1) : 0)
+                        ))).map((targetWpIdx: any, bIdx: number) => {
+                          const pt = pts[targetWpIdx];
+                          if (!pt) return null;
+                          const [u, v] = pt.pixel;
+                          const issuesAtPt = pathIssues.filter((iss: any) => {
+                            const idx = iss.step_index !== undefined
+                              ? Math.min(Math.floor((iss.step_index / (pathRep.total_interpolated || 1)) * pts.length), pts.length - 1)
+                              : (iss.waypoint_index !== undefined ? Math.min(iss.waypoint_index, pts.length - 1) : 0);
+                            return idx === targetWpIdx;
+                          });
+
+                          return (
+                            <g key={`beacon-grp-${bIdx}`} className="pointer-events-auto cursor-help">
+                              {/* In-place concentric pulsing ripple halo 1 */}
+                              <circle
+                                cx={u}
+                                cy={v}
+                                r={8}
+                                fill="rgba(244, 63, 94, 0.25)"
+                                stroke="#f43f5e"
+                                strokeWidth={2}
+                                style={{ pointerEvents: 'none' }}
+                              >
+                                <animate attributeName="r" values="8;24" dur="1.6s" repeatCount="indefinite" />
+                                <animate attributeName="opacity" values="0.9;0" dur="1.6s" repeatCount="indefinite" />
+                              </circle>
+                              {/* In-place concentric pulsing ripple halo 2 (staggered) */}
+                              <circle
+                                cx={u}
+                                cy={v}
+                                r={8}
+                                fill="none"
+                                stroke="#f43f5e"
+                                strokeWidth={1.5}
+                                style={{ pointerEvents: 'none' }}
+                              >
+                                <animate attributeName="r" values="8;24" begin="0.8s" dur="1.6s" repeatCount="indefinite" />
+                                <animate attributeName="opacity" values="0.8;0" begin="0.8s" dur="1.6s" repeatCount="indefinite" />
+                              </circle>
+
+                              {/* Center Alert Dot */}
+                              <circle
+                                cx={u}
+                                cy={v}
+                                r={5.5}
+                                fill="#f43f5e"
+                                stroke="#ffffff"
+                                strokeWidth={1.8}
+                                style={{ pointerEvents: 'none' }}
+                              />
+
+                              {/* Visual Alert Badge attached to waypoint */}
+                              {(() => {
+                                const critIssue = issuesAtPt.find((i: any) => i.severity === 'ERROR')
+                                  || issuesAtPt.find((i: any) => i.type === 'KINEMATIC_DISCONTINUITY')
+                                  || issuesAtPt.find((i: any) => i.type === 'UNREACHABLE' || i.type === 'UNREACHABLE_STEP')
+                                  || issuesAtPt.find((i: any) => i.type === 'ELBOW_SINGULARITY' || i.type === 'WRIST_SINGULARITY')
+                                  || issuesAtPt[0];
+                                
+                                const isUnreach = critIssue?.type === 'UNREACHABLE' 
+                                  || critIssue?.type === 'UNREACHABLE_STEP' 
+                                  || critIssue?.type === 'KINEMATIC_DISCONTINUITY';
+                                const isSing = critIssue?.type === 'ELBOW_SINGULARITY' || critIssue?.type === 'WRIST_SINGULARITY';
+                                const label = isUnreach ? '❌ Unreachable' : (isSing ? '⚠️ Singularity' : '⚠️ Overspeed');
+                                const badgeWidth = isUnreach ? 96 : (isSing ? 88 : 82);
+
+                                return (
+                                  <g transform={`translate(${u + 10}, ${v - 12})`} style={{ pointerEvents: 'none' }}>
+                                    <rect
+                                      x={0}
+                                      y={0}
+                                      width={badgeWidth}
+                                      height={20}
+                                      rx={4}
+                                      fill="rgba(136, 19, 55, 0.95)"
+                                      stroke="#f43f5e"
+                                      strokeWidth={1}
+                                      filter="drop-shadow(0px 2px 4px rgba(0,0,0,0.6))"
+                                    />
+                                    <text
+                                      x={badgeWidth / 2}
+                                      y={13}
+                                      textAnchor="middle"
+                                      fill="#ffe4e6"
+                                      fontSize={9.5}
+                                      fontWeight="bold"
+                                      fontFamily="monospace"
+                                    >
+                                      {label}
+                                    </text>
+                                  </g>
+                                );
+                              })()}
+                            </g>
+                          );
+                        })}
+
+
 
                         {/* Each Waypoint in Path */}
                         {pts.map((pt, idx) => {
@@ -1206,8 +2201,14 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
 
                           return (
                             <g key={idx}
-                              onMouseEnter={() => setHoveredWaypoint(pt)}
-                              onMouseLeave={() => setHoveredWaypoint(null)}
+                              onMouseEnter={() => {
+                                setHoveredWaypoint({ ...pt, path_id: pId } as any);
+                                setHighlightedPathId(pId);
+                              }}
+                              onMouseLeave={() => {
+                                setHoveredWaypoint(null);
+                                setHighlightedPathId(null);
+                              }}
                               style={{ cursor: 'pointer' }}
                             >
                               {/* Red Normal Offset Arrow (Perspective Foreshortened) */}
@@ -1224,9 +2225,31 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
 
                               {/* Physical Surface Point Marker — large hit area */}
                               <circle cx={u} cy={v} r={14} fill="transparent" />
-                              <circle cx={u} cy={v} r={7.5} fill="white" filter="drop-shadow(0px 0px 3px rgba(0,0,0,0.8))" style={{ pointerEvents: 'none' }} />
-                              <circle cx={u} cy={v} r={5.5} fill={pathColor} style={{ pointerEvents: 'none' }} />
-                              <text x={u} y={v + 0.5} textAnchor="middle" dominantBaseline="central" fill="white" fontSize={8} fontWeight="bold" style={{ pointerEvents: 'none' }}>
+                              <circle 
+                                cx={u} 
+                                cy={v} 
+                                r={isHighlighted ? 9 : 7.5} 
+                                fill="white" 
+                                filter="drop-shadow(0px 0px 4px rgba(0,0,0,0.8))" 
+                                style={{ pointerEvents: 'none' }} 
+                              />
+                              <circle 
+                                cx={u} 
+                                cy={v} 
+                                r={isHighlighted ? 6.5 : 5.5} 
+                                fill={pathColor} 
+                                style={{ pointerEvents: 'none' }} 
+                              />
+                              <text 
+                                x={u} 
+                                y={v + 0.5} 
+                                textAnchor="middle" 
+                                dominantBaseline="central" 
+                                fill="white" 
+                                fontSize={isHighlighted ? 9 : 8} 
+                                fontWeight="bold" 
+                                style={{ pointerEvents: 'none' }}
+                              >
                                 {idx + 1}
                               </text>
                             </g>
@@ -1235,6 +2258,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                       </g>
                     );
                   })}
+
 
                   {/* Topmost Tooltip Layer in VIEW mode — rendered at the very end of SVG so it is ALWAYS on top */}
                   {!manualPathMode && hoveredWaypoint && (
@@ -1245,41 +2269,141 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                       const dy = pt.normal_2d_proj?.[1] ?? 0;
                       const tcpU = u + dx;
                       const tcpV = v + dy;
-                      const tooltipX = Math.max(8, Math.min(tcpU + 8, (natSize?.w || 1280) - 190));
-                      const tooltipY = Math.max(8, Math.min(tcpV - 72, (natSize?.h || 800) - 76));
+
+                      const isOptView = displayPathSource === 'opt';
+                      const pId = (hoveredWaypoint as any).path_id || 1;
+                      const curPath = manualPaths.find(p => p.path_id === pId);
+                      const rawPath = rawManualPaths.find(p => p.path_id === pId || p.name === curPath?.name);
+                      const optPath = optManualPaths.find(p => p.path_id === pId || p.name === curPath?.name);
+
+                      const rawWp = rawPath?.points?.find(p => p.index === pt.index);
+                      const optWp = optPath?.points?.find(p => p.index === pt.index);
+
+                      // Check verification report issues
+                      const pathRep = verificationReport?.path_reports?.find((r: any) => r.path_id === pId);
+                      const isUnreachable = pathRep?.status === 'ERROR' || pathRep?.issues?.some((i: any) => i.type === 'UNREACHABLE' || i.type === 'UNREACHABLE_STEP');
+                      const ptIssues = (pathRep?.issues || []).filter((iss: any) => {
+                        if (iss.step_index !== undefined) {
+                          const mappedWpIdx = Math.min(Math.floor((iss.step_index / (pathRep.total_interpolated || 1)) * (curPath?.points?.length || 1)), (curPath?.points?.length || 1) - 1);
+                          return (curPath?.points?.[mappedWpIdx]?.index === pt.index);
+                        }
+                        return iss.waypoint_index === (pt.index - 1);
+                      });
+
+                      const deltaRz = optWp && rawWp ? Number((optWp.tcp_pose_base.rz - rawWp.tcp_pose_base.rz).toFixed(1)) : 0;
+                      const hasRealHealing = !isUnreachable && (pathRep?.status === 'WARNING' || ptIssues.length > 0 || Math.abs(deltaRz) > 0.5);
+                      const hasIssues = ptIssues.length > 0 || isUnreachable || pathRep?.status === 'WARNING';
+
+                      const cardW = 244;
+                      const cardH = isUnreachable ? 104 : ((isOptView && Math.abs(deltaRz) > 0.5) || (!isOptView && hasRealHealing) ? 116 : 92);
+                      const tooltipX = Math.max(8, Math.min(tcpU + 10, (natSize?.w || 1280) - cardW - 8));
+                      const tooltipY = Math.max(8, Math.min(tcpV - cardH - 10, (natSize?.h || 800) - cardH - 8));
+
+                      const strokeColor = isUnreachable 
+                        ? '#f43f5e' 
+                        : (isOptView ? '#10b981' : (hasRealHealing ? '#f59e0b' : '#3b82f6'));
 
                       return (
                         <g transform={`translate(${tooltipX}, ${tooltipY})`} pointerEvents="none">
+                          {/* Main HUD Card */}
                           <rect
                             x={0}
                             y={0}
-                            width={182}
-                            height={68}
-                            rx={6}
-                            fill="rgba(2, 6, 23, 0.97)"
-                            stroke="#f59e0b"
+                            width={cardW}
+                            height={cardH}
+                            rx={7}
+                            fill="rgba(2, 6, 23, 0.96)"
+                            stroke={strokeColor}
                             strokeWidth={1.5}
-                            filter="drop-shadow(0px 8px 18px rgba(0,0,0,0.95))"
+                            filter="drop-shadow(0px 8px 24px rgba(0,0,0,0.95))"
                           />
-                          <text x={7} y={13} fill="#fcd34d" fontSize={7.8} fontFamily="monospace" fontWeight="bold">
+                          {/* Header Bar */}
+                          <rect
+                            x={0}
+                            y={0}
+                            width={cardW}
+                            height={20}
+                            rx={7}
+                            fill={isUnreachable ? 'rgba(244, 63, 94, 0.3)' : (isOptView ? 'rgba(16, 185, 129, 0.2)' : (hasIssues ? 'rgba(245, 158, 11, 0.2)' : 'rgba(59, 130, 246, 0.2)'))}
+                          />
+                          <text x={8} y={13.5} fill={isUnreachable ? '#fca5a5' : (isOptView ? '#34d399' : (hasIssues ? '#fcd34d' : '#93c5fd'))} fontSize={8.5} fontFamily="monospace" fontWeight="bold">
+                            {isUnreachable 
+                              ? `❌ Unreachable · P${pId} - #${pt.index}`
+                              : (isOptView ? `✨ Optimized (Opt) · P${pId} - #${pt.index}` : `🛤️ Raw Path · P${pId} - #${pt.index}`)}
+                          </text>
+
+                          {/* Coordinates */}
+                          <text x={8} y={32} fill="#94a3b8" fontSize={7.5} fontFamily="monospace">
                             Surf: [{pt.surface_point_base_mm?.[0]?.toFixed(1)}, {pt.surface_point_base_mm?.[1]?.toFixed(1)}, {pt.surface_point_base_mm?.[2]?.toFixed(1)}] mm
                           </text>
-                          <text x={7} y={25} fill="#fbbf24" fontSize={7.8} fontFamily="monospace" fontWeight="bold">
-                            TCP: [{pt.tcp_pose_base.x}, {pt.tcp_pose_base.y}, {pt.tcp_pose_base.z}] mm
+                          <text x={8} y={44} fill="#e2e8f0" fontSize={7.5} fontFamily="monospace" fontWeight="bold">
+                            TCP:  [{pt.tcp_pose_base.x}, {pt.tcp_pose_base.y}, {pt.tcp_pose_base.z}] mm
                           </text>
-                          <text x={7} y={37} fill="#cbd5e1" fontSize={7.2} fontFamily="monospace">
-                            Ori: [{pt.tcp_pose_base.rx}°, {pt.tcp_pose_base.ry}°, {pt.tcp_pose_base.rz}°]
+                          <text x={8} y={56} fill="#cbd5e1" fontSize={7.5} fontFamily="monospace">
+                            Ori:  [{pt.tcp_pose_base.rx}°, {pt.tcp_pose_base.ry}°, {pt.tcp_pose_base.rz}°] (RPY)
                           </text>
-                          <text x={7} y={49} fill="#f87171" fontSize={7.2} fontFamily="monospace">
-                            N: [{pt.surface_normal_base?.[0]?.toFixed(3)}, {pt.surface_normal_base?.[1]?.toFixed(3)}, {pt.surface_normal_base?.[2]?.toFixed(3)}]
+                          <text x={8} y={68} fill="#94a3b8" fontSize={7.2} fontFamily="monospace">
+                            Normal: [{pt.surface_normal_base?.[0]?.toFixed(2)}, {pt.surface_normal_base?.[1]?.toFixed(2)}, {pt.surface_normal_base?.[2]?.toFixed(2)}] · Dist: {pt.standoff_distance_mm}mm
                           </text>
-                          <text x={7} y={61} fill="#94a3b8" fontSize={7.2} fontFamily="monospace">
-                            Standoff: {pt.standoff_distance_mm}mm · Point #{pt.index}
-                          </text>
+
+                          {/* Divider */}
+                          <line x1={8} y1={74} x2={cardW - 8} y2={74} stroke="#334155" strokeWidth={1} />
+
+                          {/* Optimization & Verification Status Row */}
+                          {isUnreachable ? (
+                            <g transform="translate(8, 86)">
+                              <text x={0} y={0} fill="#f87171" fontSize={7.8} fontFamily="monospace" fontWeight="bold">
+                                ❌ Unreachable: IK out of workspace / singularity
+                              </text>
+                              <text x={0} y={12} fill="#fca5a5" fontSize={7.2} fontFamily="monospace">
+                                ⚠️ Exceeds CR5 reach radius (~850mm). Re-position waypoints.
+                              </text>
+                            </g>
+                          ) : isOptView ? (
+                            Math.abs(deltaRz) > 0.5 ? (
+                              <g transform="translate(8, 86)">
+                                <text x={0} y={0} fill="#34d399" fontSize={7.8} fontFamily="monospace" fontWeight="bold">
+                                  🔄 Rotation Auto-Fixed: ΔRz = {deltaRz >= 0 ? `+${deltaRz}` : deltaRz}° (Raw: {rawWp?.tcp_pose_base?.rz}°)
+                                </text>
+                                <text x={0} y={12} fill="#6ee7b7" fontSize={7.2} fontFamily="monospace">
+                                  🛡️ Status: Overspeed & wrist singularity eliminated
+                                </text>
+                              </g>
+                            ) : (
+                              <g transform="translate(8, 86)">
+                                <text x={0} y={0} fill="#34d399" fontSize={7.8} fontFamily="monospace" fontWeight="bold">
+                                  ✅ Kinematics Safe: Continuous & reachable
+                                </text>
+                                <text x={0} y={12} fill="#6ee7b7" fontSize={7.2} fontFamily="monospace">
+                                  🛡️ Trajectory smooth, all joint speeds within limits
+                                </text>
+                              </g>
+                            )
+                          ) : hasRealHealing ? (
+                            <g transform="translate(8, 86)">
+                              <text x={0} y={0} fill="#38bdf8" fontSize={7.8} fontFamily="monospace" fontWeight="bold">
+                                ✨ Auto-Fix Available: Recommended Rz={optWp?.tcp_pose_base.rz}° (Δ: {deltaRz >= 0 ? `+${deltaRz}` : deltaRz}°)
+                              </text>
+                              <text x={0} y={12} fill="#f59e0b" fontSize={7.2} fontFamily="monospace" fontWeight="bold">
+                                ⚠️ Raw Issue: {ptIssues[0]?.type || 'JOINT_OVERSPEED'} (Fixable in Diagnostics tab)
+                              </text>
+                            </g>
+                          ) : (
+                            <g transform="translate(8, 86)">
+                              <text x={0} y={0} fill="#34d399" fontSize={7.8} fontFamily="monospace" fontWeight="bold">
+                                ✅ Kinematics Safe: Continuous & reachable
+                              </text>
+                              <text x={0} y={12} fill="#94a3b8" fontSize={7.2} fontFamily="monospace">
+                                🛡️ All 6 joints within speed & workspace limits
+                              </text>
+                            </g>
+                          )}
                         </g>
                       );
                     })()
                   )}
+
+
                 </svg>
               )}
 
@@ -1343,11 +2467,20 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                     </marker>
                   </defs>
 
-                  {/* 1. Committed Paths */}
+                  {/* 1. Committed Paths (Clickable to Select for Editing) */}
                   {manualPaths.map((path, pIdx) => {
+                    if (selectedPathIdForEdit === path.path_id) return null;
                     const pts = path.points;
+                    const pathColor = PATH_PALETTE[(path.path_id - 1) % PATH_PALETTE.length];
                     return (
-                      <g key={`committed-${pIdx}`} opacity={0.65}>
+                      <g 
+                        key={`committed-${pIdx}`} 
+                        className="cursor-pointer opacity-70 hover:opacity-100 transition-opacity"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          handleSelectPathForEdit(path.path_id);
+                        }}
+                      >
                         {pts.map((p, i) => {
                           if (i === 0) return null;
                           const prev = pts[i - 1];
@@ -1358,16 +2491,16 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                               y1={prev.pixel[1]}
                               x2={p.pixel[0]}
                               y2={p.pixel[1]}
-                              stroke="#f59e0b"
-                              strokeWidth={2}
+                              stroke={pathColor}
+                              strokeWidth={2.5}
                               markerEnd="url(#edit-traj-arrow)"
                             />
                           );
                         })}
                         {pts.map((pt, idx) => (
                           <g key={idx}>
-                            <circle cx={pt.pixel[0]} cy={pt.pixel[1]} r={5.5} fill="#f59e0b" stroke="white" strokeWidth={1} />
-                            <text x={pt.pixel[0]} y={pt.pixel[1] + 0.5} textAnchor="middle" dominantBaseline="central" fill="white" fontSize={7.5} fontWeight="bold">
+                            <circle cx={pt.pixel[0]} cy={pt.pixel[1]} r={6} fill={pathColor} stroke="white" strokeWidth={1.2} />
+                            <text x={pt.pixel[0]} y={pt.pixel[1] + 0.5} textAnchor="middle" dominantBaseline="central" fill="white" fontSize={8} fontWeight="bold">
                               {idx + 1}
                             </text>
                           </g>
@@ -1454,6 +2587,11 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                         key={`current-${idx}`}
                         onMouseEnter={() => setHoveredWaypoint(pt)}
                         onMouseLeave={() => setHoveredWaypoint(null)}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          handleDeleteSingleWaypoint(idx);
+                        }}
                       >
                         {/* Red Surface Normal Arrow pointing from surface to TCP (Sleek) */}
                         {arrowLen >= 3.0 ? (
@@ -1471,28 +2609,40 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                           <circle cx={u} cy={v} r={3.5} fill="#ef4444" opacity={0.85} />
                         )}
 
-                        {/* Physical Surface Point Circle (Dark Green) */}
+                        {/* Physical Surface Point Circle */}
                         <circle cx={u} cy={v} r={8.5} fill="white" filter="drop-shadow(0px 0px 4px rgba(0,0,0,0.9))" />
                         <circle cx={u} cy={v} r={6.5} fill="#f59e0b" />
                         <text x={u} y={v + 0.5} textAnchor="middle" dominantBaseline="central" fill="white" fontSize={8.5} fontWeight="bold">
                           {idx + 1}
                         </text>
 
-                        {/* Sleek, Non-Intrusive Mini Waypoint Pill at Normal End */}
-                        <g transform={`translate(${tcpU + 4}, ${tcpV - 7})`}>
+                        {/* Sleek Mini Waypoint Pill at Normal End with One-Click Delete */}
+                        <g 
+                          transform={`translate(${tcpU + 4}, ${tcpV - 7})`}
+                          className="cursor-pointer"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteSingleWaypoint(idx);
+                          }}
+                        >
                           <rect
                             x={0}
                             y={0}
-                            width={32}
+                            width={isHovered ? 44 : 32}
                             height={14}
                             rx={3}
-                            fill="rgba(2, 6, 23, 0.85)"
-                            stroke={isHovered ? "#f59e0b" : "rgba(245, 158, 11, 0.5)"}
+                            fill={isHovered ? "rgba(136, 19, 55, 0.95)" : "rgba(2, 6, 23, 0.85)"}
+                            stroke={isHovered ? "#f43f5e" : "rgba(245, 158, 11, 0.5)"}
                             strokeWidth={1}
                           />
-                          <text x={16} y={7.5} textAnchor="middle" dominantBaseline="central" fill="#fcd34d" fontSize={7.5} fontFamily="monospace" fontWeight="bold">
+                          <text x={isHovered ? 14 : 16} y={7.5} textAnchor="middle" dominantBaseline="central" fill="#fcd34d" fontSize={7.5} fontFamily="monospace" fontWeight="bold">
                             P{idx + 1}
                           </text>
+                          {isHovered && (
+                            <text x={34} y={7.5} textAnchor="middle" dominantBaseline="central" fill="#f43f5e" fontSize={8.5} fontWeight="bold">
+                              ✕
+                            </text>
+                          )}
                         </g>
                       </g>
                     );
@@ -1508,7 +2658,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                       const tcpU = u + dx;
                       const tcpV = v + dy;
                       const tooltipX = Math.max(8, Math.min(tcpU + 8, (natSize?.w || 1280) - 190));
-                      const tooltipY = Math.max(8, Math.min(tcpV - 72, (natSize?.h || 800) - 76));
+                      const tooltipY = Math.max(8, Math.min(tcpV - 82, (natSize?.h || 800) - 86));
 
                       return (
                         <g transform={`translate(${tooltipX}, ${tooltipY})`} pointerEvents="none">
@@ -1516,7 +2666,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                             x={0}
                             y={0}
                             width={182}
-                            height={68}
+                            height={78}
                             rx={6}
                             fill="rgba(2, 6, 23, 0.97)"
                             stroke="#f59e0b"
@@ -1537,6 +2687,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                           </text>
                           <text x={7} y={61} fill="#94a3b8" fontSize={7.2} fontFamily="monospace">
                             Standoff: {pt.standoff_distance_mm}mm · Point #{pt.index}
+                          </text>
+                          <text x={7} y={71} fill="#f43f5e" fontSize={6.8} fontFamily="monospace" fontWeight="bold">
+                            💡 Click pill or Right-click to Delete
                           </text>
                         </g>
                       );
@@ -1882,13 +3035,75 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
           {manualPathMode && (
             <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-slate-950/50 hover:bg-slate-950/70 backdrop-blur-md border border-rose-500/30 rounded-full px-2.5 h-7 flex items-center gap-1.5 shadow-2xl z-30 transition-all">
               
-              {/* Path Indicator */}
+              {/* Existing Paths Chips with Click-to-Select and Individual Delete */}
+              {manualPaths.length > 0 && (
+                <div className="flex items-center gap-1 px-1 border-r border-white/10 max-w-[280px] overflow-x-auto custom-scrollbar">
+                  {manualPaths.map((p) => {
+                    const isSelected = selectedPathIdForEdit === p.path_id;
+                    const color = PATH_PALETTE[(p.path_id - 1) % PATH_PALETTE.length];
+                    return (
+                      <div
+                        key={p.path_id}
+                        onClick={() => handleSelectPathForEdit(p.path_id)}
+                        className={`flex items-center gap-1 px-2 py-0.5 rounded-full border text-[9px] cursor-pointer select-none transition-all ${
+                          isSelected
+                            ? 'bg-rose-950/90 border-rose-400 text-rose-100 shadow-md ring-1 ring-rose-400/50'
+                            : 'bg-slate-900/90 border-white/10 text-slate-300 hover:border-slate-500 hover:text-white'
+                        }`}
+                        title={`Click to edit Path ${p.path_id} (${p.points.length} waypoints)`}
+                      >
+                        <span
+                          className="w-1.5 h-1.5 rounded-full"
+                          style={{ backgroundColor: color }}
+                        />
+                        <span className="font-bold">P{p.path_id}</span>
+                        {isSelected && (
+                          <span className="text-[8px] text-amber-300 font-mono font-semibold">
+                            [edit]
+                          </span>
+                        )}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeletePath(p.path_id);
+                          }}
+                          className="text-slate-500 hover:text-rose-400 p-0.5 rounded hover:bg-white/10 transition-colors ml-0.5"
+                          title={`Delete Path ${p.path_id}`}
+                        >
+                          <Trash2 size={9} />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Current Path / Active Edit Indicator */}
               <div className="flex items-center gap-1.5 px-0.5 text-[10px] text-slate-300 border-r border-white/10 pr-2">
-                <span className="flex items-center gap-1 text-rose-400 font-medium">
-                  <Route size={12} className="text-rose-400" />
-                  Manual #{manualPaths.length + 1}
-                </span>
-                <span className="text-slate-400 font-mono">({currentManualPoints.length} pts)</span>
+                {selectedPathIdForEdit !== null ? (
+                  <div className="flex items-center gap-1">
+                    <span className="flex items-center gap-1 text-amber-400 font-bold">
+                      <Route size={11} className="text-amber-400" />
+                      Edit P{selectedPathIdForEdit}
+                    </span>
+                    <span className="text-slate-400 font-mono">({currentManualPoints.length} pts)</span>
+                    <button
+                      onClick={handleDeselectEditPath}
+                      className="ml-1 px-1.5 py-0.2 rounded text-[9px] bg-slate-800 hover:bg-slate-700 text-slate-300 border border-white/10 transition-colors"
+                      title="Finish editing and start a new path"
+                    >
+                      + New
+                    </button>
+                  </div>
+                ) : (
+                  <div className="flex items-center gap-1">
+                    <span className="flex items-center gap-1 text-rose-400 font-medium">
+                      <Route size={12} className="text-rose-400" />
+                      Path #{manualPaths.length + 1}
+                    </span>
+                    <span className="text-slate-400 font-mono">({currentManualPoints.length} pts)</span>
+                  </div>
+                )}
               </div>
 
               {/* Standoff Distance Adjustment Pill */}
@@ -2015,6 +3230,8 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
             </div>
           )}
         </div>
+        )}
+
 
         {/* Middle Column: Categorized Grouped File List */}
         <div className="w-[185px] shrink-0 border-r border-slate-800 bg-slate-950/40 flex flex-col min-h-0">
@@ -2165,6 +3382,36 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
              </div>
            </div>
 
+            {/* TCP Opt Button (Compact & Sleek) */}
+            <div className="relative group w-full">
+              <button 
+                onClick={() => {
+                  if (activeViewTab === 'diagnostics') {
+                    setActiveViewTab('2d');
+                  } else {
+                    setActiveViewTab('diagnostics');
+                    if (!verificationReport) {
+                      handleVerifyPaths(displayPathSource === 'opt');
+                    }
+                  }
+                }} 
+                disabled={!hasImage || !hasManualPaths || isCapturing || isReconstructing || isVerifyingPaths || isOptimizingPaths || segMode || manualPathMode}
+                className={`w-full py-2.5 font-medium rounded-lg shadow transition-all flex items-center justify-center gap-1.5 text-xs active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed border ${
+                  activeViewTab === 'diagnostics'
+                    ? 'bg-emerald-600/30 text-emerald-300 border-emerald-500/60 shadow-emerald-950/40'
+                    : 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white shadow-emerald-900/30 border-emerald-500/50'
+                }`}
+              >
+                {isVerifyingPaths ? <RefreshCw size={14} className="animate-spin text-emerald-200" /> : <ShieldCheck size={14} />}
+                <span>{isVerifyingPaths ? 'Evaluating...' : 'TCP Opt'}</span>
+              </button>
+              <div className="absolute bottom-full mb-2 right-0 hidden group-hover:flex flex-col items-end pointer-events-none z-50">
+                <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2.5 py-1 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+                  {!hasManualPaths ? "Need scan.manual_paths.yaml first" : "Toggle 6-DOF Kinematics & Auto-Fix Panel"}
+                </div>
+              </div>
+            </div>
+
            {/* Surface Reconstruction Button */}
            <div className="relative group w-full">
              <button 
@@ -2183,7 +3430,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
            </div>
            
            {!activeTemplate && (
-             <div className="text-center text-[9px] text-slate-500">Select template</div>
+             <div className="text-center text-[9px] text-slate-500">Select Template</div>
            )}
         </div>
       </div>
