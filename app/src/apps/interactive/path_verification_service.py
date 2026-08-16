@@ -189,15 +189,19 @@ class PathVerificationService:
             min_value=0.0,
             max_value=180.0,
         )
-        source = cfg.get("anchor_source") or anchor_source or "manual"
-        if source not in {"home", "live", "manual"}:
-            raise ValueError("poi_config.anchor_source must be one of: home, live, manual")
+        source = cfg.get("anchor_source") or anchor_source or "raw"
+        if source not in {"home", "live", "manual", "raw"}:
+            raise ValueError("poi_config.anchor_source must be one of: home, live, manual, raw")
+        
+        if source == "raw":
+            ref_rpy = None
+            
         return {
             "mode": "absolute_anchor_tolerance",
             "anchor_source": source,
             "ref_rpy_deg": ref_rpy,
             "tolerance_rpy_deg": tol_rpy,
-            "euler_order": "xyz",
+            "euler_order": "XYZ",
             "units": "deg",
         }
 

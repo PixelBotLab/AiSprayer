@@ -117,8 +117,8 @@ class AxialSpinOptimizer:
                 T_cand_gun = np.copy(T_orig_gun)
                 T_cand_gun[:3, :3] = T_orig_gun[:3, :3] @ R_local_spin
 
-                T_cand_flange = T_cand_gun @ self.config.T_tcp_inv
-                ik_sols = self.verifier.solver.inverse(T_cand_flange)
+                # Always use the controller matrix (T_cand_gun) for inverse kinematics
+                ik_sols = self.verifier.solver.inverse_controller_matrix(T_cand_gun)
 
                 if not ik_sols:
                     continue
@@ -130,7 +130,11 @@ class AxialSpinOptimizer:
                         dq_norm = np.linalg.norm(d)
                         max_dq_deg = np.max(np.abs(np.degrees(d)))
                     else:
-                        dq_norm = np.linalg.norm(sol)
+                        # Seed selection: prefer natural non-singular workspace branch close to Home
+                        home_q = np.array([np.pi, 0.0, np.pi/2.0, np.pi/2.0, np.pi/2.0, 0.0])
+                        d = sol - home_q
+                        d = (d + np.pi) % (2 * np.pi) - np.pi
+                        dq_norm = np.linalg.norm(d)
                         max_dq_deg = 0.0
 
                     # Singularity penalties

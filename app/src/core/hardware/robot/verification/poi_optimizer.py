@@ -54,7 +54,7 @@ class PoiConstraintOptimizer:
         tol = effective_tol if len(effective_tol) == 3 else [3.0, 15.0, 180.0]
         tol_rx, tol_ry, tol_rz = float(tol[0]), float(tol[1]), float(tol[2])
 
-        # Anchor reference matrix
+        # Anchor reference matrix (use lowercase 'xyz' matching Dobot controller / PathInterpolator convention)
         if ref_rpy_deg and len(ref_rpy_deg) == 3:
             R_ref = R_scipy.from_euler('xyz', ref_rpy_deg, degrees=True).as_matrix()
         else:
@@ -106,8 +106,8 @@ class PoiConstraintOptimizer:
                         T_cand_gun[:3, :3] = R_cand
                         T_cand_gun[:3, 3] = pos_m
 
-                        T_cand_flange = T_cand_gun @ self.config.T_tcp_inv
-                        ik_sols = self.verifier.solver.inverse(T_cand_flange)
+                        # Always use the controller matrix (T_gun) for inverse kinematics
+                        ik_sols = self.verifier.solver.inverse_controller_matrix(T_cand_gun)
 
                         if not ik_sols:
                             continue
@@ -119,7 +119,11 @@ class PoiConstraintOptimizer:
                                 dq_norm = np.linalg.norm(d)
                                 max_dq_deg = np.max(np.abs(np.degrees(d)))
                             else:
-                                dq_norm = np.linalg.norm(sol)
+                                # Seed selection: prefer natural non-singular workspace branch close to Home
+                                home_q = np.array([np.pi, 0.0, np.pi/2.0, np.pi/2.0, np.pi/2.0, 0.0])
+                                d = sol - home_q
+                                d = (d + np.pi) % (2 * np.pi) - np.pi
+                                dq_norm = np.linalg.norm(d)
                                 max_dq_deg = 0.0
 
                             # Singularity penalties

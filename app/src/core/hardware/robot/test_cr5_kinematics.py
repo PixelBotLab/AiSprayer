@@ -7,6 +7,11 @@ import unittest
 import math
 import time
 import numpy as np
+import sys
+import os
+
+# Add workspace root to sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../")))
 
 from app.src.core.hardware.robot.cr5_kinematics import CR5Kinematics
 from app.src.core.hardware.robot import cr5_ur_kin
@@ -17,32 +22,41 @@ class TestCR5Kinematics(unittest.TestCase):
 
     def test_single_case_dobot_controller(self):
         """
-        Tests against real Dobot CR5 measured pose from test_cr5_kinematics.cpp:
-        Target Joint Angles: [180.159, -0.293, 90.653, 90.066, 90.035, 0.077] deg
+        Tests against real Dobot CR5 measured pose from test_cr5_kinematics.cpp.
+        Outputs Case 1 and Case 2 poses as requested.
         """
-        q_target_deg = [180.159, -0.293, 90.653, 90.066, 90.035, 0.077]
-        q_target_rad = [math.radians(a) for a in q_target_deg]
-
-        xyz_mm, rpy_deg = self.solver.forward_controller(q_target_rad)
+        cases = [
+            ("Case 1", [180.159, -0.293, 90.653, 90.066, 90.035, 0.077]),
+            ("Case 2", [0.028, 0.009, -90.029, 90.066, 90.035, 0.077])
+        ]
         
-        # Test inverse controller
-        sols = self.solver.inverse_controller(xyz_mm, rpy_deg)
-        self.assertGreater(len(sols), 0, "Should find at least 1 IK solution")
+        print("\n--- Dobot Controller FK Outputs ---")
+        for name, q_target_deg in cases:
+            q_target_rad = [math.radians(a) for a in q_target_deg]
+            xyz_mm, rpy_deg = self.solver.forward_controller(q_target_rad)
+            
+            print(f"{name} Joint Angles (deg): {[round(x, 3) for x in q_target_deg]}")
+            print(f"{name} TCP Position (mm): XYZ = {[round(x, 2) for x in xyz_mm]}")
+            print(f"{name} TCP Orientation (deg): RPY = {[round(x, 2) for x in rpy_deg]}\n")
+            
+            # Test inverse controller
+            sols = self.solver.inverse_controller(xyz_mm, rpy_deg)
+            self.assertGreater(len(sols), 0, f"Should find at least 1 IK solution for {name}")
 
-        found_match = False
-        for sol in sols:
-            sol_deg = [math.degrees(a) for a in sol]
-            diffs = []
-            for j in range(6):
-                d = abs(sol_deg[j] - q_target_deg[j])
-                while d > 180.0:
-                    d = abs(d - 360.0)
-                diffs.append(d)
-            if max(diffs) < 0.5:
-                found_match = True
-                break
-        
-        self.assertTrue(found_match, "Should find exact matching target configuration among 8 IK solutions")
+            found_match = False
+            for sol in sols:
+                sol_deg = [math.degrees(a) for a in sol]
+                diffs = []
+                for j in range(6):
+                    d = abs(sol_deg[j] - q_target_deg[j])
+                    while d > 180.0:
+                        d = abs(d - 360.0)
+                    diffs.append(d)
+                if max(diffs) < 0.5:
+                    found_match = True
+                    break
+            
+            self.assertTrue(found_match, f"Should find exact matching target configuration among IK solutions for {name}")
 
     def test_fk_ik_closed_loop_consistency(self):
         """

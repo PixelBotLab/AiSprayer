@@ -40,11 +40,11 @@ class CR5Kinematics:
         ], dtype=np.float64)
         self.T_base_inv = self.T_base  # RotZ(180) is self-inverse
 
-        # T_tool: X_t = -Y_u, Y_t = -Z_u, Z_t = X_u
+        # T_tool: Mapped correctly to match C++ cr5_kinematics_controller mapping
         self.T_tool = np.array([
+            [ 0.0,  0.0,  1.0, 0.0],
+            [-1.0,  0.0,  0.0, 0.0],
             [ 0.0, -1.0,  0.0, 0.0],
-            [ 0.0,  0.0, -1.0, 0.0],
-            [ 1.0,  0.0,  0.0, 0.0],
             [ 0.0,  0.0,  0.0, 1.0]
         ], dtype=np.float64)
         
@@ -152,6 +152,17 @@ class CR5Kinematics:
         rz_deg = float(math.degrees(alpha))
 
         return xyz_mm, [rx_deg, ry_deg, rz_deg]
+
+    def inverse_controller_matrix(self, T_ctrl: np.ndarray) -> list[np.ndarray]:
+        """
+        Inverse kinematics from controller 4x4 pose matrix.
+        Returns multiple valid IK solutions in radians.
+        """
+        # Strip base and tool transforms
+        T_urdf = self.T_base_inv @ T_ctrl @ self.T_tool_inv
+        
+        # Calculate pure DH inverse and return (inverse already converts to controller angles)
+        return self.inverse(T_urdf)
 
     def inverse_controller(self, xyz_mm: list[float], rpy_deg: list[float]) -> list[np.ndarray]:
         """

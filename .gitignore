@@ -27,6 +27,9 @@ build_venv/
 
 # PyInstaller
 *.spec
+*.so
+*.dylib
+*.dll
 
 # 编译器/IDE
 .idea/

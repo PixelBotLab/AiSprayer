@@ -685,6 +685,24 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
                   />
                 </div>
               </div>
+              <div className="mt-2 flex items-center justify-between">
+                <span className="text-[9px] text-slate-400">Anchor Source:</span>
+                <div className="flex bg-slate-900 border border-slate-800 rounded overflow-hidden">
+                  <button
+                    className={`px-2 py-0.5 text-[9px] ${poiConfig.anchor_source === 'manual' || !poiConfig.anchor_source ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}
+                    onClick={() => setPoiConfig((prev) => ({ ...prev, anchor_source: 'manual' }))}
+                  >
+                    Manual
+                  </button>
+                  <button
+                    className={`px-2 py-0.5 text-[9px] ${poiConfig.anchor_source === 'raw' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}
+                    onClick={() => setPoiConfig((prev) => ({ ...prev, anchor_source: 'raw' }))}
+                    title="Use raw trajectory surface normal"
+                  >
+                    RAW Path
+                  </button>
+                </div>
+              </div>
             </div>
 
             {/* Tolerance Envelope Section */}
@@ -773,6 +791,7 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
                   setPoiConfig({
                     ref_rpy_deg: [180.0, 0.0, 0.0],
                     tolerance_rpy_deg: [3.0, 15.0, 180.0],
+                    anchor_source: 'raw'
                   })
                 }
                 className="px-2.5 py-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-medium transition-colors"

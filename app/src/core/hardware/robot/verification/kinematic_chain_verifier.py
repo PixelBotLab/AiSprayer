@@ -64,8 +64,9 @@ class KinematicChainVerifier:
         trajectory_q = []
 
         # 1. Solve initial waypoint seed configuration
-        first_T_flange = dense_points[0][1]
-        ik_sols_first = self.solver.inverse(first_T_flange)
+        # Pass T_gun (T_ctrl) directly to inverse_controller_matrix to avoid double-application of base/tool transforms
+        first_T_gun = dense_points[0][0]
+        ik_sols_first = self.solver.inverse_controller_matrix(first_T_gun)
 
         if not ik_sols_first:
             loc_xyz = [round(float(x), 2) for x in dense_points[0][0][:3, 3] * 1000.0]
@@ -89,12 +90,17 @@ class KinematicChainVerifier:
                 "trajectory_tcp": []
             }
 
-        if init_q is not None:
-            q_ref = np.array(init_q, dtype=np.float64)
-            best_idx = np.argmin([np.linalg.norm(q - q_ref) for q in ik_sols_first])
-            curr_q = ik_sols_first[best_idx]
-        else:
-            curr_q = ik_sols_first[0]
+        # Choose seed configuration closest to init_q (or standard home posture) with angular difference unwrapping
+        default_seed_q = np.array([PI, 0.0, PI / 2.0, PI / 2.0, PI / 2.0, 0.0], dtype=np.float64)
+        q_ref = np.array(init_q, dtype=np.float64) if init_q is not None else default_seed_q
+        
+        branch_diffs = []
+        for sol in ik_sols_first:
+            d = (sol - q_ref + PI) % (2 * PI) - PI
+            branch_diffs.append(np.linalg.norm(d))
+        
+        best_idx = int(np.argmin(branch_diffs))
+        curr_q = ik_sols_first[best_idx]
 
         trajectory_q.append(curr_q.tolist())
 
@@ -102,7 +108,8 @@ class KinematicChainVerifier:
         for step_idx in range(1, total_steps):
             T_gun, T_flange, dt, seg_idx = dense_points[step_idx]
 
-            ik_sols = self.solver.inverse(T_flange)
+            # Always use the controller matrix (T_gun) for inverse kinematics
+            ik_sols = self.solver.inverse_controller_matrix(T_gun)
             if not ik_sols:
                 loc_xyz = [round(float(x), 2) for x in T_gun[:3, 3] * 1000.0]
                 logger.error(f"❌ [KinematicChainVerifier] Path {path_id} [UNREACHABLE]: Step {step_idx}/{total_steps} (Seg {seg_idx}) at XYZ={loc_xyz}")
