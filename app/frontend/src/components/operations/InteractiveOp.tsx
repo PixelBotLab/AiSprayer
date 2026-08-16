@@ -701,33 +701,33 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
           renderPolygons={renderPolygons}
         />
 
-        {/* Column 2: Middle Column (Categorized File List OR Diagnostics Dashboard) */}
-        {!showDiagnostics ? (
-          <TemplateFileList
-            files={files}
-            onOpenDeleteFileModal={(f) => {
-              if (!activeTemplate) return;
-              setModalConfig({
-                isOpen: true,
-                title: 'Delete File',
-                message: `Delete file '${f}' from template '${activeTemplate}'?`,
-                type: 'confirm',
-                onConfirm: async () => {
-                  try {
-                    const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/files/${f}`, {
-                      method: 'DELETE',
-                    });
-                    if (!res.ok) throw new Error('Failed to delete file');
-                    await handleSelectTemplate(activeTemplate);
-                  } catch (err: any) {
-                    alert(err.message);
-                  }
-                },
-              });
-            }}
-          />
-        ) : (
-          <div className="w-[280px] h-full border-r border-slate-800 bg-slate-900 shadow-2xl flex flex-col shrink-0">
+        {/* Column 2: Middle Column (Consistent Width w-[230px] for both Files and TCP Opt) */}
+        <div className="w-[230px] shrink-0 border-r border-slate-800 bg-slate-950/40 flex flex-col h-full min-h-0 overflow-hidden">
+          {!showDiagnostics ? (
+            <TemplateFileList
+              files={files}
+              onOpenDeleteFileModal={(f) => {
+                if (!activeTemplate) return;
+                setModalConfig({
+                  isOpen: true,
+                  title: 'Delete File',
+                  message: `Delete file '${f}' from template '${activeTemplate}'?`,
+                  type: 'confirm',
+                  onConfirm: async () => {
+                    try {
+                      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/files/${f}`, {
+                        method: 'DELETE',
+                      });
+                      if (!res.ok) throw new Error('Failed to delete file');
+                      await handleSelectTemplate(activeTemplate);
+                    } catch (err: any) {
+                      alert(err.message);
+                    }
+                  },
+                });
+              }}
+            />
+          ) : (
             <DiagnosticsDashboard
               verificationReport={verificationReport}
               isVerifying={isVerifying}
@@ -748,8 +748,8 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
               onToggleUseOptimized={handleToggleUseOptimized}
               onClose={() => setShowDiagnostics(false)}
             />
-          </div>
-        )}
+          )}
+        </div>
 
         {/* Column 3: Narrow Fixed Action Buttons on Far Right */}
         <InteractiveActionColumn

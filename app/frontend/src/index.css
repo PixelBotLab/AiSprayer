@@ -7,23 +7,40 @@ body {
   color: #e2e8f0; /* slate-200 */
 }
 
-/* Elegant Dark Theme Scrollbar */
+/* Global Elegant Dark Theme Scrollbar */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.2);
+}
+
+::-webkit-scrollbar-thumb {
+  background-color: #334155; /* slate-700 */
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: #475569; /* slate-600 */
+}
+
 .custom-scrollbar::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
 }
 
 .custom-scrollbar::-webkit-scrollbar-track {
-  background: rgba(15, 23, 42, 0.3); /* slate-900 with transparency */
-  border-radius: 6px;
+  background: rgba(15, 23, 42, 0.2);
 }
 
 .custom-scrollbar::-webkit-scrollbar-thumb {
-  background-color: #334155; /* slate-700 */
-  border-radius: 6px;
-  border: 1px solid rgba(15, 23, 42, 0.5); /* slight border for separation */
+  background-color: #334155;
+  border-radius: 9999px;
 }
 
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background-color: #475569; /* slate-600 */
+  background-color: #475569;
 }
+

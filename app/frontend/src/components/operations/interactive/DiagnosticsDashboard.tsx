@@ -59,7 +59,7 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
   onClose,
 }) => {
   return (
-    <div className="h-full flex flex-col bg-slate-900 overflow-y-auto select-none">
+    <div className="w-full h-full flex flex-col bg-slate-900 overflow-y-auto select-none custom-scrollbar">
       {/* Header Bar */}
       <div className="p-2.5 border-b border-slate-800 bg-slate-950/80 sticky top-0 z-10 flex items-center justify-between">
         <div className="flex items-center gap-1.5 min-w-0">
