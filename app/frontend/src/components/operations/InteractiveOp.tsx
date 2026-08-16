@@ -1,5 +1,10 @@
-import React, { useState, useEffect, type MouseEvent } from 'react';
+import React, { useState, useEffect, useRef, type MouseEvent } from 'react';
 import { CustomModal, type ModalConfig } from '../common/CustomModal';
+import {
+  Play,
+  Pause,
+  X,
+} from 'lucide-react';
 
 import type {
   FileItem,
@@ -12,7 +17,11 @@ import type {
   VerificationReport,
   SessionData,
   LiveNormalInfo,
+  PathStateType,
+  PoiConfig,
+  SimulationState,
 } from './interactive/types';
+import { STATE_THEMES } from './interactive/types';
 import { computeNormalClientSide } from './interactive/normalComputation';
 import { InteractiveCanvas } from './interactive/InteractiveCanvas';
 import { TemplateTopBar } from './interactive/TemplateFileManager';
@@ -25,6 +34,33 @@ interface InteractiveOpProps {
   onTemplateChange?: (templateName: string | null) => void;
   onMeshUpdated?: () => void;
   onPathsUpdated?: () => void;
+  onPathStateChange?: (state: PathStateType) => void;
+  onSimulationJointsChange?: (joints: number[] | null) => void;
+}
+
+function projectBasePointToPixel(
+  posBaseMm: [number, number, number],
+  T_base_cam: number[],
+  intrinsics: { fx: number; fy: number; cx: number; cy: number }
+): [number, number] | null {
+  if (!T_base_cam || T_base_cam.length < 16) return null;
+  const R00 = T_base_cam[0], R01 = T_base_cam[1], R02 = T_base_cam[2], tx = T_base_cam[3];
+  const R10 = T_base_cam[4], R11 = T_base_cam[5], R12 = T_base_cam[6], ty = T_base_cam[7];
+  const R20 = T_base_cam[8], R21 = T_base_cam[9], R22 = T_base_cam[10], tz = T_base_cam[11];
+
+  const dx = posBaseMm[0] - tx;
+  const dy = posBaseMm[1] - ty;
+  const dz = posBaseMm[2] - tz;
+
+  const Xc = R00 * dx + R10 * dy + R20 * dz;
+  const Yc = R01 * dx + R11 * dy + R21 * dz;
+  const Zc = R02 * dx + R12 * dy + R22 * dz;
+
+  if (Zc <= 10.0) return null;
+
+  const u = (intrinsics.fx * Xc) / Zc + intrinsics.cx;
+  const v = (intrinsics.fy * Yc) / Zc + intrinsics.cy;
+  return [Math.round(u * 10) / 10, Math.round(v * 10) / 10];
 }
 
 const InteractiveOp: React.FC<InteractiveOpProps> = ({
@@ -32,6 +68,8 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   onTemplateChange,
   onMeshUpdated,
   onPathsUpdated,
+  onPathStateChange,
+  onSimulationJointsChange,
 }) => {
   // ─── 1. Template & File State ──────────────────────────────────────────
   const [templates, setTemplates] = useState<string[]>([]);
@@ -56,12 +94,13 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const [savedMasks, setSavedMasks] = useState<MaskData[]>([]);
   const [showMasksOverlay, setShowMasksOverlay] = useState<boolean>(true);
 
-  // ─── 4. Manual TCP Path State ───────────────────────────────────────────
+  // ─── 4. Three-State Manual TCP Path State (RAW / OPT / POI) ──────────────
+  const [activeState, setActiveState] = useState<PathStateType>('raw');
   const [manualPathMode, setManualPathMode] = useState<boolean>(false);
   const [manualPaths, setManualPaths] = useState<ManualPathItem[]>([]);
   const [rawPaths, setRawPaths] = useState<ManualPathItem[]>([]);
   const [optPaths, setOptPaths] = useState<ManualPathItem[]>([]);
-  const [usingOptimizedPaths, setUsingOptimizedPaths] = useState<boolean>(false);
+  const [poiPaths, setPoiPaths] = useState<ManualPathItem[]>([]);
   const [currentManualPoints, setCurrentManualPoints] = useState<WaypointItem[]>([]);
   const [selectedPathIdForEdit, setSelectedPathIdForEdit] = useState<number | null>(null);
   const [standoffDistMm, setStandoffDistMm] = useState<number>(150.0);
@@ -72,23 +111,51 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const [mousePixel, setMousePixel] = useState<{ u: number; v: number } | null>(null);
   const [liveNormal, setLiveNormal] = useState<LiveNormalInfo | null>(null);
 
-  // ─── 5. Diagnostics & Verification State ────────────────────────────────
+  // ─── 5. Three-State Diagnostics & Verification State ─────────────────────
   const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
-  const [verificationReport, setVerificationReport] = useState<VerificationReport | null>(null);
+  const [rawReport, setRawReport] = useState<VerificationReport | null>(null);
+  const [optReport, setOptReport] = useState<VerificationReport | null>(null);
+  const [poiReport, setPoiReport] = useState<VerificationReport | null>(null);
   const [isVerifying, setIsVerifying] = useState<boolean>(false);
   const [isOptimizing, setIsOptimizing] = useState<boolean>(false);
-  const [isKinParamsOpen, setIsKinParamsOpen] = useState<boolean>(true);
+  const [isKinParamsOpen, setIsKinParamsOpen] = useState<boolean>(false);
   const [urdfTcpInfo, setUrdfTcpInfo] = useState<UrdfTcpInfo | null>(null);
   const [kinParams, setKinParams] = useState<KinematicsParams>({
     stepSizeMm: 1.5,
     linearSpeedMmS: 120.0,
+  });
+  const [poiConfig, setPoiConfig] = useState<PoiConfig>({
+    ref_rpy_deg: [0.0, 0.0, 0.0],
+    tolerance_rpy_deg: [3.0, 15.0, 180.0],
   });
 
   // ─── 6. Action Execution State ──────────────────────────────────────────
   const [isCapturing, setIsCapturing] = useState<boolean>(false);
   const [isReconstructing, setIsReconstructing] = useState<boolean>(false);
 
-  // ─── 7. Modal Dialog Config ─────────────────────────────────────────────
+  // ─── 7. 3D/2D Synchronized Simulation Engine State (Feature 7) ───────────
+  const [simulationState, setSimulationState] = useState<SimulationState | null>(null);
+  const simAnimFrameRef = useRef<number | null>(null);
+  const simDataRef = useRef<{
+    steps: Array<{
+      q_deg: number[];
+      tcp: { x: number; y: number; z: number; rx: number; ry: number; rz: number };
+      pixel: [number, number] | null;
+      pathIdx: number;
+    }>;
+    stepIndex: number;
+    speedMultiplier: number;
+    isPlaying: boolean;
+    stateType: PathStateType;
+  }>({
+    steps: [],
+    stepIndex: 0,
+    speedMultiplier: 1.0,
+    isPlaying: false,
+    stateType: 'raw',
+  });
+
+  // ─── 8. Modal Dialog Config ─────────────────────────────────────────────
   const [modalConfig, setModalConfig] = useState<ModalConfig | null>(null);
 
   // Sync external active template
@@ -139,6 +206,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   };
 
   const handleSelectTemplate = async (templateName: string) => {
+    stopSimulation();
     setActiveTemplate(templateName);
     if (onTemplateChange) onTemplateChange(templateName);
 
@@ -166,10 +234,19 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
 
       const raw = summary.raw_paths || [];
       const opt = summary.opt_paths || [];
+      const poi = summary.poi_paths || [];
       setRawPaths(raw);
       setOptPaths(opt);
-      setManualPaths(opt.length > 0 ? opt : raw);
-      setUsingOptimizedPaths(opt.length > 0);
+      setPoiPaths(poi);
+
+      // Determine initial active state (prefer POI if exists, then OPT, then RAW)
+      let initialSt: PathStateType = 'raw';
+      if (poi.length > 0) initialSt = 'poi';
+      else if (opt.length > 0) initialSt = 'opt';
+
+      setActiveState(initialSt);
+      setManualPaths(initialSt === 'poi' ? poi : (initialSt === 'opt' ? opt : raw));
+      if (onPathStateChange) onPathStateChange(initialSt);
 
       if (summary.standoff_distance_mm) {
         setStandoffDistMm(summary.standoff_distance_mm);
@@ -179,8 +256,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         setUrdfTcpInfo(summary.urdf_tcp);
       }
 
-      const activeReport = opt.length > 0 ? summary.opt_report : summary.raw_report;
-      setVerificationReport(activeReport || null);
+      setRawReport(summary.raw_report || null);
+      setOptReport(summary.opt_report || null);
+      setPoiReport(summary.poi_report || null);
 
       if (summary.has_image) {
         const newImgUrl = `http://localhost:8000/templates/${templateName}/scan.jpg?v=${Date.now()}`;
@@ -203,8 +281,8 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         setNatSize(null);
       }
 
-      // Load session depth data for client-side normal computation
-      loadSessionData(templateName);
+      // Load session depth data for client-side normal computation and projection
+      await loadSessionData(templateName);
     } catch (err) {
       console.error('Failed to load template atomic summary:', err);
     } finally {
@@ -234,8 +312,17 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         calib_source: data.calib_source,
       });
     } catch (err) {
-      console.warn('Failed to load session depth data, server-side sampling fallback active:', err);
+      console.warn('Failed to load session depth data:', err);
     }
+  };
+
+  // State Switcher (RAW / OPT / POI)
+  const handleSelectActiveState = (newState: PathStateType) => {
+    setActiveState(newState);
+    const targetPaths = newState === 'poi' ? poiPaths : (newState === 'opt' ? optPaths : rawPaths);
+    setManualPaths(targetPaths);
+    if (onPathStateChange) onPathStateChange(newState);
+    if (onPathsUpdated) onPathsUpdated();
   };
 
   // ─── SAM Segmentation Handlers ──────────────────────────────────────────
@@ -298,52 +385,37 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          points: pts.map((p) => [p.x, p.y]),
-          labels: pts.map((p) => p.label),
+          point_coords: pts.map((p) => [p.x, p.y]),
+          point_labels: pts.map((p) => p.label),
         }),
       });
-      if (!res.ok) return;
+      if (!res.ok) throw new Error('Predict failed');
       const data = await res.json();
       setCurrentPolygons(data.polygons || []);
     } catch (err) {
-      console.error('Failed to predict SAM mask:', err);
+      console.error('SAM predict error:', err);
     }
   };
 
   const handleCommitCurrentSegMask = () => {
     if (currentPolygons.length === 0) return;
-    setCommittedMasks([
-      ...committedMasks,
-      { id: committedMasks.length + 1, points: currentPoints, polygons: currentPolygons },
-    ]);
+    const newMask: MaskData = {
+      id: committedMasks.length + 1,
+      points: [...currentPoints],
+      polygons: currentPolygons,
+    };
+    setCommittedMasks([...committedMasks, newMask]);
     setCurrentPoints([]);
     setCurrentPolygons([]);
   };
 
-  const fetchTemplateFiles = async (templateName: string) => {
-    try {
-      const res = await fetch(`http://localhost:8000/api/interactive/templates/${templateName}/files`);
-      if (res.ok) {
-        const data = await res.json();
-        setFiles(data.files || []);
-      }
-    } catch (err) {
-      console.error('Failed to fetch template files:', err);
-    }
-  };
-
   const handleSaveAllSegMasks = async () => {
-    if (!activeTemplate || committedMasks.length === 0) return;
+    if (!activeTemplate) return;
     try {
-      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/sam/save`, {
+      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/masks`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          committed_masks: committedMasks.map((m) => ({
-            points: m.points ? m.points.map((p) => [p.x, p.y]) : [],
-            labels: m.points ? m.points.map((p) => p.label) : [],
-          })),
-        }),
+        body: JSON.stringify({ masks: committedMasks }),
       });
       if (!res.ok) throw new Error('Failed to save masks');
       setSavedMasks(committedMasks);
@@ -352,7 +424,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       setModalConfig({
         isOpen: true,
         title: 'Success',
-        message: 'Masks saved successfully to scan.masks.yaml',
+        message: `Saved ${committedMasks.length} segment masks successfully.`,
         type: 'alert',
       });
     } catch (err: any) {
@@ -365,107 +437,66 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     }
   };
 
-  // ─── Manual TCP Path Designer Handlers ──────────────────────────────────
+  const fetchTemplateFiles = async (templateName: string) => {
+    try {
+      const res = await fetch(`http://localhost:8000/api/interactive/templates/${templateName}/files`);
+      if (res.ok) {
+        const data = await res.json();
+        setFiles(data.files || []);
+      }
+    } catch (err) {
+      console.error('Failed to refresh files:', err);
+    }
+  };
+
+  // ─── Manual TCP Path Handlers ───────────────────────────────────────────
   const handleManualMouseMove = (e: MouseEvent<SVGSVGElement>) => {
-    if (!natSize) return;
+    if (!manualPathMode || !natSize || isSpacePressed) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const u = Math.round(((e.clientX - rect.left) / rect.width) * natSize.w);
     const v = Math.round(((e.clientY - rect.top) / rect.height) * natSize.h);
-
-    if (u < 0 || u >= natSize.w || v < 0 || v >= natSize.h) {
-      setMousePixel(null);
-      setLiveNormal(null);
-      return;
-    }
-
     setMousePixel({ u, v });
+
     if (sessionData) {
-      const norm = computeNormalClientSide(sessionData, u, v, standoffDistMm);
-      if (norm) {
+      const res = computeNormalClientSide(sessionData, u, v, standoffDistMm);
+      if (res) {
         setLiveNormal({
-          dx: norm.proj_dx,
-          dy: norm.proj_dy,
-          surfPointBase: norm.surf_base,
-          normalBase: norm.normal_base,
+          dx: res.proj_dx,
+          dy: res.proj_dy,
+          surfPointBase: res.surf_base,
+          normalBase: res.normal_base,
           tcpPose: {
-            x: norm.tcp_base[0],
-            y: norm.tcp_base[1],
-            z: norm.tcp_base[2],
-            rx: norm.euler_deg[0],
-            ry: norm.euler_deg[1],
-            rz: norm.euler_deg[2],
+            x: res.tcp_base[0],
+            y: res.tcp_base[1],
+            z: res.tcp_base[2],
+            rx: res.euler_deg[0],
+            ry: res.euler_deg[1],
+            rz: res.euler_deg[2],
           },
         });
-      } else {
-        setLiveNormal(null);
       }
     }
   };
 
-  const handleManualImageClick = async (e: MouseEvent<SVGSVGElement>) => {
-    if (!manualPathMode || !natSize || !activeTemplate || isSpacePressed) return;
-    e.preventDefault();
-
+  const handleManualImageClick = (e: MouseEvent<SVGSVGElement>) => {
+    if (!manualPathMode || !natSize || isSpacePressed || !liveNormal?.surfPointBase || !liveNormal?.tcpPose) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const u = Math.round(((e.clientX - rect.left) / rect.width) * natSize.w);
     const v = Math.round(((e.clientY - rect.top) / rect.height) * natSize.h);
 
-    // 1. Client-side instant calculation if sessionData is ready
-    if (sessionData) {
-      const norm = computeNormalClientSide(sessionData, u, v, standoffDistMm);
-      if (norm) {
-        const newWp: WaypointItem = {
-          index: currentManualPoints.length + 1,
-          pixel: [u, v],
-          surface_point_cam_mm: norm.surf_cam,
-          surface_point_base_mm: norm.surf_base,
-          surface_normal_base: norm.normal_base,
-          surface_normal_cam: norm.normal_cam,
-          standoff_distance_mm: standoffDistMm,
-          tcp_pose_base: {
-            x: norm.tcp_base[0],
-            y: norm.tcp_base[1],
-            z: norm.tcp_base[2],
-            rx: norm.euler_deg[0],
-            ry: norm.euler_deg[1],
-            rz: norm.euler_deg[2],
-          },
-          normal_2d_proj: [norm.proj_dx, norm.proj_dy],
-        };
-        setCurrentManualPoints((prev) => [...prev, newWp]);
-        return;
-      }
-    }
+    const newWaypoint: WaypointItem = {
+      index: currentManualPoints.length + 1,
+      pixel: [u, v],
+      surface_point_cam_mm: [0, 0, 0],
+      surface_point_base_mm: liveNormal.surfPointBase,
+      surface_normal_base: liveNormal.normalBase || [0, 0, 1],
+      surface_normal_cam: [0, 0, 1],
+      standoff_distance_mm: standoffDistMm,
+      tcp_pose_base: liveNormal.tcpPose,
+      normal_2d_proj: [liveNormal.dx, liveNormal.dy],
+    };
 
-    // 2. Server-side fallback sampling
-    try {
-      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/sample_point`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ u, v, standoff_dist_mm: standoffDistMm }),
-      });
-      if (!res.ok) throw new Error('Failed to sample point');
-      const pointData = await res.json();
-      const newWp: WaypointItem = {
-        index: currentManualPoints.length + 1,
-        pixel: [u, v],
-        surface_point_cam_mm: pointData.surface_point_cam_mm,
-        surface_point_base_mm: pointData.surface_point_base_mm,
-        surface_normal_base: pointData.surface_normal_base,
-        surface_normal_cam: pointData.surface_normal_cam,
-        standoff_distance_mm: standoffDistMm,
-        tcp_pose_base: pointData.tcp_pose_base,
-        normal_2d_proj: pointData.normal_2d_proj,
-      };
-      setCurrentManualPoints((prev) => [...prev, newWp]);
-    } catch (err) {
-      setModalConfig({
-        isOpen: true,
-        title: 'Invalid Waypoint',
-        message: 'No valid 3D depth found at this pixel location. Please click on the scanned surface.',
-        type: 'alert',
-      });
-    }
+    setCurrentManualPoints([...currentManualPoints, newWaypoint]);
   };
 
   const handleCommitManualPath = () => {
@@ -481,14 +512,12 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       setSelectedPathIdForEdit(null);
     } else {
       const newPathId = manualPaths.length > 0 ? Math.max(...manualPaths.map((p) => p.path_id)) + 1 : 1;
-      setManualPaths([
-        ...manualPaths,
-        {
-          path_id: newPathId,
-          name: `Path_${newPathId}`,
-          points: currentManualPoints,
-        },
-      ]);
+      const newPath: ManualPathItem = {
+        path_id: newPathId,
+        name: `Path ${newPathId}`,
+        points: currentManualPoints,
+      };
+      setManualPaths([...manualPaths, newPath]);
     }
     setCurrentManualPoints([]);
   };
@@ -496,7 +525,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const handleSaveManualPaths = async () => {
     if (!activeTemplate) return;
     try {
-      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/manual_paths`, {
+      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/manual_paths?state_type=raw`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -506,13 +535,14 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       });
       if (!res.ok) throw new Error('Failed to save manual paths');
       setRawPaths(manualPaths);
+      setActiveState('raw');
       setManualPathMode(false);
       await fetchTemplateFiles(activeTemplate);
       if (onPathsUpdated) onPathsUpdated();
       setModalConfig({
         isOpen: true,
         title: 'Success',
-        message: `Saved ${manualPaths.length} TCP paths successfully.`,
+        message: `Saved ${manualPaths.length} TCP paths to raw.path.yaml.`,
         type: 'alert',
       });
     } catch (err: any) {
@@ -525,16 +555,17 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     }
   };
 
-  // ─── Diagnostics & Auto-Fix Handlers ────────────────────────────────────
-  const handleRunDiagnostics = async () => {
+  // ─── Diagnostics & POI Optimization Handlers ────────────────────────────
+  const handleRunDiagnostics = async (targetState?: PathStateType) => {
     if (!activeTemplate) return;
+    const st = targetState || activeState;
     setIsVerifying(true);
     try {
       const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/verify_paths`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          use_opt: usingOptimizedPaths,
+          state_type: st,
           options: {
             step_size_mm: kinParams.stepSizeMm,
             linear_velocity_mm_s: kinParams.linearSpeedMmS,
@@ -543,7 +574,10 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       });
       if (!res.ok) throw new Error('Verification failed');
       const data = await res.json();
-      setVerificationReport(data);
+      if (st === 'poi') setPoiReport(data);
+      else if (st === 'opt') setOptReport(data);
+      else setRawReport(data);
+
       setShowDiagnostics(true);
     } catch (err: any) {
       setModalConfig({
@@ -557,11 +591,11 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     }
   };
 
-  const handleApplyOptimization = async () => {
+  const handleApplyOptimization = async (mode: 'opt' | 'poi') => {
     if (!activeTemplate) return;
     setIsOptimizing(true);
     try {
-      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/optimize_paths`, {
+      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/optimize_paths?mode=${mode}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -569,20 +603,32 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
             step_size_mm: kinParams.stepSizeMm,
             linear_velocity_mm_s: kinParams.linearSpeedMmS,
           },
+          poi_config: poiConfig,
         }),
       });
-      if (!res.ok) throw new Error('Optimization failed');
+      if (!res.ok) throw new Error(`${mode.toUpperCase()} Optimization failed`);
       const data = await res.json();
-      setOptPaths(data.optimized_paths || []);
-      setManualPaths(data.optimized_paths || []);
-      setUsingOptimizedPaths(true);
-      setVerificationReport(data.verification_report || null);
+
+      const rep = data.verification_report || data;
+      const paths = data.optimized_paths || [];
+
+      if (mode === 'poi') {
+        setPoiPaths(paths);
+        setPoiReport(rep);
+        handleSelectActiveState('poi');
+      } else {
+        setOptPaths(paths);
+        setOptReport(rep);
+        handleSelectActiveState('opt');
+      }
+
+      await fetchTemplateFiles(activeTemplate);
       setShowDiagnostics(true);
       if (onPathsUpdated) onPathsUpdated();
       setModalConfig({
         isOpen: true,
-        title: 'Optimization Applied',
-        message: 'Path orientations auto-fixed using axial rotation tolerance.',
+        title: `${mode.toUpperCase()} Optimization Applied`,
+        message: `Generated ${mode.toUpperCase()} paths and updated diagnostics report.`,
         type: 'alert',
       });
     } catch (err: any) {
@@ -597,10 +643,259 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     }
   };
 
-  const handleToggleUseOptimized = (useOpt: boolean) => {
-    setUsingOptimizedPaths(useOpt);
-    setManualPaths(useOpt ? optPaths : rawPaths);
-    if (onPathsUpdated) onPathsUpdated();
+  const handleFetchAnchorPose = async (source: 'home' | 'live') => {
+    try {
+      const res = await fetch(`http://localhost:8000/api/interactive/robot/anchor_pose?source=${source}`);
+      if (!res.ok) throw new Error('Failed to fetch anchor pose');
+      const data = await res.json();
+      setPoiConfig((prev) => ({
+        ...prev,
+        ref_rpy_deg: data.rpy_deg || prev.ref_rpy_deg,
+      }));
+      setModalConfig({
+        isOpen: true,
+        title: 'Anchor Pose Updated',
+        message: `Captured ${source.toUpperCase()} pose: [${data.rpy_deg.map((v: number) => v.toFixed(1)).join(', ')}]°`,
+        type: 'alert',
+      });
+    } catch (err: any) {
+      setModalConfig({
+        isOpen: true,
+        title: 'Anchor Pose Error',
+        message: err.message,
+        type: 'alert',
+      });
+    }
+  };
+
+  // ─── 3D/2D Synchronized Simulation Engine (Feature 7) ────────────────────
+  const startSimulation = (stateType: PathStateType = activeState) => {
+    stopSimulation();
+    const rep = stateType === 'poi' ? poiReport : (stateType === 'opt' ? optReport : rawReport);
+    if (!rep?.path_reports || rep.path_reports.length === 0) {
+      setModalConfig({
+        isOpen: true,
+        title: 'Simulation Notice',
+        message: `No trajectory simulation steps found for ${stateType.toUpperCase()}. Running diagnostics first...`,
+        type: 'alert',
+      });
+      handleRunDiagnostics(stateType);
+      return;
+    }
+
+    // Build dense playback steps
+    const simSteps: Array<{
+      q_deg: number[];
+      tcp: { x: number; y: number; z: number; rx: number; ry: number; rz: number };
+      pixel: [number, number] | null;
+      pathIdx: number;
+    }> = [];
+
+    rep.path_reports.forEach((pr, pIdx) => {
+      const tq = pr.trajectory_q || [];
+      const tt = pr.trajectory_tcp || [];
+      const totalPSteps = Math.min(tq.length, tt.length);
+
+      for (let s = 0; s < totalPSteps; s++) {
+        const q_rad = tq[s];
+        const q_deg = q_rad.map((r) => (r * 180.0) / Math.PI);
+        const tcpArr = tt[s];
+        const tcpPose = {
+          x: tcpArr[0],
+          y: tcpArr[1],
+          z: tcpArr[2],
+          rx: tcpArr[3],
+          ry: tcpArr[4],
+          rz: tcpArr[5],
+        };
+
+        // Project base 3D point to 2D pixel
+        let pixelProj: [number, number] | null = null;
+        if (sessionData) {
+          pixelProj = projectBasePointToPixel(
+            [tcpArr[0], tcpArr[1], tcpArr[2]],
+            sessionData.T,
+            { fx: sessionData.fx, fy: sessionData.fy, cx: sessionData.cx, cy: sessionData.cy }
+          );
+        }
+
+        simSteps.push({
+          q_deg,
+          tcp: tcpPose,
+          pixel: pixelProj,
+          pathIdx: pIdx,
+        });
+      }
+    });
+
+    if (simSteps.length === 0) {
+      setModalConfig({
+        isOpen: true,
+        title: 'Simulation Notice',
+        message: `No interpolated trajectory steps available for ${stateType.toUpperCase()}.`,
+        type: 'alert',
+      });
+      return;
+    }
+
+    simDataRef.current = {
+      steps: simSteps,
+      stepIndex: 0,
+      speedMultiplier: simulationState?.speed || 1.0,
+      isPlaying: true,
+      stateType: stateType,
+    };
+
+    setSimulationState({
+      isPlaying: true,
+      progress: 0,
+      speed: simDataRef.current.speedMultiplier,
+      currentPathIndex: 0,
+      currentStep: 0,
+      totalSteps: simSteps.length,
+      currentJoints: simSteps[0].q_deg,
+      currentTcpPose: simSteps[0].tcp,
+      currentPixel: simSteps[0].pixel,
+      activeState: stateType,
+    });
+
+    // Start 60 FPS animation loop
+    let lastTime = performance.now();
+    const animate = (time: number) => {
+      const dt = (time - lastTime) / 1000.0;
+      lastTime = time;
+
+      const sim = simDataRef.current;
+      if (!sim.isPlaying || sim.steps.length === 0) return;
+
+      // Advance step based on speed multiplier (nominal MoveL step rate ~ 60 steps/sec)
+      const stepIncrement = Math.max(1, Math.round(60 * dt * sim.speedMultiplier));
+      sim.stepIndex += stepIncrement;
+
+      if (sim.stepIndex >= sim.steps.length) {
+        sim.stepIndex = 0; // Loop or finish
+      }
+
+      const curr = sim.steps[sim.stepIndex];
+      const prog = sim.stepIndex / (sim.steps.length - 1);
+
+      setSimulationState({
+        isPlaying: true,
+        progress: prog,
+        speed: sim.speedMultiplier,
+        currentPathIndex: curr.pathIdx,
+        currentStep: sim.stepIndex,
+        totalSteps: sim.steps.length,
+        currentJoints: curr.q_deg,
+        currentTcpPose: curr.tcp,
+        currentPixel: curr.pixel,
+        activeState: sim.stateType,
+      });
+
+      if (onSimulationJointsChange) {
+        onSimulationJointsChange(curr.q_deg);
+      }
+
+      simAnimFrameRef.current = requestAnimationFrame(animate);
+    };
+
+    simAnimFrameRef.current = requestAnimationFrame(animate);
+  };
+
+  const pauseSimulation = () => {
+    if (simAnimFrameRef.current) cancelAnimationFrame(simAnimFrameRef.current);
+    simDataRef.current.isPlaying = false;
+    setSimulationState((prev) => (prev ? { ...prev, isPlaying: false } : null));
+  };
+
+  const resumeSimulation = () => {
+    if (!simulationState || simDataRef.current.steps.length === 0) return;
+    simDataRef.current.isPlaying = true;
+    setSimulationState((prev) => (prev ? { ...prev, isPlaying: true } : null));
+
+    let lastTime = performance.now();
+    const animate = (time: number) => {
+      const dt = (time - lastTime) / 1000.0;
+      lastTime = time;
+
+      const sim = simDataRef.current;
+      if (!sim.isPlaying || sim.steps.length === 0) return;
+
+      const stepIncrement = Math.max(1, Math.round(60 * dt * sim.speedMultiplier));
+      sim.stepIndex += stepIncrement;
+
+      if (sim.stepIndex >= sim.steps.length) {
+        sim.stepIndex = 0;
+      }
+
+      const curr = sim.steps[sim.stepIndex];
+      const prog = sim.stepIndex / (sim.steps.length - 1);
+
+      setSimulationState({
+        isPlaying: true,
+        progress: prog,
+        speed: sim.speedMultiplier,
+        currentPathIndex: curr.pathIdx,
+        currentStep: sim.stepIndex,
+        totalSteps: sim.steps.length,
+        currentJoints: curr.q_deg,
+        currentTcpPose: curr.tcp,
+        currentPixel: curr.pixel,
+        activeState: sim.stateType,
+      });
+
+      if (onSimulationJointsChange) {
+        onSimulationJointsChange(curr.q_deg);
+      }
+
+      simAnimFrameRef.current = requestAnimationFrame(animate);
+    };
+
+    simAnimFrameRef.current = requestAnimationFrame(animate);
+  };
+
+  const seekSimulation = (targetProgress: number) => {
+    const sim = simDataRef.current;
+    if (sim.steps.length === 0) return;
+    const targetIdx = Math.min(
+      Math.max(0, Math.floor(targetProgress * (sim.steps.length - 1))),
+      sim.steps.length - 1
+    );
+    sim.stepIndex = targetIdx;
+    const curr = sim.steps[targetIdx];
+
+    setSimulationState((prev) =>
+      prev
+        ? {
+            ...prev,
+            progress: targetProgress,
+            currentPathIndex: curr.pathIdx,
+            currentStep: targetIdx,
+            currentJoints: curr.q_deg,
+            currentTcpPose: curr.tcp,
+            currentPixel: curr.pixel,
+          }
+        : null
+    );
+
+    if (onSimulationJointsChange) {
+      onSimulationJointsChange(curr.q_deg);
+    }
+  };
+
+  const stopSimulation = () => {
+    if (simAnimFrameRef.current) cancelAnimationFrame(simAnimFrameRef.current);
+    simDataRef.current.isPlaying = false;
+    simDataRef.current.steps = [];
+    setSimulationState(null);
+    if (onSimulationJointsChange) {
+      onSimulationJointsChange(null);
+    }
+  };
+
+  const setSimulationSpeed = (speed: number) => {
+    simDataRef.current.speedMultiplier = speed;
+    setSimulationState((prev) => (prev ? { ...prev, speed } : null));
   };
 
   // ─── Actions: Capture & Reconstruct ─────────────────────────────────────
@@ -742,7 +1037,12 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
           mousePixel={mousePixel}
           liveNormal={liveNormal}
           natSize={natSize}
-          verificationReport={verificationReport}
+          verificationReport={
+            activeState === 'poi' ? poiReport : (activeState === 'opt' ? optReport : rawReport)
+          }
+          activeState={activeState}
+          simulationState={simulationState}
+          onSelectActiveState={handleSelectActiveState}
           zoom={zoom}
           pan={pan}
           isPanning={isPanning}
@@ -818,6 +1118,71 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
           renderPolygons={renderPolygons}
         />
 
+        {/* 3D/2D Synchronized Simulation Floating Playback Control Bar (Feature 7) */}
+        {simulationState && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 bg-slate-950/90 backdrop-blur-md border border-sky-500/40 rounded-full px-4 py-1.5 shadow-2xl flex items-center gap-3 text-slate-200 text-xs select-none">
+            {/* Play/Pause Button */}
+            <button
+              onClick={simulationState.isPlaying ? pauseSimulation : resumeSimulation}
+              className="p-1.5 rounded-full bg-sky-600 hover:bg-sky-500 text-white shadow transition-all"
+              title={simulationState.isPlaying ? 'Pause Simulation' : 'Resume Simulation'}
+            >
+              {simulationState.isPlaying ? <Pause size={12} /> : <Play size={12} className="fill-white" />}
+            </button>
+
+            {/* State Badge */}
+            <span
+              className={`text-[9px] font-bold font-mono px-1.5 py-0.5 rounded border ${
+                STATE_THEMES[simulationState.activeState].bg
+              } ${STATE_THEMES[simulationState.activeState].text} ${STATE_THEMES[simulationState.activeState].border}`}
+            >
+              {simulationState.activeState.toUpperCase()} SIM
+            </span>
+
+            {/* Step & Progress Scrubber */}
+            <div className="flex items-center gap-2">
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.002}
+                value={simulationState.progress}
+                onChange={(e) => seekSimulation(parseFloat(e.target.value))}
+                className="w-32 accent-sky-400 h-1.5 bg-slate-800 rounded cursor-pointer"
+              />
+              <span className="text-[10px] font-mono text-slate-400 w-16 text-right">
+                {Math.round(simulationState.progress * 100)}% ({simulationState.currentStep}/{simulationState.totalSteps})
+              </span>
+            </div>
+
+            {/* Speed Multiplier Options */}
+            <div className="flex items-center gap-1 bg-slate-900 rounded p-0.5 border border-slate-800 text-[9.5px] font-mono">
+              {[0.5, 1.0, 2.0, 5.0].map((spd) => (
+                <button
+                  key={spd}
+                  onClick={() => setSimulationSpeed(spd)}
+                  className={`px-1.5 py-0.5 rounded transition-all ${
+                    simulationState.speed === spd
+                      ? 'bg-sky-600 text-white font-bold'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {spd}x
+                </button>
+              ))}
+            </div>
+
+            {/* Close / Stop Button */}
+            <button
+              onClick={stopSimulation}
+              className="p-1 text-slate-400 hover:text-rose-400 transition-colors ml-1"
+              title="Stop Simulation"
+            >
+              <X size={14} />
+            </button>
+          </div>
+        )}
+
         {/* Right Side Panel (w-[320px]): Top Action Toolbar + File List / Diagnostics Dashboard */}
         <div className="w-[320px] shrink-0 border-l border-slate-800 bg-slate-950/40 flex flex-col h-full min-h-0 overflow-hidden">
           {/* Top Horizontal Action Toolbar */}
@@ -871,26 +1236,46 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                     },
                   });
                 }}
+                onSimulatePath={(st) => startSimulation(st)}
+                onOpenDiagnostics={(st) => {
+                  handleSelectActiveState(st);
+                  setShowDiagnostics(true);
+                }}
+                onSelectFile={(fileName) => {
+                  if (fileName.includes('poi.path') || fileName.includes('poi.report')) {
+                    handleSelectActiveState('poi');
+                  } else if (fileName.includes('opt.path') || fileName.includes('opt.report')) {
+                    handleSelectActiveState('opt');
+                  } else if (fileName.includes('raw.path') || fileName.includes('raw.report')) {
+                    handleSelectActiveState('raw');
+                  }
+                }}
               />
             ) : (
               <DiagnosticsDashboard
-                verificationReport={verificationReport}
+                activeState={activeState}
+                rawReport={rawReport}
+                optReport={optReport}
+                poiReport={poiReport}
+                rawPaths={rawPaths}
+                optPaths={optPaths}
+                poiPaths={poiPaths}
                 isVerifying={isVerifying}
                 isOptimizing={isOptimizing}
                 activeTemplate={activeTemplate}
-                optPaths={optPaths}
-                usingOptimizedPaths={usingOptimizedPaths}
-                hasPaths={manualPaths.length > 0}
                 kinParams={kinParams}
+                poiConfig={poiConfig}
                 urdfTcpInfo={urdfTcpInfo}
                 isKinParamsOpen={isKinParamsOpen}
                 highlightedPathId={highlightedPathId}
                 setKinParams={setKinParams}
+                setPoiConfig={setPoiConfig}
                 setIsKinParamsOpen={setIsKinParamsOpen}
                 setHighlightedPathId={setHighlightedPathId}
+                onSelectActiveState={handleSelectActiveState}
                 onRunDiagnostics={handleRunDiagnostics}
                 onApplyOptimization={handleApplyOptimization}
-                onToggleUseOptimized={handleToggleUseOptimized}
+                onFetchAnchorPose={handleFetchAnchorPose}
                 onClose={() => setShowDiagnostics(false)}
               />
             )}

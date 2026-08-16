@@ -207,33 +207,47 @@ class ManualPathService:
             "calib_source": calib_desc
         }
 
-    def load_manual_paths(self, template_name: str, use_opt: bool = False) -> dict:
-        """Loads scan.manual_paths.yaml or scan.manual_opt_paths.yaml for a given template."""
+    def load_manual_paths(self, template_name: str, state_type: str = "raw", use_opt: bool = False) -> dict:
+        """Loads scan.raw.path.yaml, scan.opt.path.yaml, or scan.poi.path.yaml for a given template."""
+        if use_opt:
+            state_type = "opt"
+
         template_dir = os.path.join(self.template_group_dir, template_name)
-        target_file = "scan.manual_opt_paths.yaml" if use_opt else "scan.manual_paths.yaml"
-        paths_file = os.path.join(template_dir, target_file)
         
-        if not os.path.exists(paths_file):
-            if use_opt:
-                # Fallback to raw manual paths
-                paths_file = os.path.join(template_dir, "scan.manual_paths.yaml")
-            if not os.path.exists(paths_file):
-                return {
-                    "template": template_name,
-                    "type": "manual",
-                    "paths": [],
-                    "standoff_distance_mm": 150.0
-                }
+        # Priority order for file resolution
+        candidates = [
+            f"scan.{state_type}.path.yaml",
+            f"{state_type}.path.yaml",
+            f"scan.manual_{state_type}_paths.yaml",
+        ]
+        if state_type == "raw":
+            candidates.append("scan.manual_paths.yaml")
+
+        paths_file = None
+        for cand in candidates:
+            cand_path = os.path.join(template_dir, cand)
+            if os.path.exists(cand_path):
+                paths_file = cand_path
+                break
+        
+        if not paths_file:
+            return {
+                "template": template_name,
+                "type": state_type,
+                "paths": [],
+                "standoff_distance_mm": 150.0
+            }
         try:
             with open(paths_file, 'r', encoding='utf-8') as f:
                 data = yaml.safe_load(f) or {}
             data["loaded_from"] = os.path.basename(paths_file)
+            data["state_type"] = state_type
             return data
         except Exception as e:
             logger.error(f"Failed to load manual paths from {paths_file}: {e}")
             return {
                 "template": template_name,
-                "type": "manual",
+                "type": state_type,
                 "paths": [],
                 "standoff_distance_mm": 150.0
             }
@@ -318,15 +332,16 @@ class ManualPathService:
 
         return new_points
 
-    def save_manual_paths(self, template_name: str, paths_data: dict) -> bool:
-        """Saves manual paths to scan.manual_paths.yaml with dense surface tracing."""
+    def save_manual_paths(self, template_name: str, paths_data: dict, state_type: str = "raw") -> bool:
+        """Saves manual paths to scan.raw.path.yaml / scan.opt.path.yaml / scan.poi.path.yaml."""
         template_dir = os.path.join(self.template_group_dir, template_name)
         if not os.path.exists(template_dir):
             os.makedirs(template_dir, exist_ok=True)
             
-        paths_file = os.path.join(template_dir, "scan.manual_paths.yaml")
+        file_name = f"scan.{state_type}.path.yaml"
+        paths_file = os.path.join(template_dir, file_name)
         paths_data["template"] = template_name
-        paths_data["type"] = "manual"
+        paths_data["type"] = state_type
         paths_data["updated_at"] = int(time.time())
         paths_data["coordinate_frame"] = "base_link"
 
@@ -387,15 +402,24 @@ class ManualPathService:
                 yaml.dump(paths_data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
             logger.info(f"Successfully saved manual TCP paths to: {paths_file}")
 
-            # Invalidate/remove stale optimization and report files since raw paths changed
-            for stale_file in ["scan.manual_opt_paths.yaml", "scan.manual_paths.report.json", "scan.manual_opt_paths.report.json"]:
-                stale_path = os.path.join(template_dir, stale_file)
-                if os.path.exists(stale_path):
-                    try:
-                        os.remove(stale_path)
-                        logger.info(f"🧹 [ManualPathService] Cleaned stale file: {stale_file}")
-                    except Exception as ex:
-                        logger.warning(f"Could not remove stale file {stale_file}: {ex}")
+            # Clean stale downstream optimization and report files if raw paths changed
+            if state_type == "raw":
+                stale_files = [
+                    "scan.opt.path.yaml", "scan.poi.path.yaml",
+                    "scan.raw.report.json", "scan.opt.report.json", "scan.poi.report.json",
+                    "opt.path.yaml", "poi.path.yaml",
+                    "raw.report.json", "opt.report.json", "poi.report.json",
+                    "scan.manual_opt_paths.yaml", "scan.manual_paths.yaml",
+                    "scan.manual_paths.report.json", "scan.manual_opt_paths.report.json"
+                ]
+                for stale_file in stale_files:
+                    stale_path = os.path.join(template_dir, stale_file)
+                    if os.path.exists(stale_path):
+                        try:
+                            os.remove(stale_path)
+                            logger.info(f"🧹 [ManualPathService] Cleaned stale file: {stale_file}")
+                        except Exception as ex:
+                            logger.warning(f"Could not remove stale file {stale_file}: {ex}")
 
             return True
         except PermissionError as e:

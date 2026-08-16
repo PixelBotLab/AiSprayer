@@ -1,12 +1,14 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel
 import os
+import math
 import time
 import shutil
 import logging
 import cv2
 import numpy as np
 import yaml
+from scipy.spatial.transform import Rotation as R_scipy
 import open3d as o3d
 from services.camera_service import camera_service
 from core.vision.point_cloud_processor import depth_to_pcd
@@ -275,9 +277,10 @@ def sample_point(name: str, req: SamplePointRequest):
         raise HTTPException(status_code=500, detail=f"Point sampling failed: {str(e)}")
 
 @router.get("/templates/{name}/manual_paths")
-def get_manual_paths(name: str, use_opt: bool = False):
+def get_manual_paths(name: str, state_type: str = "raw", use_opt: bool = False):
     try:
-        return manual_path_service.load_manual_paths(name, use_opt=use_opt)
+        actual_state = "opt" if use_opt else state_type
+        return manual_path_service.load_manual_paths(name, state_type=actual_state, use_opt=use_opt)
     except Exception as e:
         logger.warning(f"Get manual paths failed for template '{name}': {e}")
         raise HTTPException(status_code=500, detail=f"Failed to load manual paths: {str(e)}")
@@ -288,13 +291,13 @@ class SaveManualPathsRequest(BaseModel):
     standoff_distance_mm: float = 150.0
 
 @router.post("/templates/{name}/manual_paths")
-def save_manual_paths(name: str, req: SaveManualPathsRequest):
+def save_manual_paths(name: str, req: SaveManualPathsRequest, state_type: str = "raw"):
     try:
         data = {
             "paths": req.paths,
             "standoff_distance_mm": req.standoff_distance_mm
         }
-        manual_path_service.save_manual_paths(name, data)
+        manual_path_service.save_manual_paths(name, data, state_type=state_type)
         return {"message": "Manual paths saved successfully"}
     except PermissionError as e:
         logger.warning(f"Save manual paths permission error for '{name}': {e}")
@@ -367,6 +370,11 @@ def get_session_data(name: str):
     }
 
 
+class PoiConstraintConfig(BaseModel):
+    ref_rpy_deg: list[float] | None = None  # e.g. [0.0, 0.0, 0.0]
+    tolerance_rpy_deg: list[float] = [3.0, 15.0, 180.0]  # [tol_rx, tol_ry, tol_rz]
+
+
 class KinematicsOptions(BaseModel):
     step_size_mm: float = 1.5
     linear_velocity_mm_s: float = 120.0
@@ -376,20 +384,24 @@ class KinematicsOptions(BaseModel):
 
 
 class VerifyPathRequest(BaseModel):
+    state_type: str = "raw"  # 'raw' | 'opt' | 'poi'
     use_opt: bool = False
     options: KinematicsOptions = KinematicsOptions()
 
 
 class OptimizePathRequest(BaseModel):
+    mode: str = "opt"  # 'opt' | 'poi'
+    poi_config: PoiConstraintConfig | None = None
     options: KinematicsOptions = KinematicsOptions()
 
 
 @router.post("/templates/{name}/verify_paths")
 def verify_paths(name: str, req: VerifyPathRequest = VerifyPathRequest()):
     try:
+        actual_state = "opt" if req.use_opt else req.state_type
         res = path_verification_service.verify_template_paths(
             name, 
-            use_opt=req.use_opt,
+            state_type=actual_state,
             options=req.options.model_dump()
         )
         return res
@@ -403,8 +415,11 @@ def verify_paths(name: str, req: VerifyPathRequest = VerifyPathRequest()):
 @router.post("/templates/{name}/optimize_paths")
 def optimize_paths(name: str, req: OptimizePathRequest = OptimizePathRequest()):
     try:
+        poi_dict = req.poi_config.model_dump() if req.poi_config else None
         res = path_verification_service.optimize_template_paths(
             name,
+            mode=req.mode,
+            poi_config=poi_dict,
             options=req.options.model_dump()
         )
         return res
@@ -416,14 +431,15 @@ def optimize_paths(name: str, req: OptimizePathRequest = OptimizePathRequest()):
 
 
 @router.get("/templates/{name}/verification_report")
-def get_verification_report(name: str, use_opt: bool = False):
+def get_verification_report(name: str, state_type: str = "raw", use_opt: bool = False):
     """
     Retrieves saved verification report from disk if exists.
     """
-    report = path_verification_service.get_saved_report(name, use_opt=use_opt)
+    actual_state = "opt" if use_opt else state_type
+    report = path_verification_service.get_saved_report(name, state_type=actual_state)
     if report is not None:
         return report
-    raise HTTPException(status_code=404, detail="No saved verification report found.")
+    raise HTTPException(status_code=404, detail=f"No saved verification report found for '{actual_state}'.")
 
 
 @router.get("/robot/urdf_tool_tcp")
@@ -432,11 +448,73 @@ def get_robot_urdf_tcp():
     return path_verification_service.get_urdf_tcp()
 
 
+@router.get("/robot/anchor_pose")
+def get_robot_anchor_pose(source: str = "home"):
+    """
+    Returns reference TCP poses for POI constraint configuration:
+    1. Current live robot TCP pose (if connected)
+    2. Robot Home pose TCP orientation
+    """
+    from services.robot_service import robot_service
+    from core.hardware.robot.cr5_kinematics import CR5Kinematics
+
+    solver = CR5Kinematics()
+    
+    # 1. Dobot home joint angles: [0, 0, -90, -90, -90, 0] in deg -> convert to radians
+    home_deg = [0.0, 0.0, -90.0, -90.0, -90.0, 0.0]
+    home_rad = [math.radians(v) for v in home_deg]
+    home_T_flange = solver.forward(home_rad)
+    
+    # Decouple tool offset
+    urdf_tcp = path_verification_service.get_urdf_tcp()
+    xyz_m = [v / 1000.0 for v in urdf_tcp.get("xyz_mm", [0, 0, 0])]
+    rpy_deg = urdf_tcp.get("rpy_deg", [0, 0, 0])
+    R_tcp = R_scipy.from_euler('xyz', rpy_deg, degrees=True).as_matrix()
+    T_tcp = np.eye(4)
+    T_tcp[:3, :3] = R_tcp
+    T_tcp[:3, 3] = xyz_m
+    
+    home_T_gun = home_T_flange @ T_tcp
+    home_rpy = [round(float(v), 2) for v in R_scipy.from_matrix(home_T_gun[:3, :3]).as_euler('xyz', degrees=True)]
+    home_xyz = [round(float(v) * 1000.0, 2) for v in home_T_gun[:3, 3]]
+
+    # 2. Live robot TCP pose if connected
+    live_pose, _ = robot_service.get_current_pose()
+    live_rpy = None
+    live_xyz = None
+    if live_pose and len(live_pose) >= 6:
+        live_xyz = [round(float(live_pose[0]), 2), round(float(live_pose[1]), 2), round(float(live_pose[2]), 2)]
+        live_rpy = [round(float(live_pose[3]), 2), round(float(live_pose[4]), 2), round(float(live_pose[5]), 2)]
+
+    if source == "live" and live_rpy:
+        selected_rpy = live_rpy
+        selected_xyz = live_xyz
+    else:
+        selected_rpy = home_rpy
+        selected_xyz = home_xyz
+
+    return {
+        "source": source,
+        "is_connected": robot_service._is_connected,
+        "rpy_deg": selected_rpy,
+        "xyz_mm": selected_xyz,
+        "home_pose": {
+            "xyz_mm": home_xyz,
+            "rpy_deg": home_rpy,
+            "joints_deg": home_deg
+        },
+        "live_pose": {
+            "xyz_mm": live_xyz or home_xyz,
+            "rpy_deg": live_rpy or home_rpy
+        } if live_pose else None
+    }
+
+
 @router.get("/templates/{name}/summary")
 def get_template_summary(name: str):
     """
     Returns complete atomic summary of template data in a single round-trip:
-    files, masks, raw paths, opt paths, cached reports, and URDF tool TCP info.
+    files, masks, raw/opt/poi paths, cached raw/opt/poi reports, and URDF tool TCP info.
     """
     template_path = os.path.join(TEMPLATE_GROUP_DIR, name)
     if not os.path.exists(template_path):
@@ -461,17 +539,20 @@ def get_template_summary(name: str):
     masks_dict = sam_service.get_template_masks(template_path)
     masks_data = masks_dict.get("masks", []) if masks_dict else []
 
-    # 3. Paths (Raw & Opt)
-    raw_paths_data = manual_path_service.load_manual_paths(name, use_opt=False)
-    opt_paths_data = manual_path_service.load_manual_paths(name, use_opt=True)
+    # 3. Paths (Raw, Opt, POI)
+    raw_paths_data = manual_path_service.load_manual_paths(name, state_type="raw")
+    opt_paths_data = manual_path_service.load_manual_paths(name, state_type="opt")
+    poi_paths_data = manual_path_service.load_manual_paths(name, state_type="poi")
 
     raw_paths = raw_paths_data.get("paths", [])
-    opt_paths = opt_paths_data.get("paths", []) if opt_paths_data.get("loaded_from") == "scan.manual_opt_paths.yaml" else []
+    opt_paths = opt_paths_data.get("paths", []) if opt_paths_data.get("paths") else []
+    poi_paths = poi_paths_data.get("paths", []) if poi_paths_data.get("paths") else []
     standoff = raw_paths_data.get("standoff_distance_mm", 150.0)
 
-    # 4. Diagnostic Reports
-    raw_report = path_verification_service.get_saved_report(name, use_opt=False)
-    opt_report = path_verification_service.get_saved_report(name, use_opt=True)
+    # 4. Diagnostic Reports (Raw, Opt, POI)
+    raw_report = path_verification_service.get_saved_report(name, state_type="raw")
+    opt_report = path_verification_service.get_saved_report(name, state_type="opt")
+    poi_report = path_verification_service.get_saved_report(name, state_type="poi")
 
     # 5. URDF TCP
     urdf_tcp = path_verification_service.get_urdf_tcp()
@@ -485,14 +566,10 @@ def get_template_summary(name: str):
         "masks": masks_data,
         "raw_paths": raw_paths,
         "opt_paths": opt_paths,
+        "poi_paths": poi_paths,
         "standoff_distance_mm": standoff,
         "raw_report": raw_report,
         "opt_report": opt_report,
+        "poi_report": poi_report,
         "urdf_tcp": urdf_tcp
     }
-
-
-
-
-
-

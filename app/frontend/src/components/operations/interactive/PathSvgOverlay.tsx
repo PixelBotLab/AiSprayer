@@ -1,5 +1,13 @@
 import React, { type MouseEvent } from 'react';
-import type { ManualPathItem, WaypointItem, VerificationReport, LiveNormalInfo } from './types';
+import type {
+  ManualPathItem,
+  WaypointItem,
+  VerificationReport,
+  LiveNormalInfo,
+  PathStateType,
+  SimulationState,
+} from './types';
+import { STATE_THEMES } from './types';
 
 interface PathSvgOverlayProps {
   manualPathMode: boolean;
@@ -13,6 +21,8 @@ interface PathSvgOverlayProps {
   liveNormal: LiveNormalInfo | null;
   natSize: { w: number; h: number };
   verificationReport: VerificationReport | null;
+  activeState?: PathStateType;
+  simulationState?: SimulationState | null;
   onSelectPathForEdit?: (pathId: number) => void;
   setHighlightedPathId: (id: number | null) => void;
   setHoveredWaypoint: (wp: WaypointItem | null) => void;
@@ -33,6 +43,8 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
   liveNormal,
   natSize,
   verificationReport,
+  activeState = 'raw',
+  simulationState = null,
   onSelectPathForEdit,
   setHighlightedPathId,
   setHoveredWaypoint,
@@ -40,6 +52,8 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
   onManualImageClick,
   onDeleteSingleWaypoint,
 }) => {
+  const theme = STATE_THEMES[activeState] || STATE_THEMES.raw;
+
   return (
     <>
       {/* 1. VIEW/OVERLAY MODE: Render Manual TCP Paths on top of scan.jpg */}
@@ -62,7 +76,8 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
             const pts = path.points;
             const pId = path.path_id ?? (pIdx + 1);
             const isHighlighted = highlightedPathId === pId;
-            const pathStroke = isHighlighted ? '#38bdf8' : '#0284c7';
+            const isCurrentSimPath = simulationState?.isPlaying && (simulationState.currentPathIndex === pIdx);
+            const pathStroke = isHighlighted ? '#ffffff' : (isCurrentSimPath ? theme.hex : (activeState === 'poi' ? '#22c55e' : (activeState === 'opt' ? '#38bdf8' : '#94a3b8')));
 
             // Check if there are verification issues reported on this path
             const pathRep = verificationReport?.path_reports?.find((r: any) => r.path_id === pId);
@@ -82,9 +97,9 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
                         y1={prev.pixel[1]}
                         x2={p.pixel[0]}
                         y2={p.pixel[1]}
-                        stroke="#38bdf8"
+                        stroke={theme.hex}
                         strokeWidth={9}
-                        strokeOpacity={0.35}
+                        strokeOpacity={0.4}
                         strokeLinecap="round"
                         style={{ pointerEvents: 'none' }}
                       />
@@ -98,6 +113,10 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
                   const segIdx = i - 1;
                   const hasSegIssue = pathIssues.some((iss: any) => iss.segment_index === segIdx);
 
+                  // If this path is currently simulating, highlight traversed vs pending segments
+                  const segProgress = pts.length > 1 ? (i / (pts.length - 1)) : 1;
+                  const isTraversed = isCurrentSimPath && simulationState && (simulationState.progress >= segProgress);
+
                   return (
                     <g key={`vseg-grp-${i}`}>
                       <line
@@ -106,8 +125,8 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
                         y1={prev.pixel[1]}
                         x2={p.pixel[0]}
                         y2={p.pixel[1]}
-                        stroke={hasSegIssue ? '#f43f5e' : pathStroke}
-                        strokeWidth={isHighlighted ? 3.5 : (hasSegIssue ? 3.0 : 2.5)}
+                        stroke={hasSegIssue ? '#f43f5e' : (isTraversed ? '#fbbf24' : pathStroke)}
+                        strokeWidth={isTraversed ? 4.0 : (isHighlighted ? 3.5 : (hasSegIssue ? 3.0 : 2.5))}
                         markerEnd="url(#view-traj-arrow)"
                         strokeDasharray={hasSegIssue ? '6 3' : undefined}
                         style={{ pointerEvents: 'none' }}
@@ -181,6 +200,7 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
                 {pts.length > 0 && (() => {
                   const p0 = pts[0];
                   const [u0, v0] = p0.pixel;
+                  const badgeColor = activeState === 'poi' ? '#16a34a' : (activeState === 'opt' ? '#0284c7' : '#64748b');
                   return (
                     <g
                       key={`start-badge-${pId}`}
@@ -194,8 +214,8 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
                         setHighlightedPathId(null);
                       }}
                     >
-                      <line x1={u0} y1={v0 - 6} x2={u0} y2={v0} stroke="#0284c7" strokeWidth={2} />
-                      <circle cx={u0} cy={v0 - 15} r={10.5} fill="#0284c7" stroke="#ffffff" strokeWidth={1.5} filter="drop-shadow(0px 2px 4px rgba(0,0,0,0.75))" />
+                      <line x1={u0} y1={v0 - 6} x2={u0} y2={v0} stroke={badgeColor} strokeWidth={2} />
+                      <circle cx={u0} cy={v0 - 15} r={10.5} fill={badgeColor} stroke="#ffffff" strokeWidth={1.5} filter="drop-shadow(0px 2px 4px rgba(0,0,0,0.75))" />
                       <text x={u0} y={v0 - 14.5} textAnchor="middle" dominantBaseline="central" fill="#ffffff" fontSize={9.5} fontWeight="bold" style={{ pointerEvents: 'none' }}>
                         {`P${pId}`}
                       </text>
@@ -225,28 +245,92 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
                         setHighlightedPathId(null);
                       }}
                     >
-                      {arrowLen >= 3.0 ? (
-                        <line x1={u} y1={v} x2={tcpU} y2={tcpV} stroke="#ef4444" strokeWidth={2.2} strokeLinecap="round" markerEnd="url(#view-normal-arrow)" style={{ pointerEvents: 'none' }} />
-                      ) : (
-                        <circle cx={u} cy={v} r={3.5} fill="#ef4444" opacity={0.85} style={{ pointerEvents: 'none' }} />
+                      {/* Normal Vector Projection Arrow */}
+                      {arrowLen > 2 && (
+                        <line
+                          x1={u}
+                          y1={v}
+                          x2={tcpU}
+                          y2={tcpV}
+                          stroke="#ef4444"
+                          strokeWidth={1.5}
+                          strokeDasharray="3 2"
+                          markerEnd="url(#view-normal-arrow)"
+                        />
                       )}
 
-                      {idx > 0 && (
-                        <>
-                          <circle cx={u} cy={v} r={12} fill="transparent" />
-                          <circle cx={u} cy={v} r={isHighlighted ? 7.5 : 6} fill="white" filter="drop-shadow(0px 0px 3px rgba(0,0,0,0.8))" style={{ pointerEvents: 'none' }} />
-                          <circle cx={u} cy={v} r={isHighlighted ? 5.5 : 4.5} fill="#0284c7" style={{ pointerEvents: 'none' }} />
-                          <text x={u} y={v + 0.5} textAnchor="middle" dominantBaseline="central" fill="white" fontSize={isHighlighted ? 8 : 7} fontWeight="bold" style={{ pointerEvents: 'none' }}>
-                            {idx + 1}
-                          </text>
-                        </>
-                      )}
+                      {/* Surface Point (Red dot on surface) */}
+                      <circle
+                        cx={u}
+                        cy={v}
+                        r={4.5}
+                        fill="#ef4444"
+                        stroke="#ffffff"
+                        strokeWidth={1.2}
+                      />
+
+                      {/* TCP Point with Sequential Step Number Badge */}
+                      <g transform={`translate(${tcpU}, ${tcpV})`}>
+                        <circle
+                          cx={0}
+                          cy={0}
+                          r={6.5}
+                          fill={activeState === 'poi' ? '#10b981' : (activeState === 'opt' ? '#0284c7' : '#64748b')}
+                          stroke="#ffffff"
+                          strokeWidth={1.5}
+                          filter="drop-shadow(0px 1px 3px rgba(0,0,0,0.6))"
+                        />
+                        <text
+                          x={0}
+                          y={0.5}
+                          textAnchor="middle"
+                          dominantBaseline="central"
+                          fill="#ffffff"
+                          fontSize={8}
+                          fontWeight="bold"
+                          fontFamily="monospace"
+                        >
+                          {pt.index || idx + 1}
+                        </text>
+                      </g>
                     </g>
                   );
                 })}
               </g>
             );
           })}
+
+          {/* 3D/2D REAL-TIME SYNCHRONIZED SIMULATION BEACON (Feature 7) */}
+          {simulationState && simulationState.currentPixel && (
+            <g
+              transform={`translate(${simulationState.currentPixel[0]}, ${simulationState.currentPixel[1]})`}
+              style={{ pointerEvents: 'none' }}
+            >
+              {/* Outer Pulsing Aura Ring */}
+              <circle cx={0} cy={0} r={12} fill="none" stroke={theme.hex} strokeWidth={2} opacity={0.8}>
+                <animate attributeName="r" values="8;32" dur="1.2s" repeatCount="indefinite" />
+                <animate attributeName="opacity" values="0.9;0" dur="1.2s" repeatCount="indefinite" />
+              </circle>
+              {/* Secondary Pulse */}
+              <circle cx={0} cy={0} r={12} fill="none" stroke="#fbbf24" strokeWidth={1.5} opacity={0.6}>
+                <animate attributeName="r" values="8;24" begin="0.4s" dur="1.2s" repeatCount="indefinite" />
+                <animate attributeName="opacity" values="0.8;0" begin="0.4s" dur="1.2s" repeatCount="indefinite" />
+              </circle>
+              {/* Solid Bright Core Spray Nozzle Dot */}
+              <circle
+                cx={0}
+                cy={0}
+                r={6.5}
+                fill={theme.hex}
+                stroke="#ffffff"
+                strokeWidth={2}
+                filter="drop-shadow(0px 0px 8px rgba(255,255,255,0.9))"
+              />
+              {/* Spray Head Crosshair */}
+              <line x1={-9} y1={0} x2={9} y2={0} stroke="#ffffff" strokeWidth={1.2} />
+              <line x1={0} y1={-9} x2={0} y2={9} stroke="#ffffff" strokeWidth={1.2} />
+            </g>
+          )}
 
           {/* Topmost Tooltip Layer in VIEW mode */}
           {hoveredWaypoint && (() => {

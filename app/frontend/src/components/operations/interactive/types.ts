@@ -69,23 +69,46 @@ export interface VerificationIssue {
   limit?: number;
 }
 
+export type PathStateType = 'raw' | 'opt' | 'poi';
+
+export interface PoiConfig {
+  ref_rpy_deg: [number, number, number];
+  tolerance_rpy_deg: [number, number, number];
+}
+
+export interface SimulationState {
+  isPlaying: boolean;
+  progress: number; // 0.0 to 1.0
+  speed: number; // 0.5, 1.0, 2.0, 5.0
+  currentPathIndex: number;
+  currentStep: number;
+  totalSteps: number;
+  currentJoints: number[]; // [J1..J6] in deg
+  currentTcpPose: { x: number; y: number; z: number; rx: number; ry: number; rz: number };
+  currentPixel: [number, number] | null; // projected [u, v]
+  activeState: PathStateType;
+}
+
 export interface PathReportItem {
   path_id: number;
   name: string;
-  status: 'PASS' | 'WARNING' | 'FAILED';
+  status: 'PASS' | 'WARNING' | 'FAILED' | 'ERROR';
   total_interpolated: number;
   speed_mm_s?: number;
   step_size_mm?: number;
   recommended_safe_speed_mm_s?: number;
   peak_joint_speeds_deg_s?: number[];
+  max_joint_velocity_deg_s?: number[];
   max_joint_velocities_deg_s?: number[];
   issues: VerificationIssue[];
   optimized_paths_available?: boolean;
+  trajectory_q?: number[][]; // [step][6] in radians or degrees
+  trajectory_tcp?: number[][]; // [step][6] [x, y, z, rx, ry, rz]
 }
 
 export interface VerificationReport {
   summary: {
-    status: 'PASS' | 'WARNING' | 'FAILED';
+    status: 'PASS' | 'WARNING' | 'FAILED' | 'ERROR';
     total_paths: number;
     total_waypoints: number;
     total_steps: number;
@@ -93,11 +116,15 @@ export interface VerificationReport {
     singularity_count?: number;
     overspeed_count?: number;
     unreachable_count?: number;
+    elapsed_ms?: number;
   };
+  state_type?: PathStateType;
+  source_file?: string;
   nominal_speed_mm_s?: number;
   slerp_step_mm?: number;
   max_joint_velocities_deg_s?: number[];
   urdf_tcp?: UrdfTcpInfo;
+  poi_config?: PoiConfig;
   path_reports?: PathReportItem[];
 }
 
@@ -121,6 +148,36 @@ export interface SessionData {
   calib_source: string;
 }
 
+export const STATE_THEMES: Record<PathStateType, { label: string; name: string; hex: string; bg: string; border: string; text: string; lightBg: string }> = {
+  raw: {
+    label: 'RAW',
+    name: 'Raw Teach',
+    hex: '#94a3b8',
+    bg: 'bg-slate-500/20',
+    border: 'border-slate-400/40',
+    text: 'text-slate-300',
+    lightBg: 'bg-slate-800'
+  },
+  opt: {
+    label: 'OPT',
+    name: 'Axial Opt',
+    hex: '#38bdf8',
+    bg: 'bg-sky-500/20',
+    border: 'border-sky-400/40',
+    text: 'text-sky-400',
+    lightBg: 'bg-sky-950/60'
+  },
+  poi: {
+    label: 'POI',
+    name: 'Pose Constrained',
+    hex: '#22c55e',
+    bg: 'bg-emerald-500/20',
+    border: 'border-emerald-400/40',
+    text: 'text-emerald-400',
+    lightBg: 'bg-emerald-950/60'
+  }
+};
+
 export const MASK_COLORS = [
   { fill: 'rgba(16, 185, 129, 0.38)', stroke: '#10b981' },
   { fill: 'rgba(59, 130, 246, 0.38)', stroke: '#3b82f6' },
@@ -138,4 +195,5 @@ export const PATH_PALETTE = [
   '#ec4899', // Pink
   '#06b6d4', // Cyan
 ];
+
 

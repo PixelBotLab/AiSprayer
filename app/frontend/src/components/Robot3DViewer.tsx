@@ -37,6 +37,7 @@ interface RobotModelProps {
   isMeshVisible: boolean;
   isWireframe: boolean;
   isPathsVisible: boolean;
+  pathState?: 'raw' | 'opt' | 'poi';
   useOptPaths?: boolean;
   onMeshLoaded?: (vertexCount: number) => void;
   onPathsLoaded?: (pathCount: number, pointCount: number) => void;
@@ -107,10 +108,12 @@ const RobotModel: React.FC<RobotModelProps> = ({
   isMeshVisible,
   isWireframe,
   isPathsVisible,
+  pathState = 'raw',
   useOptPaths = false,
   onMeshLoaded,
   onPathsLoaded
 }) => {
+  const effectiveState = pathState || (useOptPaths ? 'opt' : 'raw');
 
   const [robot, setRobot] = useState<Object3D | null>(null);
   const surfaceMeshRef = useRef<Mesh | null>(null);
@@ -282,7 +285,7 @@ const RobotModel: React.FC<RobotModelProps> = ({
 
     const fetchPaths = async () => {
       try {
-        const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/manual_paths?use_opt=${useOptPaths ? 'true' : 'false'}&t=${pathsVersion}`);
+        const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/manual_paths?state_type=${effectiveState}&t=${pathsVersion}`);
         if (!res.ok) {
           if (onPathsLoaded) onPathsLoaded(0, 0);
           return;
@@ -301,6 +304,10 @@ const RobotModel: React.FC<RobotModelProps> = ({
         group.visible = isPathsVisible;
 
         let totalPts = 0;
+
+        // Colors per state
+        const tcpColorHex = effectiveState === 'poi' ? 0x22c55e : (effectiveState === 'opt' ? 0x38bdf8 : 0x94a3b8);
+        const spriteFill = effectiveState === 'poi' ? '#15803d' : (effectiveState === 'opt' ? '#0284c7' : '#475569');
 
         paths.forEach((pathItem: any) => {
           const pts = pathItem.points || [];
@@ -367,7 +374,7 @@ const RobotModel: React.FC<RobotModelProps> = ({
             lineMesh.renderOrder = 999;
             group.add(lineMesh);
 
-            // Also draw TCP-level connecting line (distinct color for Raw vs Opt)
+            // Also draw TCP-level connecting line (distinct color for Raw vs Opt vs POI)
             const tcpLinePoints: Vector3[] = [];
             pts.forEach((p: any) => {
               tcpLinePoints.push(new Vector3(
@@ -378,7 +385,7 @@ const RobotModel: React.FC<RobotModelProps> = ({
             });
             const tcpLineGeom = new BufferGeometry().setFromPoints(tcpLinePoints);
             const tcpLineMat = new LineBasicMaterial({ 
-              color: useOptPaths ? 0x14b8a6 : 0xf59e0b, 
+              color: tcpColorHex, 
               linewidth: 2 
             });
             const tcpLineMesh = new Line(tcpLineGeom, tcpLineMat);
@@ -395,7 +402,7 @@ const RobotModel: React.FC<RobotModelProps> = ({
             if (ctx) {
               ctx.beginPath();
               ctx.arc(32, 32, 28, 0, Math.PI * 2);
-              ctx.fillStyle = useOptPaths ? '#0f766e' : '#92400e'; 
+              ctx.fillStyle = spriteFill;
               ctx.fill();
               ctx.lineWidth = 4;
               ctx.strokeStyle = '#ffffff';
@@ -542,6 +549,7 @@ interface Robot3DViewerProps {
   activeTemplate?: string | null;
   meshVersion?: number;
   pathsVersion?: number;
+  pathState?: 'raw' | 'opt' | 'poi';
   useOptPaths?: boolean;
 }
 
@@ -552,6 +560,7 @@ const Robot3DViewer: React.FC<Robot3DViewerProps> = ({
   activeTemplate = null,
   meshVersion = 0,
   pathsVersion = 0,
+  pathState = 'raw',
   useOptPaths = false
 }) => {
   const [isMaximized, setIsMaximized] = useState(false);
@@ -561,11 +570,6 @@ const Robot3DViewer: React.FC<Robot3DViewerProps> = ({
   const [meshVertexCount, setMeshVertexCount] = useState<number>(0);
   const [pathsCount, setPathsCount] = useState<number>(0);
   const [pointsCount, setPointsCount] = useState<number>(0);
-  const [internalUseOpt, setInternalUseOpt] = useState(useOptPaths);
-
-  useEffect(() => {
-    setInternalUseOpt(useOptPaths);
-  }, [useOptPaths]);
 
   const containerClasses = isMaximized
     ? "fixed inset-0 z-[100] bg-slate-950/95 backdrop-blur-md p-4 flex flex-col items-center justify-center animate-in fade-in duration-200"
@@ -588,12 +592,12 @@ const Robot3DViewer: React.FC<Robot3DViewerProps> = ({
           activeTemplate={activeTemplate}
           meshVersion={meshVersion}
           pathsVersion={pathsVersion}
+          pathState={pathState}
           isMeshVisible={isMeshVisible}
           isWireframe={isWireframe}
           isPathsVisible={isPathsVisible}
-          useOptPaths={internalUseOpt}
-
-          onMeshLoaded={(count) => setMeshVertexCount(count)}
+          useOptPaths={useOptPaths}
+          onMeshLoaded={(cnt) => setMeshVertexCount(cnt)}
           onPathsLoaded={(pCount, ptCount) => {
             setPathsCount(pCount);
             setPointsCount(ptCount);
@@ -633,12 +637,14 @@ const Robot3DViewer: React.FC<Robot3DViewerProps> = ({
 
         {pathsCount > 0 && (
           <div className={`h-6 px-2 rounded-full text-[9px] font-mono backdrop-blur-md border shadow-sm flex items-center gap-1 ${
-            internalUseOpt 
-              ? 'text-teal-300 bg-teal-950/60 border-teal-500/40'
-              : 'text-amber-300 bg-amber-950/60 border-amber-500/40'
+            pathState === 'poi'
+              ? 'text-emerald-300 bg-emerald-950/60 border-emerald-500/40'
+              : pathState === 'opt'
+              ? 'text-sky-300 bg-sky-950/60 border-sky-500/40'
+              : 'text-slate-300 bg-slate-900/80 border-slate-700/50'
           }`}>
-            <Route size={10} className={internalUseOpt ? "text-teal-400" : "text-amber-400"} />
-            <span>TCP ({internalUseOpt ? 'Opt' : 'Raw'}): {pathsCount}P ({pointsCount} pts)</span>
+            <Route size={10} className={pathState === 'poi' ? "text-emerald-400" : (pathState === 'opt' ? "text-sky-400" : "text-slate-400")} />
+            <span>TCP ({pathState.toUpperCase()}): {pathsCount}P ({pointsCount} pts)</span>
           </div>
         )}
       </div>
@@ -653,34 +659,16 @@ const Robot3DViewer: React.FC<Robot3DViewerProps> = ({
                 onClick={() => setIsPathsVisible(!isPathsVisible)}
                 className={`h-6 px-2 rounded-full text-[9px] font-medium border flex items-center gap-1 backdrop-blur-md transition-all shadow-sm ${
                   isPathsVisible
-                    ? 'bg-amber-950/60 hover:bg-amber-900/70 border-amber-500/50 text-amber-300 shadow-amber-950/30'
+                    ? 'bg-sky-950/60 hover:bg-sky-900/70 border-sky-500/50 text-sky-300 shadow-sky-950/30'
                     : 'bg-slate-950/50 hover:bg-slate-900/70 border-white/10 text-slate-400 hover:text-slate-200'
                 }`}
               >
-                <Route size={11} className={isPathsVisible ? "text-amber-400" : "text-slate-400"} />
+                <Route size={11} className={isPathsVisible ? "text-sky-400" : "text-slate-400"} />
                 <span>TCP</span>
               </button>
               <div className="absolute top-full mt-1.5 right-0 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
                 <div className={TOOLTIP_CLASSES}>
                   {isPathsVisible ? 'Hide 3D TCP Trajectories' : 'Show 3D TCP Trajectories'}
-                </div>
-              </div>
-            </div>
-
-            <div className="relative group flex items-center">
-              <button
-                onClick={() => setInternalUseOpt(!internalUseOpt)}
-                className={`h-6 px-2 rounded-full text-[9px] font-medium border flex items-center gap-1 backdrop-blur-md transition-all shadow-sm ${
-                  internalUseOpt
-                    ? 'bg-teal-950/70 hover:bg-teal-900/80 border-teal-500/50 text-teal-300 shadow-teal-950/30'
-                    : 'bg-slate-950/50 hover:bg-slate-900/70 border-white/10 text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <span>{internalUseOpt ? '✨ Opt' : '🛤️ Raw'}</span>
-              </button>
-              <div className="absolute top-full mt-1.5 right-0 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-                <div className={TOOLTIP_CLASSES}>
-                  {internalUseOpt ? 'Switch to Raw Paths' : 'Switch to Optimized Paths'}
                 </div>
               </div>
             </div>

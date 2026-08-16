@@ -23,7 +23,9 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({
   setIsCameraVisible 
 }) => {
   const [robotState, setRobotState] = useState<RobotState>({ pose: [0,0,0,0,0,0], joint: [0,0,0,0,0,0] });
+  const [simJoints, setSimJoints] = useState<number[] | null>(null);
   const [activeTemplate, setActiveTemplate] = useState<string | null>(null);
+  const [activePathState, setActivePathState] = useState<'raw' | 'opt' | 'poi'>('raw');
   const [meshVersion, setMeshVersion] = useState<number>(Date.now());
   const [pathsVersion, setPathsVersion] = useState<number>(Date.now());
   const wsRef = useRef<WebSocket | null>(null);
@@ -45,6 +47,10 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({
     return () => wsRef.current?.close();
   }, []);
 
+  const effectiveRobotState: RobotState = simJoints
+    ? { ...robotState, joint: simJoints }
+    : robotState;
+
   const renderOperationZone = () => {
     switch (activeTab) {
       case 'calib':
@@ -56,6 +62,8 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({
             onTemplateChange={(tpl) => setActiveTemplate(tpl)}
             onMeshUpdated={() => setMeshVersion(Date.now())}
             onPathsUpdated={() => setPathsVersion(Date.now())}
+            onPathStateChange={(st) => setActivePathState(st)}
+            onSimulationJointsChange={(joints) => setSimJoints(joints)}
           />
         );
       case 'auto_planner':
@@ -93,10 +101,11 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({
         {/* Full Right: Robot Zone */}
         <div className="flex-1 min-h-0">
           <RobotZone 
-            robotState={robotState} 
+            robotState={effectiveRobotState} 
             activeTemplate={activeTemplate}
             meshVersion={meshVersion}
             pathsVersion={pathsVersion}
+            pathState={activePathState}
           />
         </div>
       </div>

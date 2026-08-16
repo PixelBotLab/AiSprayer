@@ -14,7 +14,16 @@ import {
   Minus,
   X,
 } from 'lucide-react';
-import type { MaskData, ManualPathItem, WaypointItem, VerificationReport, Point, LiveNormalInfo } from './types';
+import type {
+  MaskData,
+  ManualPathItem,
+  WaypointItem,
+  VerificationReport,
+  Point,
+  LiveNormalInfo,
+  PathStateType,
+  SimulationState,
+} from './types';
 import { PATH_PALETTE } from './types';
 import { SamMaskOverlay } from './SamMaskOverlay';
 import { PathSvgOverlay } from './PathSvgOverlay';
@@ -39,6 +48,9 @@ interface InteractiveCanvasProps {
   liveNormal: LiveNormalInfo | null;
   natSize: { w: number; h: number } | null;
   verificationReport: VerificationReport | null;
+  activeState?: PathStateType;
+  simulationState?: SimulationState | null;
+  onSelectActiveState?: (state: PathStateType) => void;
   zoom: number;
   pan: { x: number; y: number };
   isPanning: boolean;
@@ -94,6 +106,9 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
   liveNormal,
   natSize,
   verificationReport,
+  activeState = 'raw',
+  simulationState = null,
+  onSelectActiveState,
   zoom,
   pan,
   isPanning,
@@ -251,6 +266,29 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
         </button>
       </div>
 
+      {/* Top Right: Floating 3-State Capsule (RAW / OPT / POI) */}
+      {onSelectActiveState && (
+        <div className="absolute top-2 right-2 z-30 flex items-center bg-slate-950/80 backdrop-blur-md border border-slate-700/60 rounded-full p-0.5 shadow-lg">
+          {(['raw', 'opt', 'poi'] as PathStateType[]).map((st) => (
+            <button
+              key={st}
+              onClick={() => onSelectActiveState(st)}
+              className={`px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold transition-all ${
+                activeState === st
+                  ? st === 'poi'
+                    ? 'bg-emerald-500 text-slate-950 shadow-sm'
+                    : st === 'opt'
+                    ? 'bg-sky-500 text-slate-950 shadow-sm'
+                    : 'bg-slate-300 text-slate-950 shadow-sm'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              {st.toUpperCase()}
+            </button>
+          ))}
+        </div>
+      )}
+
       {/* 2. Atomic Loading Barrier Overlay */}
       {isLoadingTemplate && (
         <div className="absolute inset-0 bg-slate-950/60 backdrop-blur-[2px] flex items-center justify-center z-40 transition-opacity pointer-events-none">
@@ -312,6 +350,8 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
                 liveNormal={liveNormal}
                 natSize={natSize}
                 verificationReport={verificationReport}
+                activeState={activeState}
+                simulationState={simulationState}
                 onSelectPathForEdit={onSelectPathForEdit}
                 setHighlightedPathId={setHighlightedPathId}
                 setHoveredWaypoint={setHoveredWaypoint}

@@ -13,9 +13,10 @@ interface RobotZoneProps {
   activeTemplate?: string | null;
   meshVersion?: number;
   pathsVersion?: number;
+  pathState?: 'raw' | 'opt' | 'poi';
 }
 
-const RobotZone: React.FC<RobotZoneProps> = ({ robotState, activeTemplate = null, meshVersion = 0, pathsVersion = 0 }) => {
+const RobotZone: React.FC<RobotZoneProps> = ({ robotState, activeTemplate = null, meshVersion = 0, pathsVersion = 0, pathState = 'raw' }) => {
   return (
     <div className="w-full h-full flex flex-col gap-4">
       {/* Robot 3D Viewer with Surface Mesh Overlay & 3D TCP Trajectories */}
@@ -25,6 +26,7 @@ const RobotZone: React.FC<RobotZoneProps> = ({ robotState, activeTemplate = null
           activeTemplate={activeTemplate}
           meshVersion={meshVersion}
           pathsVersion={pathsVersion}
+          pathState={pathState}
         />
       </div>
 
