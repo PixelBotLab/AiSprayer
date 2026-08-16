@@ -8,6 +8,7 @@ import {
   Undo2,
   Check,
   ChevronRight,
+  X,
 } from 'lucide-react';
 import type {
   VerificationReport,
@@ -34,6 +35,7 @@ interface DiagnosticsDashboardProps {
   onRunDiagnostics: () => void;
   onApplyOptimization: () => void;
   onToggleUseOptimized: (useOpt: boolean) => void;
+  onClose?: () => void;
 }
 
 export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
@@ -54,26 +56,36 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
   onRunDiagnostics,
   onApplyOptimization,
   onToggleUseOptimized,
+  onClose,
 }) => {
   return (
-    <div className="h-full flex flex-col bg-slate-900 overflow-y-auto">
+    <div className="h-full flex flex-col bg-slate-900 overflow-y-auto select-none">
       {/* Header Bar */}
-      <div className="p-3 border-b border-slate-800 bg-slate-950/60 sticky top-0 z-10 flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <ShieldCheck size={16} className="text-sky-400" />
-          <span className="text-xs font-bold text-slate-200 tracking-wider">
-            TCP KINEMATICS & VERIFICATION
+      <div className="p-2.5 border-b border-slate-800 bg-slate-950/80 sticky top-0 z-10 flex items-center justify-between">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <ShieldCheck size={15} className="text-sky-400 shrink-0" />
+          <span className="text-[11px] font-bold text-slate-200 tracking-wider truncate">
+            TCP DIAGNOSTICS
           </span>
         </div>
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1 shrink-0">
           <button
             onClick={onRunDiagnostics}
             disabled={isVerifying || !activeTemplate}
-            className="px-2.5 py-1 text-[11px] font-medium rounded bg-slate-800 hover:bg-slate-700 text-sky-300 border border-sky-500/40 flex items-center gap-1 shadow transition-all disabled:opacity-40"
+            className="px-2 py-0.5 text-[10px] font-medium rounded bg-slate-800 hover:bg-slate-700 text-sky-300 border border-sky-500/40 flex items-center gap-1 shadow transition-all disabled:opacity-40"
           >
-            <RefreshCw size={11} className={isVerifying ? 'animate-spin' : ''} />
+            <RefreshCw size={10} className={isVerifying ? 'animate-spin' : ''} />
             <span>{isVerifying ? 'Verifying...' : 'Re-verify'}</span>
           </button>
+          {onClose && (
+            <button
+              onClick={onClose}
+              className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-slate-200 transition-colors ml-0.5"
+              title="Close diagnostics panel"
+            >
+              <X size={14} />
+            </button>
+          )}
         </div>
       </div>
 

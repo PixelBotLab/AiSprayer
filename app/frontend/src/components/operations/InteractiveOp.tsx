@@ -14,7 +14,8 @@ import type {
 } from './interactive/types';
 import { computeNormalClientSide } from './interactive/normalComputation';
 import { InteractiveCanvas } from './interactive/InteractiveCanvas';
-import { TemplateFileManager } from './interactive/TemplateFileManager';
+import { TemplateTopBar } from './interactive/TemplateFileManager';
+import { TemplateFileList } from './interactive/TemplateFileList';
 import { DiagnosticsDashboard } from './interactive/DiagnosticsDashboard';
 import { InteractiveActionColumn } from './interactive/InteractiveActionColumn';
 
@@ -35,7 +36,6 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const [templates, setTemplates] = useState<string[]>([]);
   const [activeTemplate, setActiveTemplate] = useState<string | null>(externalActiveTemplate || null);
   const [files, setFiles] = useState<FileItem[]>([]);
-  const [showFiles, setShowFiles] = useState<boolean>(false);
   const [isLoadingTemplate, setIsLoadingTemplate] = useState<boolean>(false);
 
   // ─── 2. Image & Viewport State ──────────────────────────────────────────
@@ -564,13 +564,11 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   };
 
   return (
-    <div className="flex-1 flex flex-col h-full w-full bg-slate-950 overflow-hidden relative font-sans">
-      {/* Top Horizontal Template Switcher and File List */}
-      <TemplateFileManager
+    <div className="flex-1 flex flex-col h-full w-full bg-slate-950 overflow-hidden relative font-sans select-none">
+      {/* Top Horizontal Template Switcher */}
+      <TemplateTopBar
         templates={templates}
         activeTemplate={activeTemplate}
-        files={files}
-        showFiles={showFiles}
         onSelectTemplate={handleSelectTemplate}
         onOpenCreateTemplateModal={() => {
           const now = new Date();
@@ -618,32 +616,11 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
             },
           });
         }}
-        onOpenDeleteFileModal={(f) => {
-          if (!activeTemplate) return;
-          setModalConfig({
-            isOpen: true,
-            title: 'Delete File',
-            message: `Delete file '${f}' from template '${activeTemplate}'?`,
-            type: 'confirm',
-            onConfirm: async () => {
-              try {
-                const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/files/${f}`, {
-                  method: 'DELETE',
-                });
-                if (!res.ok) throw new Error('Failed to delete file');
-                await handleSelectTemplate(activeTemplate);
-              } catch (err: any) {
-                alert(err.message);
-              }
-            },
-          });
-        }}
-        onToggleShowFiles={() => setShowFiles(!showFiles)}
       />
 
-      {/* Main Operational Area: 2D Canvas & Side Diagnostics Panel */}
-      <div className="flex-1 flex overflow-hidden relative">
-        {/* 2D Image Viewport & SVG Overlays */}
+      {/* Main Operational 3-Column Area */}
+      <div className="flex-1 flex overflow-hidden relative min-h-0">
+        {/* Column 1: 2D Image Viewport & Overlays */}
         <InteractiveCanvas
           imageUrl={imageUrl}
           isLoadingTemplate={isLoadingTemplate}
@@ -668,12 +645,14 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
           pan={pan}
           isPanning={isPanning}
           isSpacePressed={isSpacePressed}
+          standoffDistMm={standoffDistMm}
           setZoom={setZoom}
           setPan={setPan}
           setIsPanning={setIsPanning}
           setNatSize={setNatSize}
           setHighlightedPathId={setHighlightedPathId}
           setHoveredWaypoint={setHoveredWaypoint}
+          setStandoffDistMm={setStandoffDistMm}
           onSelectPathForEdit={(pathId) => {
             const p = manualPaths.find((it) => it.path_id === pathId);
             if (p) {
@@ -690,48 +669,6 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
           }}
           onSegImageClick={handleSegImageClick}
           onSegContextMenu={handleSegContextMenu}
-          renderPolygons={renderPolygons}
-        />
-
-        {/* Right Actions & Floating Toolbars */}
-        <InteractiveActionColumn
-          hasImage={hasImage}
-          isCapturing={isCapturing}
-          isReconstructing={isReconstructing}
-          segMode={segMode}
-          manualPathMode={manualPathMode}
-          showDiagnostics={showDiagnostics}
-          currentPoints={currentPoints}
-          currentManualPoints={currentManualPoints}
-          selectedPathIdForEdit={selectedPathIdForEdit}
-          manualPathsCount={manualPaths.length}
-          standoffDistMm={standoffDistMm}
-          showMasksOverlay={showMasksOverlay}
-          showManualPathsOverlay={showManualPathsOverlay}
-          zoom={zoom}
-          onTriggerCapture={handleTriggerCapture}
-          onToggleSegMode={() => {
-            if (segMode) {
-              setCurrentPoints([]);
-              setCurrentPolygons([]);
-            }
-            setSegMode(!segMode);
-          }}
-          onToggleManualPathMode={() => {
-            if (manualPathMode) {
-              setCurrentManualPoints([]);
-              setSelectedPathIdForEdit(null);
-            }
-            setManualPathMode(!manualPathMode);
-          }}
-          onToggleDiagnostics={() => setShowDiagnostics(!showDiagnostics)}
-          onTriggerReconstruct={handleTriggerReconstruct}
-          onZoomIn={() => setZoom((z) => Math.min(15, z * 1.2))}
-          onZoomOut={() => setZoom((z) => Math.max(0.2, z * 0.8))}
-          onResetZoom={() => {
-            setZoom(1);
-            setPan({ x: 0, y: 0 });
-          }}
           onToggleMasksOverlay={() => setShowMasksOverlay(!showMasksOverlay)}
           onToggleManualPathsOverlay={() => setShowManualPathsOverlay(!showManualPathsOverlay)}
           onUndoSegPoint={() => {
@@ -761,12 +698,36 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
               setCurrentManualPoints([]);
             }
           }}
-          setStandoffDistMm={setStandoffDistMm}
+          renderPolygons={renderPolygons}
         />
 
-        {/* Right Side: TCP Diagnostics Dashboard Drawer */}
-        {showDiagnostics && (
-          <div className="w-80 h-full border-l border-slate-800 bg-slate-900 shadow-2xl z-20 flex flex-col shrink-0 animate-in slide-in-from-right duration-200">
+        {/* Column 2: Middle Column (Categorized File List OR Diagnostics Dashboard) */}
+        {!showDiagnostics ? (
+          <TemplateFileList
+            files={files}
+            onOpenDeleteFileModal={(f) => {
+              if (!activeTemplate) return;
+              setModalConfig({
+                isOpen: true,
+                title: 'Delete File',
+                message: `Delete file '${f}' from template '${activeTemplate}'?`,
+                type: 'confirm',
+                onConfirm: async () => {
+                  try {
+                    const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/files/${f}`, {
+                      method: 'DELETE',
+                    });
+                    if (!res.ok) throw new Error('Failed to delete file');
+                    await handleSelectTemplate(activeTemplate);
+                  } catch (err: any) {
+                    alert(err.message);
+                  }
+                },
+              });
+            }}
+          />
+        ) : (
+          <div className="w-[280px] h-full border-r border-slate-800 bg-slate-900 shadow-2xl flex flex-col shrink-0">
             <DiagnosticsDashboard
               verificationReport={verificationReport}
               isVerifying={isVerifying}
@@ -785,9 +746,38 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
               onRunDiagnostics={handleRunDiagnostics}
               onApplyOptimization={handleApplyOptimization}
               onToggleUseOptimized={handleToggleUseOptimized}
+              onClose={() => setShowDiagnostics(false)}
             />
           </div>
         )}
+
+        {/* Column 3: Narrow Fixed Action Buttons on Far Right */}
+        <InteractiveActionColumn
+          hasImage={hasImage}
+          activeTemplate={activeTemplate}
+          isCapturing={isCapturing}
+          isReconstructing={isReconstructing}
+          segMode={segMode}
+          manualPathMode={manualPathMode}
+          showDiagnostics={showDiagnostics}
+          onTriggerCapture={handleTriggerCapture}
+          onToggleSegMode={() => {
+            if (segMode) {
+              setCurrentPoints([]);
+              setCurrentPolygons([]);
+            }
+            setSegMode(!segMode);
+          }}
+          onToggleManualPathMode={() => {
+            if (manualPathMode) {
+              setCurrentManualPoints([]);
+              setSelectedPathIdForEdit(null);
+            }
+            setManualPathMode(!manualPathMode);
+          }}
+          onToggleDiagnostics={() => setShowDiagnostics(!showDiagnostics)}
+          onTriggerReconstruct={handleTriggerReconstruct}
+        />
       </div>
 
       {/* Global Dialog Modal */}

@@ -1,5 +1,18 @@
 import React, { useRef, useEffect, type MouseEvent, type WheelEvent } from 'react';
-import { RefreshCw } from 'lucide-react';
+import {
+  RefreshCw,
+  ZoomIn,
+  ZoomOut,
+  Eye,
+  EyeOff,
+  Route,
+  Undo2,
+  Trash2,
+  Check,
+  Save,
+  Plus,
+  Minus,
+} from 'lucide-react';
 import type { MaskData, ManualPathItem, WaypointItem, VerificationReport, Point } from './types';
 import { SamMaskOverlay } from './SamMaskOverlay';
 import { PathSvgOverlay } from './PathSvgOverlay';
@@ -28,18 +41,31 @@ interface InteractiveCanvasProps {
   pan: { x: number; y: number };
   isPanning: boolean;
   isSpacePressed: boolean;
+  standoffDistMm: number;
   setZoom: React.Dispatch<React.SetStateAction<number>>;
   setPan: React.Dispatch<React.SetStateAction<{ x: number; y: number }>>;
   setIsPanning: React.Dispatch<React.SetStateAction<boolean>>;
   setNatSize: React.Dispatch<React.SetStateAction<{ w: number; h: number } | null>>;
   setHighlightedPathId: (id: number | null) => void;
   setHoveredWaypoint: (wp: WaypointItem | null) => void;
+  setStandoffDistMm: (dist: number) => void;
   onSelectPathForEdit?: (pathId: number) => void;
   onManualMouseMove?: (e: MouseEvent<SVGSVGElement>) => void;
   onManualImageClick?: (e: MouseEvent<SVGSVGElement>) => void;
   onDeleteSingleWaypoint?: (idx: number) => void;
   onSegImageClick?: (e: MouseEvent<HTMLImageElement>) => void;
   onSegContextMenu?: (e: MouseEvent<HTMLImageElement>) => void;
+  onToggleMasksOverlay: () => void;
+  onToggleManualPathsOverlay: () => void;
+  onUndoSegPoint: () => void;
+  onClearCurrentSegPoints: () => void;
+  onCommitCurrentSegMask: () => void;
+  onSaveAllSegMasks: () => void;
+  onUndoManualPoint: () => void;
+  onClearCurrentManualPoints: () => void;
+  onCommitManualPath: () => void;
+  onSaveManualPaths: () => void;
+  onDeleteCurrentPath: () => void;
   renderPolygons: (polygons: number[][][], fill: string, stroke?: string) => React.ReactNode;
 }
 
@@ -67,18 +93,31 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
   pan,
   isPanning,
   isSpacePressed,
+  standoffDistMm,
   setZoom,
   setPan,
   setIsPanning,
   setNatSize,
   setHighlightedPathId,
   setHoveredWaypoint,
+  setStandoffDistMm,
   onSelectPathForEdit,
   onManualMouseMove,
   onManualImageClick,
   onDeleteSingleWaypoint,
   onSegImageClick,
   onSegContextMenu,
+  onToggleMasksOverlay,
+  onToggleManualPathsOverlay,
+  onUndoSegPoint,
+  onClearCurrentSegPoints,
+  onCommitCurrentSegMask,
+  onSaveAllSegMasks,
+  onUndoManualPoint,
+  onClearCurrentManualPoints,
+  onCommitManualPath,
+  onSaveManualPaths,
+  onDeleteCurrentPath,
   renderPolygons,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -112,7 +151,8 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
   }, [isPanning, setIsPanning, setPan]);
 
   const handleMouseDown = (e: MouseEvent<HTMLDivElement>) => {
-    if (e.button === 1 || isSpacePressed) {
+    // Normal view mode: left-click drag freely pans
+    if ((e.button === 0 && !segMode && !manualPathMode) || e.button === 1 || isSpacePressed) {
       e.preventDefault();
       setIsPanning(true);
       panStartRef.current = {
@@ -145,10 +185,10 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
   return (
     <div
       ref={containerRef}
-      className={`flex-1 flex flex-col border-r border-slate-800 relative bg-black items-center justify-center overflow-hidden select-none ${
+      className={`flex-1 min-w-0 h-full flex flex-col border-r border-slate-800 relative bg-black items-center justify-center overflow-hidden select-none ${
         isPanning
           ? 'cursor-grabbing'
-          : segMode
+          : segMode || manualPathMode
           ? isSpacePressed
             ? 'cursor-grab'
             : 'cursor-crosshair'
@@ -157,7 +197,54 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
       onWheel={handleWheel}
       onMouseDown={handleMouseDown}
     >
-      {/* Atomic Loading Barrier Overlay */}
+      {/* 1. Floating Top-Left Zoom & Layer Controls */}
+      <div className="absolute left-3 top-3 z-20 flex items-center gap-1 bg-slate-900/80 backdrop-blur border border-slate-700/80 rounded-lg p-1 shadow-lg text-slate-300">
+        <button
+          onClick={() => setZoom((z) => Math.min(15, z * 1.25))}
+          className="p-1.5 hover:bg-slate-800 rounded text-slate-300 hover:text-white"
+          title="Zoom In"
+        >
+          <ZoomIn size={13} />
+        </button>
+        <button
+          onClick={() => setZoom((z) => Math.max(0.2, z * 0.8))}
+          className="p-1.5 hover:bg-slate-800 rounded text-slate-300 hover:text-white"
+          title="Zoom Out"
+        >
+          <ZoomOut size={13} />
+        </button>
+        <button
+          onClick={() => {
+            setZoom(1);
+            setPan({ x: 0, y: 0 });
+          }}
+          className="px-1.5 py-0.5 hover:bg-slate-800 rounded font-mono text-[10px] text-slate-300 hover:text-white"
+          title="Reset Zoom & Pan"
+        >
+          {(zoom * 100).toFixed(0)}%
+        </button>
+        <div className="w-[1px] h-3.5 bg-slate-700 mx-0.5" />
+        <button
+          onClick={onToggleMasksOverlay}
+          className={`p-1.5 rounded transition-colors ${
+            showMasksOverlay ? 'bg-sky-500/20 text-sky-300' : 'text-slate-500 hover:text-slate-300'
+          }`}
+          title="Toggle Mask Overlay"
+        >
+          {showMasksOverlay ? <Eye size={13} /> : <EyeOff size={13} />}
+        </button>
+        <button
+          onClick={onToggleManualPathsOverlay}
+          className={`p-1.5 rounded transition-colors ${
+            showManualPathsOverlay ? 'bg-amber-500/20 text-amber-300' : 'text-slate-500 hover:text-slate-300'
+          }`}
+          title="Toggle Manual Paths Overlay"
+        >
+          <Route size={13} />
+        </button>
+      </div>
+
+      {/* 2. Atomic Loading Barrier Overlay */}
       {isLoadingTemplate && (
         <div className="absolute inset-0 bg-slate-950/60 backdrop-blur-[2px] flex items-center justify-center z-40 transition-opacity pointer-events-none">
           <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900/90 border border-slate-700 text-slate-300 text-xs shadow-xl">
@@ -167,6 +254,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
         </div>
       )}
 
+      {/* 3. Main Scaled Image Viewport */}
       {imageUrl ? (
         <div
           className="relative inline-block max-w-full max-h-full"
@@ -232,6 +320,128 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
       ) : (
         <div className="flex flex-col items-center justify-center text-slate-600 gap-2">
           <p className="text-xs">No scan image available for this template</p>
+        </div>
+      )}
+
+      {/* 4. Floating Bottom Toolbar: SAM Segmentation Mode */}
+      {segMode && (
+        <div className="absolute bottom-5 left-1/2 -translate-x-1/2 z-30 bg-slate-900/95 backdrop-blur-md border border-slate-700/80 rounded-xl p-1.5 shadow-2xl flex items-center gap-2.5 text-xs text-slate-200">
+          <div className="flex items-center gap-1.5 px-2 border-r border-slate-700 text-[11px]">
+            <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block animate-pulse" />
+            <span className="font-medium text-sky-300">Left: FG</span>
+            <span className="w-2 h-2 rounded-full bg-rose-500 inline-block ml-1.5" />
+            <span className="font-medium text-slate-400">Right: BG</span>
+          </div>
+
+          <div className="flex items-center gap-1">
+            <button
+              onClick={onUndoSegPoint}
+              disabled={currentPoints.length === 0}
+              className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 disabled:opacity-40 flex items-center gap-1 text-[11px] font-medium transition-colors"
+            >
+              <Undo2 size={12} />
+              <span>Undo</span>
+            </button>
+            <button
+              onClick={onClearCurrentSegPoints}
+              disabled={currentPoints.length === 0}
+              className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-rose-300 disabled:opacity-40 flex items-center gap-1 text-[11px] font-medium transition-colors"
+            >
+              <Trash2 size={12} />
+              <span>Clear</span>
+            </button>
+            <button
+              onClick={onCommitCurrentSegMask}
+              disabled={currentPoints.length === 0}
+              className="px-2.5 py-1 rounded bg-sky-600 hover:bg-sky-500 text-white text-[11px] font-medium flex items-center gap-1 shadow-md shadow-sky-900/40 disabled:opacity-40 transition-all"
+            >
+              <Check size={12} />
+              <span>Commit</span>
+            </button>
+            <button
+              onClick={onSaveAllSegMasks}
+              className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-medium flex items-center gap-1 shadow-md shadow-emerald-900/40 transition-all ml-0.5"
+            >
+              <Save size={12} />
+              <span>Save Masks</span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 5. Floating Bottom Toolbar: Manual TCP Path Designer */}
+      {manualPathMode && (
+        <div className="absolute bottom-5 left-1/2 -translate-x-1/2 z-30 bg-slate-900/95 backdrop-blur-md border border-amber-500/40 rounded-xl p-1.5 shadow-2xl flex items-center gap-2.5 text-xs text-slate-200">
+          <div className="flex items-center gap-1.5 px-2 border-r border-slate-700 text-[11px]">
+            <Route size={13} className="text-amber-400 animate-pulse" />
+            <span className="font-medium text-amber-300">
+              {selectedPathIdForEdit ? `Edit P${selectedPathIdForEdit}` : `Path P${manualPaths.length + 1}`}
+            </span>
+            <span className="text-[10px] text-slate-400 font-mono">
+              ({currentManualPoints.length} pts)
+            </span>
+          </div>
+
+          {/* Standoff Distance Adjustment */}
+          <div className="flex items-center gap-1 px-1.5 border-r border-slate-700">
+            <span className="text-[10px] text-slate-400 font-mono">Standoff:</span>
+            <button
+              onClick={() => setStandoffDistMm(Math.max(50, standoffDistMm - 10))}
+              className="p-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300"
+            >
+              <Minus size={10} />
+            </button>
+            <span className="font-mono text-amber-400 text-[11px] px-0.5">{standoffDistMm}mm</span>
+            <button
+              onClick={() => setStandoffDistMm(Math.min(300, standoffDistMm + 10))}
+              className="p-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300"
+            >
+              <Plus size={10} />
+            </button>
+          </div>
+
+          <div className="flex items-center gap-1">
+            <button
+              onClick={onUndoManualPoint}
+              disabled={currentManualPoints.length === 0}
+              className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 disabled:opacity-40 flex items-center gap-1 text-[11px] font-medium transition-colors"
+            >
+              <Undo2 size={12} />
+              <span>Undo</span>
+            </button>
+            <button
+              onClick={onClearCurrentManualPoints}
+              disabled={currentManualPoints.length === 0}
+              className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-rose-300 disabled:opacity-40 flex items-center gap-1 text-[11px] font-medium transition-colors"
+            >
+              <Trash2 size={12} />
+              <span>Clear</span>
+            </button>
+            <button
+              onClick={onCommitManualPath}
+              disabled={currentManualPoints.length === 0}
+              className="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white text-[11px] font-medium flex items-center gap-1 shadow-md shadow-amber-900/40 disabled:opacity-40 transition-all"
+            >
+              <Check size={12} />
+              <span>{selectedPathIdForEdit ? 'Update' : 'Commit'}</span>
+            </button>
+            <button
+              onClick={onSaveManualPaths}
+              className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-medium flex items-center gap-1 shadow-md shadow-emerald-900/40 transition-all ml-0.5"
+            >
+              <Save size={12} />
+              <span>Save</span>
+            </button>
+            {selectedPathIdForEdit && (
+              <button
+                onClick={onDeleteCurrentPath}
+                className="px-2 py-1 rounded bg-rose-600/80 hover:bg-rose-600 text-white text-[11px] font-medium flex items-center gap-1 transition-all ml-0.5"
+                title="Delete Selected Path"
+              >
+                <Trash2 size={12} />
+              </button>
+            )}
+          </div>
         </div>
       )}
     </div>
