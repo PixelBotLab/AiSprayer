@@ -74,6 +74,7 @@ export type PathStateType = 'raw' | 'opt' | 'poi';
 export interface PoiConfig {
   ref_rpy_deg: [number, number, number];
   tolerance_rpy_deg: [number, number, number];
+  anchor_source?: 'home' | 'live' | 'manual';
 }
 
 export interface SimulationState {

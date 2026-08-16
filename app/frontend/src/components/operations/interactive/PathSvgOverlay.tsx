@@ -6,6 +6,7 @@ import type {
   LiveNormalInfo,
   PathStateType,
   SimulationState,
+  SessionData,
 } from './types';
 import { STATE_THEMES } from './types';
 
@@ -23,12 +24,56 @@ interface PathSvgOverlayProps {
   verificationReport: VerificationReport | null;
   activeState?: PathStateType;
   simulationState?: SimulationState | null;
+  sessionData?: SessionData | null;
   onSelectPathForEdit?: (pathId: number) => void;
   setHighlightedPathId: (id: number | null) => void;
   setHoveredWaypoint: (wp: WaypointItem | null) => void;
   onManualMouseMove?: (e: MouseEvent<SVGSVGElement>) => void;
   onManualImageClick?: (e: MouseEvent<SVGSVGElement>) => void;
   onDeleteSingleWaypoint?: (idx: number) => void;
+}
+
+function projectBasePointToPixel2d(
+  posBaseMm: [number, number, number],
+  sessionData: SessionData | null | undefined
+): [number, number] | null {
+  if (!sessionData?.T || sessionData.T.length < 16) return null;
+  const T = sessionData.T;
+  const dx = posBaseMm[0] - T[3];
+  const dy = posBaseMm[1] - T[7];
+  const dz = posBaseMm[2] - T[11];
+  const Xc = T[0] * dx + T[4] * dy + T[8] * dz;
+  const Yc = T[1] * dx + T[5] * dy + T[9] * dz;
+  const Zc = T[2] * dx + T[6] * dy + T[10] * dz;
+  if (Zc <= 10.0) return null;
+  return [
+    (sessionData.fx * Xc) / Zc + sessionData.cx,
+    (sessionData.fy * Yc) / Zc + sessionData.cy,
+  ];
+}
+
+function toolZProjection(pt: WaypointItem, sessionData: SessionData | null | undefined): [number, number, number, number] | null {
+  const pose = pt.tcp_pose_base;
+  const rx = (pose.rx * Math.PI) / 180.0;
+  const ry = (pose.ry * Math.PI) / 180.0;
+  const rz = (pose.rz * Math.PI) / 180.0;
+  const cx = Math.cos(rx), sx = Math.sin(rx);
+  const cy = Math.cos(ry), sy = Math.sin(ry);
+  const cz = Math.cos(rz), sz = Math.sin(rz);
+  const toolZ: [number, number, number] = [
+    cz * sy * cx + sz * sx,
+    sz * sy * cx - cz * sx,
+    cy * cx,
+  ];
+  const start = projectBasePointToPixel2d([pose.x, pose.y, pose.z], sessionData);
+  const axisLenMm = 80.0;
+  const end = projectBasePointToPixel2d([
+    pose.x + toolZ[0] * axisLenMm,
+    pose.y + toolZ[1] * axisLenMm,
+    pose.z + toolZ[2] * axisLenMm,
+  ], sessionData);
+  if (!start || !end) return null;
+  return [start[0], start[1], end[0], end[1]];
 }
 
 export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
@@ -45,6 +90,7 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
   verificationReport,
   activeState = 'raw',
   simulationState = null,
+  sessionData = null,
   onSelectPathForEdit,
   setHighlightedPathId,
   setHoveredWaypoint,
@@ -69,6 +115,9 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
             </marker>
             <marker id="view-normal-arrow" markerWidth="4" markerHeight="4" refX="3.2" refY="2" orient="auto">
               <path d="M0,0.6 L0,3.4 L3.4,2 z" fill="#ef4444" />
+            </marker>
+            <marker id="view-tool-z-arrow" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto">
+              <path d="M0,0.5 L0,4.5 L4.5,2.5 z" fill={theme.hex} />
             </marker>
           </defs>
 
@@ -231,6 +280,9 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
                   const tcpU = u + dx;
                   const tcpV = v + dy;
                   const arrowLen = Math.hypot(dx, dy);
+                  const toolZ = toolZProjection(pt, sessionData);
+                  const tcpDrawU = toolZ ? toolZ[0] : tcpU;
+                  const tcpDrawV = toolZ ? toolZ[1] : tcpV;
 
                   return (
                     <g
@@ -245,7 +297,7 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
                         setHighlightedPathId(null);
                       }}
                     >
-                      {/* Normal Vector Projection Arrow */}
+                      {/* Surface Normal Projection: raw depth normal, kept as red reference. */}
                       {arrowLen > 2 && (
                         <line
                           x1={u}
@@ -253,9 +305,22 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
                           x2={tcpU}
                           y2={tcpV}
                           stroke="#ef4444"
-                          strokeWidth={1.5}
+                          strokeWidth={1.2}
                           strokeDasharray="3 2"
                           markerEnd="url(#view-normal-arrow)"
+                        />
+                      )}
+
+                      {/* Tool Z Axis Projection: changes with RAW/OPT/POI TCP orientation. */}
+                      {toolZ && (
+                        <line
+                          x1={toolZ[0]}
+                          y1={toolZ[1]}
+                          x2={toolZ[2]}
+                          y2={toolZ[3]}
+                          stroke={theme.hex}
+                          strokeWidth={2.2}
+                          markerEnd="url(#view-tool-z-arrow)"
                         />
                       )}
 
@@ -270,7 +335,7 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
                       />
 
                       {/* TCP Point with Sequential Step Number Badge */}
-                      <g transform={`translate(${tcpU}, ${tcpV})`}>
+                      <g transform={`translate(${tcpDrawU}, ${tcpDrawV})`}>
                         <circle
                           cx={0}
                           cy={0}

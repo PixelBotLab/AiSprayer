@@ -19,6 +19,7 @@ import {
   BufferGeometry,
   Vector3,
   Euler,
+  ArrowHelper,
   Sprite,
   SpriteMaterial,
   CanvasTexture
@@ -283,9 +284,12 @@ const RobotModel: React.FC<RobotModelProps> = ({
       return;
     }
 
+    let isCancelled = false;
+
     const fetchPaths = async () => {
       try {
         const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/manual_paths?state_type=${effectiveState}&t=${pathsVersion}`);
+        if (isCancelled) return;
         if (!res.ok) {
           if (onPathsLoaded) onPathsLoaded(0, 0);
           return;
@@ -293,6 +297,7 @@ const RobotModel: React.FC<RobotModelProps> = ({
 
 
         const data = await res.json();
+        if (isCancelled) return;
         const paths = data.paths || [];
         if (paths.length === 0) {
           if (onPathsLoaded) onPathsLoaded(0, 0);
@@ -469,27 +474,20 @@ const RobotModel: React.FC<RobotModelProps> = ({
             const rxRad = ((p.tcp_pose_base.rx ?? 0) * Math.PI) / 180.0;
             const ryRad = ((p.tcp_pose_base.ry ?? 0) * Math.PI) / 180.0;
             const rzRad = ((p.tcp_pose_base.rz ?? 0) * Math.PI) / 180.0;
-            const euler = new Euler(rxRad, ryRad, rzRad, 'XYZ');
+            // 修正欧拉角顺序：机器人通常使用固连轴 Extrinsic XYZ（等价于 Intrinsic ZYX）
+            // 改为 'ZYX' 后，3D 计算出的姿态向量将与 2D SVG overlay 的底层数学完全一致
+            const euler = new Euler(rxRad, ryRad, rzRad, 'ZYX');
 
-            const axisLen = 0.025; // 25mm length
-            const xAxis = new Vector3(axisLen, 0, 0).applyEuler(euler);
-            const yAxis = new Vector3(0, axisLen, 0).applyEuler(euler);
-            const zAxis = new Vector3(0, 0, axisLen).applyEuler(euler);
-
-            // Red: Tool X axis
-            const xLineGeom = new BufferGeometry().setFromPoints([tcpPos, new Vector3().addVectors(tcpPos, xAxis)]);
-            const xLineMat = new LineBasicMaterial({ color: 0xef4444, linewidth: 2 });
-            group.add(new Line(xLineGeom, xLineMat));
-
-            // Green: Tool Y axis
-            const yLineGeom = new BufferGeometry().setFromPoints([tcpPos, new Vector3().addVectors(tcpPos, yAxis)]);
-            const yLineMat = new LineBasicMaterial({ color: 0x22c55e, linewidth: 2 });
-            group.add(new Line(yLineGeom, yLineMat));
+            const axisLen = 0.035;
+            const axisHeadLen = 0.008;
+            const axisHeadWidth = 0.005;
 
             // Blue: Tool Z (Approach) axis
-            const zLineGeom = new BufferGeometry().setFromPoints([tcpPos, new Vector3().addVectors(tcpPos, zAxis)]);
-            const zLineMat = new LineBasicMaterial({ color: 0x3b82f6, linewidth: 2 });
-            group.add(new Line(zLineGeom, zLineMat));
+            // 只保留 Z 轴（喷枪指向）并加上箭头，明确方向
+            const zDir = new Vector3(0, 0, 1).applyEuler(euler).normalize();
+            const zArrow = new ArrowHelper(zDir, tcpPos, axisLen, 0x3b82f6, axisHeadLen, axisHeadWidth);
+            zArrow.renderOrder = 1002;
+            group.add(zArrow);
 
             // 5. Numbered Digital Badge Billboard on TCP Point
             const numSprite = createNumberSprite(p.index || (idx + 1));
@@ -512,12 +510,13 @@ const RobotModel: React.FC<RobotModelProps> = ({
     fetchPaths();
 
     return () => {
+      isCancelled = true;
       if (pathsGroupRef.current && pathsGroupRef.current.parent) {
         pathsGroupRef.current.parent.remove(pathsGroupRef.current);
         pathsGroupRef.current = null;
       }
     };
-  }, [robot, activeTemplate, pathsVersion, useOptPaths]);
+  }, [robot, activeTemplate, pathsVersion, useOptPaths, pathState, effectiveState]);
 
 
   // 5. Handle Visibility and Wireframe Changes

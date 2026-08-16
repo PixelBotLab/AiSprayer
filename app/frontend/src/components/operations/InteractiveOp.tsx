@@ -316,13 +316,22 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     }
   };
 
-  // State Switcher (RAW / OPT / POI)
-  const handleSelectActiveState = (newState: PathStateType) => {
+  const activatePathStateSnapshot = (newState: PathStateType, explicitPaths?: ManualPathItem[]) => {
+    const targetPaths = explicitPaths ?? (newState === 'poi' ? poiPaths : (newState === 'opt' ? optPaths : rawPaths));
+    stopSimulation();
     setActiveState(newState);
-    const targetPaths = newState === 'poi' ? poiPaths : (newState === 'opt' ? optPaths : rawPaths);
-    setManualPaths(targetPaths);
+    setManualPaths(targetPaths.map((path) => ({ ...path, points: [...(path.points || [])] })));
+    setHoveredWaypoint(null);
+    setHighlightedPathId(null);
+    setSelectedPathIdForEdit(null);
+    setCurrentManualPoints([]);
     if (onPathStateChange) onPathStateChange(newState);
     if (onPathsUpdated) onPathsUpdated();
+  };
+
+  // State Switcher (RAW / OPT / POI)
+  const handleSelectActiveState = (newState: PathStateType) => {
+    activatePathStateSnapshot(newState);
   };
 
   // ─── SAM Segmentation Handlers ──────────────────────────────────────────
@@ -535,14 +544,13 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       });
       if (!res.ok) throw new Error('Failed to save manual paths');
       setRawPaths(manualPaths);
-      setActiveState('raw');
+      activatePathStateSnapshot('raw', manualPaths);
       setManualPathMode(false);
       await fetchTemplateFiles(activeTemplate);
-      if (onPathsUpdated) onPathsUpdated();
       setModalConfig({
         isOpen: true,
         title: 'Success',
-        message: `Saved ${manualPaths.length} TCP paths to raw.path.yaml.`,
+        message: `Saved ${manualPaths.length} TCP paths to scan.raw.path.yaml.`,
         type: 'alert',
       });
     } catch (err: any) {
@@ -599,6 +607,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          mode,
           options: {
             step_size_mm: kinParams.stepSizeMm,
             linear_velocity_mm_s: kinParams.linearSpeedMmS,
@@ -606,25 +615,27 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
           poi_config: poiConfig,
         }),
       });
-      if (!res.ok) throw new Error(`${mode.toUpperCase()} Optimization failed`);
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => null);
+        throw new Error(errBody?.detail || `${mode.toUpperCase()} Optimization failed`);
+      }
       const data = await res.json();
 
       const rep = data.verification_report || data;
-      const paths = data.optimized_paths || [];
+      const paths = (data.optimized_paths || rep.optimized_paths || []) as ManualPathItem[];
 
       if (mode === 'poi') {
         setPoiPaths(paths);
         setPoiReport(rep);
-        handleSelectActiveState('poi');
+        activatePathStateSnapshot('poi', paths);
       } else {
         setOptPaths(paths);
         setOptReport(rep);
-        handleSelectActiveState('opt');
+        activatePathStateSnapshot('opt', paths);
       }
 
       await fetchTemplateFiles(activeTemplate);
       setShowDiagnostics(true);
-      if (onPathsUpdated) onPathsUpdated();
       setModalConfig({
         isOpen: true,
         title: `${mode.toUpperCase()} Optimization Applied`,
@@ -646,10 +657,14 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const handleFetchAnchorPose = async (source: 'home' | 'live') => {
     try {
       const res = await fetch(`http://localhost:8000/api/interactive/robot/anchor_pose?source=${source}`);
-      if (!res.ok) throw new Error('Failed to fetch anchor pose');
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => null);
+        throw new Error(errBody?.detail || 'Failed to fetch anchor pose');
+      }
       const data = await res.json();
       setPoiConfig((prev) => ({
         ...prev,
+        anchor_source: data.source || source,
         ref_rpy_deg: data.rpy_deg || prev.ref_rpy_deg,
       }));
       setModalConfig({
@@ -773,14 +788,15 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       sim.stepIndex += stepIncrement;
 
       if (sim.stepIndex >= sim.steps.length) {
-        sim.stepIndex = 0; // Loop or finish
+        sim.stepIndex = sim.steps.length - 1;
+        sim.isPlaying = false;
       }
 
       const curr = sim.steps[sim.stepIndex];
       const prog = sim.stepIndex / (sim.steps.length - 1);
 
       setSimulationState({
-        isPlaying: true,
+        isPlaying: sim.isPlaying,
         progress: prog,
         speed: sim.speedMultiplier,
         currentPathIndex: curr.pathIdx,
@@ -825,14 +841,15 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       sim.stepIndex += stepIncrement;
 
       if (sim.stepIndex >= sim.steps.length) {
-        sim.stepIndex = 0;
+        sim.stepIndex = sim.steps.length - 1;
+        sim.isPlaying = false;
       }
 
       const curr = sim.steps[sim.stepIndex];
       const prog = sim.stepIndex / (sim.steps.length - 1);
 
       setSimulationState({
-        isPlaying: true,
+        isPlaying: sim.isPlaying,
         progress: prog,
         speed: sim.speedMultiplier,
         currentPathIndex: curr.pathIdx,
@@ -867,14 +884,14 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     setSimulationState((prev) =>
       prev
         ? {
-            ...prev,
-            progress: targetProgress,
-            currentPathIndex: curr.pathIdx,
-            currentStep: targetIdx,
-            currentJoints: curr.q_deg,
-            currentTcpPose: curr.tcp,
-            currentPixel: curr.pixel,
-          }
+          ...prev,
+          progress: targetProgress,
+          currentPathIndex: curr.pathIdx,
+          currentStep: targetIdx,
+          currentJoints: curr.q_deg,
+          currentTcpPose: curr.tcp,
+          currentPixel: curr.pixel,
+        }
         : null
     );
 
@@ -1042,6 +1059,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
           }
           activeState={activeState}
           simulationState={simulationState}
+          sessionData={sessionData}
           onSelectActiveState={handleSelectActiveState}
           zoom={zoom}
           pan={pan}
@@ -1132,9 +1150,8 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
 
             {/* State Badge */}
             <span
-              className={`text-[9px] font-bold font-mono px-1.5 py-0.5 rounded border ${
-                STATE_THEMES[simulationState.activeState].bg
-              } ${STATE_THEMES[simulationState.activeState].text} ${STATE_THEMES[simulationState.activeState].border}`}
+              className={`text-[9px] font-bold font-mono px-1.5 py-0.5 rounded border ${STATE_THEMES[simulationState.activeState].bg
+                } ${STATE_THEMES[simulationState.activeState].text} ${STATE_THEMES[simulationState.activeState].border}`}
             >
               {simulationState.activeState.toUpperCase()} SIM
             </span>
@@ -1161,11 +1178,10 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                 <button
                   key={spd}
                   onClick={() => setSimulationSpeed(spd)}
-                  className={`px-1.5 py-0.5 rounded transition-all ${
-                    simulationState.speed === spd
+                  className={`px-1.5 py-0.5 rounded transition-all ${simulationState.speed === spd
                       ? 'bg-sky-600 text-white font-bold'
                       : 'text-slate-400 hover:text-slate-200'
-                  }`}
+                    }`}
                 >
                   {spd}x
                 </button>

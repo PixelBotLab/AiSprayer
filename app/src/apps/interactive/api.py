@@ -8,7 +8,6 @@ import logging
 import cv2
 import numpy as np
 import yaml
-from scipy.spatial.transform import Rotation as R_scipy
 import open3d as o3d
 from services.camera_service import camera_service
 from core.vision.point_cloud_processor import depth_to_pcd
@@ -373,6 +372,7 @@ def get_session_data(name: str):
 class PoiConstraintConfig(BaseModel):
     ref_rpy_deg: list[float] | None = None  # e.g. [0.0, 0.0, 0.0]
     tolerance_rpy_deg: list[float] = [3.0, 15.0, 180.0]  # [tol_rx, tol_ry, tol_rz]
+    anchor_source: str | None = None  # 'home' | 'live' | 'manual'
 
 
 class KinematicsOptions(BaseModel):
@@ -407,6 +407,8 @@ def verify_paths(name: str, req: VerifyPathRequest = VerifyPathRequest()):
         return res
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Verification error for '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Verification failed: {str(e)}")
@@ -425,6 +427,8 @@ def optimize_paths(name: str, req: OptimizePathRequest = OptimizePathRequest()):
         return res
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.error(f"Optimization error for '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Optimization failed: {str(e)}")
@@ -460,23 +464,13 @@ def get_robot_anchor_pose(source: str = "home"):
 
     solver = CR5Kinematics()
     
-    # 1. Dobot home joint angles: [0, 0, -90, -90, -90, 0] in deg -> convert to radians
+    # 1. Dobot home joint angles must match DobotDriver.go_home(): JointMovJ([0, 0, -90, -90, -90, 0]).
+    # Use controller-frame FK here so POI Home anchor Rx/Ry/Rz matches Dobot TCP pose convention.
     home_deg = [0.0, 0.0, -90.0, -90.0, -90.0, 0.0]
     home_rad = [math.radians(v) for v in home_deg]
-    home_T_flange = solver.forward(home_rad)
-    
-    # Decouple tool offset
-    urdf_tcp = path_verification_service.get_urdf_tcp()
-    xyz_m = [v / 1000.0 for v in urdf_tcp.get("xyz_mm", [0, 0, 0])]
-    rpy_deg = urdf_tcp.get("rpy_deg", [0, 0, 0])
-    R_tcp = R_scipy.from_euler('xyz', rpy_deg, degrees=True).as_matrix()
-    T_tcp = np.eye(4)
-    T_tcp[:3, :3] = R_tcp
-    T_tcp[:3, 3] = xyz_m
-    
-    home_T_gun = home_T_flange @ T_tcp
-    home_rpy = [round(float(v), 2) for v in R_scipy.from_matrix(home_T_gun[:3, :3]).as_euler('xyz', degrees=True)]
-    home_xyz = [round(float(v) * 1000.0, 2) for v in home_T_gun[:3, 3]]
+    home_xyz, home_rpy_raw = solver.forward_controller(home_rad)
+    home_xyz = [round(float(v), 2) for v in home_xyz]
+    home_rpy = [round(float(v), 2) for v in home_rpy_raw]
 
     # 2. Live robot TCP pose if connected
     live_pose, _ = robot_service.get_current_pose()
@@ -486,7 +480,12 @@ def get_robot_anchor_pose(source: str = "home"):
         live_xyz = [round(float(live_pose[0]), 2), round(float(live_pose[1]), 2), round(float(live_pose[2]), 2)]
         live_rpy = [round(float(live_pose[3]), 2), round(float(live_pose[4]), 2), round(float(live_pose[5]), 2)]
 
-    if source == "live" and live_rpy:
+    if source not in {"home", "live"}:
+        raise HTTPException(status_code=400, detail="source must be 'home' or 'live'")
+
+    if source == "live":
+        if not live_rpy:
+            raise HTTPException(status_code=409, detail="Live robot TCP pose is unavailable. Connect the robot before capturing a live POI anchor pose.")
         selected_rpy = live_rpy
         selected_xyz = live_xyz
     else:

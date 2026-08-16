@@ -50,8 +50,8 @@ class PoiConstraintOptimizer:
         if len(orig_waypoints) < 1:
             return path_item, False
 
-        effective_tol = tolerance_rpy_deg or tol_rpy_deg
-        tol = effective_tol if effective_tol and len(effective_tol) == 3 else [3.0, 15.0, 180.0]
+        effective_tol = tolerance_rpy_deg or tol_rpy_deg or [3.0, 15.0, 180.0]
+        tol = effective_tol if len(effective_tol) == 3 else [3.0, 15.0, 180.0]
         tol_rx, tol_ry, tol_rz = float(tol[0]), float(tol[1]), float(tol[2])
 
         # Anchor reference matrix
@@ -88,8 +88,14 @@ class PoiConstraintOptimizer:
             best_T_gun = None
             best_q = None
             best_score = float('inf')
-
-            # Search within bounded tolerance envelope around anchor R_ref
+            best_normal_angle_deg = None
+            surface_normal = np.array(wp.get("surface_normal_base", [0.0, 0.0, 1.0]), dtype=np.float64)
+            n_norm = np.linalg.norm(surface_normal)
+            if n_norm > 1e-6:
+                surface_normal = surface_normal / n_norm
+            else:
+                surface_normal = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+            desired_tool_z = -surface_normal
             for drx in rx_steps:
                 for dry in ry_steps:
                     for drz in rz_steps:
@@ -126,10 +132,16 @@ class PoiConstraintOptimizer:
                             if sin_theta5 < 0.08:
                                 singularity_penalty += (0.08 - sin_theta5) * 60.0
 
+                            # Prefer the absolute-anchor candidate whose tool Z axis is closest to the local surface normal direction.
+                            tool_z = R_cand[:, 2]
+                            cos_align = float(np.clip(np.dot(tool_z, desired_tool_z), -1.0, 1.0))
+                            normal_angle_deg = float(np.degrees(np.arccos(cos_align)))
+                            normal_alignment_penalty = normal_angle_deg * 0.08
+
                             # Proximity penalty to anchor reference
                             delta_penalty = (abs(drx) * 0.1 + abs(dry) * 0.05 + abs(drz) * 0.002)
 
-                            score = dq_norm + singularity_penalty + delta_penalty
+                            score = dq_norm + singularity_penalty + delta_penalty + normal_alignment_penalty
                             if max_dq_deg > 50.0:
                                 score += 150.0
 
@@ -137,6 +149,7 @@ class PoiConstraintOptimizer:
                                 best_score = score
                                 best_T_gun = T_cand_gun
                                 best_q = sol
+                                best_normal_angle_deg = normal_angle_deg
 
             if best_T_gun is not None:
                 new_wp = copy.deepcopy(wp)
@@ -145,6 +158,12 @@ class PoiConstraintOptimizer:
                     new_wp["tcp_pose_base"] = new_pose
                 else:
                     new_wp.update(new_pose)
+
+                new_wp["poi_alignment"] = {
+                    "surface_normal_angle_deg": round(float(best_normal_angle_deg or 0.0), 2),
+                    "score": round(float(best_score), 4),
+                    "model": "absolute_anchor_tolerance_closest_to_surface_normal",
+                }
 
                 opt_waypoints.append(new_wp)
                 curr_q = best_q
@@ -175,7 +194,10 @@ class PoiConstraintOptimizer:
         Optimizes all manual paths in paths_data using POI constraint envelope search.
         Returns: (poi_paths_data, poi_verification_report)
         """
-        effective_tol = tolerance_rpy_deg or tol_rpy_deg
+        effective_tol = tolerance_rpy_deg or tol_rpy_deg or [3.0, 15.0, 180.0]
+        if len(effective_tol) != 3:
+            effective_tol = [3.0, 15.0, 180.0]
+        effective_tol = [float(v) for v in effective_tol]
         paths = paths_data.get("paths", [])
         poi_paths = []
         last_q = None
@@ -197,8 +219,11 @@ class PoiConstraintOptimizer:
         poi_data["paths"] = poi_paths
         poi_data["type"] = "poi"
         poi_data["poi_config"] = {
+            "mode": "absolute_anchor_tolerance",
             "ref_rpy_deg": ref_rpy_deg,
-            "tolerance_rpy_deg": tolerance_rpy_deg
+            "tolerance_rpy_deg": effective_tol,
+            "euler_order": "xyz",
+            "units": "deg",
         }
 
         poi_report = self.verifier.verify_all_paths(poi_data)

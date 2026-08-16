@@ -23,6 +23,7 @@ import type {
   LiveNormalInfo,
   PathStateType,
   SimulationState,
+  SessionData,
 } from './types';
 import { PATH_PALETTE } from './types';
 import { SamMaskOverlay } from './SamMaskOverlay';
@@ -50,6 +51,7 @@ interface InteractiveCanvasProps {
   verificationReport: VerificationReport | null;
   activeState?: PathStateType;
   simulationState?: SimulationState | null;
+  sessionData?: SessionData | null;
   onSelectActiveState?: (state: PathStateType) => void;
   zoom: number;
   pan: { x: number; y: number };
@@ -108,6 +110,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
   verificationReport,
   activeState = 'raw',
   simulationState = null,
+  sessionData = null,
   onSelectActiveState,
   zoom,
   pan,
@@ -352,6 +355,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
                 verificationReport={verificationReport}
                 activeState={activeState}
                 simulationState={simulationState}
+                sessionData={sessionData}
                 onSelectPathForEdit={onSelectPathForEdit}
                 setHighlightedPathId={setHighlightedPathId}
                 setHoveredWaypoint={setHoveredWaypoint}

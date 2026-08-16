@@ -207,33 +207,25 @@ class ManualPathService:
             "calib_source": calib_desc
         }
 
+    def _ensure_state_type(self, state_type: str) -> str:
+        state = (state_type or "").strip().lower()
+        if state not in {"raw", "opt", "poi"}:
+            raise ValueError(f"Invalid path state '{state_type}'. Expected one of: raw, opt, poi")
+        return state
+
     def load_manual_paths(self, template_name: str, state_type: str = "raw", use_opt: bool = False) -> dict:
         """Loads scan.raw.path.yaml, scan.opt.path.yaml, or scan.poi.path.yaml for a given template."""
         if use_opt:
             state_type = "opt"
+        state_type = self._ensure_state_type(state_type)
 
         template_dir = os.path.join(self.template_group_dir, template_name)
-        
-        # Priority order for file resolution
-        candidates = [
-            f"scan.{state_type}.path.yaml",
-            f"{state_type}.path.yaml",
-            f"scan.manual_{state_type}_paths.yaml",
-        ]
-        if state_type == "raw":
-            candidates.append("scan.manual_paths.yaml")
-
-        paths_file = None
-        for cand in candidates:
-            cand_path = os.path.join(template_dir, cand)
-            if os.path.exists(cand_path):
-                paths_file = cand_path
-                break
-        
-        if not paths_file:
+        paths_file = os.path.join(template_dir, f"scan.{state_type}.path.yaml")
+        if not os.path.exists(paths_file):
             return {
                 "template": template_name,
                 "type": state_type,
+                "state_type": state_type,
                 "paths": [],
                 "standoff_distance_mm": 150.0
             }
@@ -248,6 +240,7 @@ class ManualPathService:
             return {
                 "template": template_name,
                 "type": state_type,
+                "state_type": state_type,
                 "paths": [],
                 "standoff_distance_mm": 150.0
             }
@@ -334,6 +327,7 @@ class ManualPathService:
 
     def save_manual_paths(self, template_name: str, paths_data: dict, state_type: str = "raw") -> bool:
         """Saves manual paths to scan.raw.path.yaml / scan.opt.path.yaml / scan.poi.path.yaml."""
+        state_type = self._ensure_state_type(state_type)
         template_dir = os.path.join(self.template_group_dir, template_name)
         if not os.path.exists(template_dir):
             os.makedirs(template_dir, exist_ok=True)
@@ -402,15 +396,12 @@ class ManualPathService:
                 yaml.dump(paths_data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
             logger.info(f"Successfully saved manual TCP paths to: {paths_file}")
 
-            # Clean stale downstream optimization and report files if raw paths changed
+            # Clean stale downstream optimization and report files if raw paths changed.
+            # Only current scan.* files are managed; legacy filenames are intentionally ignored.
             if state_type == "raw":
                 stale_files = [
                     "scan.opt.path.yaml", "scan.poi.path.yaml",
                     "scan.raw.report.json", "scan.opt.report.json", "scan.poi.report.json",
-                    "opt.path.yaml", "poi.path.yaml",
-                    "raw.report.json", "opt.report.json", "poi.report.json",
-                    "scan.manual_opt_paths.yaml", "scan.manual_paths.yaml",
-                    "scan.manual_paths.report.json", "scan.manual_opt_paths.report.json"
                 ]
                 for stale_file in stale_files:
                     stale_path = os.path.join(template_dir, stale_file)

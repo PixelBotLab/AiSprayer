@@ -81,6 +81,44 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
   // Active paths list based on selected state
   const currentPaths = activeState === 'poi' ? poiPaths : (activeState === 'opt' ? optPaths : rawPaths);
 
+  const findPathById = (paths: ManualPathItem[], pathId: number | undefined, fallbackIndex: number) => {
+    if (pathId !== undefined) {
+      const matched = paths.find((p) => p.path_id === pathId);
+      if (matched) return matched;
+    }
+    return paths[fallbackIndex] || null;
+  };
+
+  const findWaypointByIndex = (path: ManualPathItem | null, waypointIndex: number | undefined, fallbackIndex: number) => {
+    if (!path?.points) return null;
+    if (waypointIndex !== undefined) {
+      const matched = path.points.find((p) => p.index === waypointIndex);
+      if (matched) return matched;
+    }
+    return path.points[fallbackIndex] || null;
+  };
+
+  const poseText = (pose?: { x: number; y: number; z: number; rx: number; ry: number; rz: number } | null) => {
+    if (!pose) return <span className="text-slate-600">Missing</span>;
+    return <span>XYZ[{Math.round(pose.x)}, {Math.round(pose.y)}, {Math.round(pose.z)}] RPY[{Math.round(pose.rx)}°, {Math.round(pose.ry)}°, {Math.round(pose.rz)}°]</span>;
+  };
+
+  const deltaText = (
+    base?: { rx: number; ry: number; rz: number } | null,
+    target?: { rx: number; ry: number; rz: number } | null
+  ) => {
+    if (!base || !target) return <span className="text-slate-600">Δ—</span>;
+    const dRx = target.rx - base.rx;
+    const dRy = target.ry - base.ry;
+    const dRz = target.rz - base.rz;
+    const changed = Math.max(Math.abs(dRx), Math.abs(dRy), Math.abs(dRz)) > 0.5;
+    return (
+      <span className={changed ? 'text-amber-300' : 'text-slate-500'}>
+        Δ[{dRx.toFixed(1)}°, {dRy.toFixed(1)}°, {dRz.toFixed(1)}°]
+      </span>
+    );
+  };
+
   const maxVelLimits = [180, 180, 180, 180, 180, 180];
 
   // Helper to extract peak joint velocity across a report's paths
@@ -515,46 +553,43 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
                   <thead className="bg-slate-900/90 text-slate-400 font-mono text-[9px] border-b border-slate-800 sticky top-0">
                     <tr>
                       <th className="p-1.5 text-center">WP</th>
-                      <th className="p-1.5 text-left text-slate-300">Pos (X, Y, Z)</th>
-                      <th className="p-1.5 text-left text-slate-300">RAW [Rx, Ry, Rz]</th>
-                      <th className="p-1.5 text-left text-sky-400">OPT [Rx, Ry, Rz]</th>
-                      <th className="p-1.5 text-left text-emerald-400">POI [Rx, Ry, Rz]</th>
+                      <th className="p-1.5 text-left text-slate-300">RAW Pose</th>
+                      <th className="p-1.5 text-left text-sky-400">OPT Pose / ΔRaw</th>
+                      <th className="p-1.5 text-left text-emerald-400">POI Pose / ΔRaw</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/60">
                     {currentPaths[selectedPathIndex].points.map((wp, wIdx) => {
-                      const rawWp = rawPaths[selectedPathIndex]?.points?.[wIdx];
-                      const optWp = optPaths[selectedPathIndex]?.points?.[wIdx];
-                      const poiWp = poiPaths[selectedPathIndex]?.points?.[wIdx];
+                      const pathId = currentPaths[selectedPathIndex]?.path_id;
+                      const waypointIndex = wp.index || wIdx + 1;
+                      const rawPath = findPathById(rawPaths, pathId, selectedPathIndex);
+                      const optPath = findPathById(optPaths, pathId, selectedPathIndex);
+                      const poiPath = findPathById(poiPaths, pathId, selectedPathIndex);
+                      const rawWp = findWaypointByIndex(rawPath, waypointIndex, wIdx);
+                      const optWp = findWaypointByIndex(optPath, waypointIndex, wIdx);
+                      const poiWp = findWaypointByIndex(poiPath, waypointIndex, wIdx);
 
-                      const rawPose = rawWp?.tcp_pose_base || wp.tcp_pose_base;
-                      const optPose = optWp?.tcp_pose_base;
-                      const poiPose = poiWp?.tcp_pose_base;
+                      const rawPose = rawWp?.tcp_pose_base || null;
+                      const optPose = optWp?.tcp_pose_base || null;
+                      const poiPose = poiWp?.tcp_pose_base || null;
+                      const hasMismatch = !rawWp || (optPaths.length > 0 && !optWp) || (poiPaths.length > 0 && !poiWp);
 
                       return (
-                        <tr key={wIdx} className="hover:bg-slate-800/40 transition-colors group">
+                        <tr key={`${pathId || selectedPathIndex}-${waypointIndex}`} className="hover:bg-slate-800/40 transition-colors group">
                           <td className="p-1.5 text-center font-bold text-slate-400">
-                            #{wp.index || wIdx + 1}
-                          </td>
-                          <td className="p-1.5 font-mono text-slate-400 text-[8.5px]">
-                            {Math.round(rawPose.x)}, {Math.round(rawPose.y)}, {Math.round(rawPose.z)}
+                            <div>#{waypointIndex}</div>
+                            {hasMismatch && <div className="text-[8px] text-amber-400">MISMATCH</div>}
                           </td>
                           <td className="p-1.5 text-slate-300 font-mono text-[8.5px]">
-                            [{Math.round(rawPose.rx)}°, {Math.round(rawPose.ry)}°, {Math.round(rawPose.rz)}°]
+                            {poseText(rawPose)}
                           </td>
-                          <td className="p-1.5 text-sky-300 font-mono text-[8.5px]">
-                            {optPose ? (
-                              <span>[{Math.round(optPose.rx)}°, {Math.round(optPose.ry)}°, {Math.round(optPose.rz)}°]</span>
-                            ) : (
-                              <span className="text-slate-600">-</span>
-                            )}
+                          <td className="p-1.5 text-sky-300 font-mono text-[8.5px] space-y-0.5">
+                            <div>{poseText(optPose)}</div>
+                            <div>{deltaText(rawPose, optPose)}</div>
                           </td>
-                          <td className="p-1.5 text-emerald-300 font-mono text-[8.5px]">
-                            {poiPose ? (
-                              <span>[{Math.round(poiPose.rx)}°, {Math.round(poiPose.ry)}°, {Math.round(poiPose.rz)}°]</span>
-                            ) : (
-                              <span className="text-slate-600">-</span>
-                            )}
+                          <td className="p-1.5 text-emerald-300 font-mono text-[8.5px] space-y-0.5">
+                            <div>{poseText(poiPose)}</div>
+                            <div>{deltaText(rawPose, poiPose)}</div>
                           </td>
                         </tr>
                       );
