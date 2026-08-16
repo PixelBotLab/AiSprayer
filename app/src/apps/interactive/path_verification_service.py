@@ -55,6 +55,10 @@ class PathVerificationService:
         return verifier
 
 
+    def get_urdf_tcp(self) -> dict:
+        """Returns the current active URDF tool TCP offset."""
+        return CR5PathVerifier.load_tcp_from_urdf()
+
     def verify_raw_path_data(self, paths_data: dict, options: dict = None) -> dict:
         """
         Directly verifies arbitrary path dictionary data in memory without template file dependency.
@@ -62,6 +66,7 @@ class PathVerificationService:
         verifier = self.create_verifier(options)
         report = verifier.verify_all_paths(paths_data)
         report["urdf_info"] = verifier.urdf_info
+        report["urdf_tcp"] = verifier.urdf_tcp
         report["nominal_speed_mm_s"] = verifier.linear_velocity_mm_s
         return report
 
@@ -73,6 +78,7 @@ class PathVerificationService:
         verifier = self.create_verifier(options)
         opt_data, opt_report = verifier.optimize_all_paths(paths_data)
         opt_report["urdf_info"] = verifier.urdf_info
+        opt_report["urdf_tcp"] = verifier.urdf_tcp
         opt_report["nominal_speed_mm_s"] = verifier.linear_velocity_mm_s
         return opt_data, opt_report
 
@@ -99,6 +105,7 @@ class PathVerificationService:
         report = verifier.verify_all_paths(paths_data)
         report["source_file"] = os.path.basename(paths_file)
         report["urdf_info"] = verifier.urdf_info
+        report["urdf_tcp"] = verifier.urdf_tcp
         report["nominal_speed_mm_s"] = verifier.linear_velocity_mm_s
 
         # Persist report to disk JSON

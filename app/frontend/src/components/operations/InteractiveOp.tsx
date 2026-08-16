@@ -298,15 +298,22 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
 
   // Configurable Kinematic & Tool Parameters
   const [kinParams, setKinParams] = useState({
-    tcpOffsetX: 50.0,
-    tcpOffsetY: 0.0,
-    tcpOffsetZ: 0.0,
-    tcpOffsetRx: 0.0,
-    tcpOffsetRy: 90.0,
-    tcpOffsetRz: 0.0,
     stepSizeMm: 1.5,
     linearSpeedMmS: 120.0,
   });
+
+  // URDF Tool TCP state extracted automatically from robot model
+  const [urdfTcp, setUrdfTcp] = useState<{
+    has_tool: boolean;
+    tool_name: string;
+    xyz_mm: number[];
+    rpy_deg: number[];
+    urdf_source?: string;
+  } | null>(null);
+
+  // Template atomic loading and synchronization state
+  const [isLoadingTemplate, setIsLoadingTemplate] = useState<boolean>(false);
+  const templateAbortRef = useRef<AbortController | null>(null);
 
 
 
@@ -545,129 +552,106 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     }
   };
 
+  const fetchUrdfTcp = async () => {
+    try {
+      const res = await fetch('http://localhost:8000/api/interactive/robot/urdf_tool_tcp');
+      if (res.ok) {
+        const data = await res.json();
+        setUrdfTcp(data);
+      }
+    } catch (err) {
+      console.warn('Could not fetch URDF TCP:', err);
+    }
+  };
+
   useEffect(() => {
     fetchTemplates();
+    fetchUrdfTcp();
   }, []);
 
-  const fetchSavedMasks = async (templateName: string) => {
+  const loadTemplateAtomic = async (templateName: string, forceUseOpt?: boolean) => {
+    if (templateAbortRef.current) {
+      templateAbortRef.current.abort();
+    }
+    const abortController = new AbortController();
+    templateAbortRef.current = abortController;
+
+    setIsLoadingTemplate(true);
     try {
-      const res = await fetch(`http://localhost:8000/api/interactive/templates/${templateName}/masks`);
-      if (res.ok) {
-        const data = await res.json();
-        setSavedMasks(data.masks || []);
+      const res = await fetch(`http://localhost:8000/api/interactive/templates/${templateName}/summary`, {
+        signal: abortController.signal
+      });
+      if (!res.ok) throw new Error('Failed to fetch template summary');
+      const data = await res.json();
+      if (abortController.signal.aborted) return;
+
+      const targetUseOpt = forceUseOpt !== undefined ? forceUseOpt : (displayPathSource === 'opt');
+
+      // Preload image before committing geometry to prevent coordinate desync
+      if (data.has_image) {
+        const v = Date.now();
+        const imgUrl = `http://localhost:8000/templates/${templateName}/scan.jpg?t=${v}`;
+        await new Promise<void>((resolve) => {
+          const img = new Image();
+          img.onload = () => {
+            if (!abortController.signal.aborted) {
+              setNatSize({ w: img.naturalWidth || 1280, h: img.naturalHeight || 800 });
+              setImageVersion(v);
+            }
+            resolve();
+          };
+          img.onerror = () => {
+            if (!abortController.signal.aborted) {
+              setNatSize(null);
+              setImageVersion(v);
+            }
+            resolve();
+          };
+          img.src = imgUrl;
+        });
       } else {
-        setSavedMasks([]);
+        setNatSize(null);
       }
-    } catch (err) {
-      console.error('Failed to fetch saved masks:', err);
-      setSavedMasks([]);
+
+      if (abortController.signal.aborted) return;
+
+      // Atomically commit state
+      setFiles(data.files || []);
+      setSavedMasks(data.masks || []);
+      setRawManualPaths(data.raw_paths || []);
+      setOptManualPaths(data.opt_paths || []);
+
+      const chosenPaths = (targetUseOpt && data.opt_paths?.length > 0) ? data.opt_paths : (data.raw_paths || []);
+      setManualPaths(chosenPaths);
+      if (data.standoff_distance_mm) {
+        setStandoffDist(Number(data.standoff_distance_mm));
+      }
+
+      setRawReportCache(data.raw_report || null);
+      setOptReportCache(data.opt_report || null);
+      if (data.raw_report || data.opt_report) {
+        setVerificationReport((targetUseOpt && data.opt_report) ? data.opt_report : (data.raw_report || data.opt_report));
+      } else {
+        setVerificationReport(null);
+      }
+
+      if (data.urdf_tcp) {
+        setUrdfTcp(data.urdf_tcp);
+      }
+    } catch (err: any) {
+      if (err.name !== 'AbortError') {
+        console.error('Failed to load template summary:', err);
+      }
+    } finally {
+      if (!abortController.signal.aborted) {
+        setIsLoadingTemplate(false);
+      }
     }
   };
-
-  const fetchManualPaths = async (templateName: string, useOpt: boolean = false) => {
-    try {
-      // 1. Fetch raw paths
-      const rawRes = await fetch(`http://localhost:8000/api/interactive/templates/${templateName}/manual_paths?use_opt=false`);
-      let loadedRawPaths: ManualPathItem[] = [];
-      if (rawRes.ok) {
-        const data = await rawRes.json();
-        loadedRawPaths = data.paths || [];
-        setRawManualPaths(loadedRawPaths);
-        if (data.standoff_distance_mm) {
-          setStandoffDist(Number(data.standoff_distance_mm));
-        }
-      } else {
-        setRawManualPaths([]);
-      }
-
-      // 2. Fetch opt paths
-      const optRes = await fetch(`http://localhost:8000/api/interactive/templates/${templateName}/manual_paths?use_opt=true`);
-      let loadedOptPaths: ManualPathItem[] = [];
-      if (optRes.ok) {
-        const optData = await optRes.json();
-        if (optData.loaded_from === 'scan.manual_opt_paths.yaml') {
-          loadedOptPaths = optData.paths || [];
-          setOptManualPaths(loadedOptPaths);
-        } else {
-          setOptManualPaths([]);
-        }
-      } else {
-        setOptManualPaths([]);
-      }
-
-      // 3. Set current active paths
-      if (useOpt && loadedOptPaths.length > 0) {
-        setManualPaths(loadedOptPaths);
-        setDisplayPathSource('opt');
-      } else {
-        setManualPaths(loadedRawPaths);
-        setDisplayPathSource('raw');
-      }
-
-      // Eagerly fetch both raw and opt diagnostic reports from backend disk
-      try {
-        const [rawRepRes, optRepRes] = await Promise.all([
-          fetch(`http://localhost:8000/api/interactive/templates/${templateName}/verification_report?use_opt=false`),
-          fetch(`http://localhost:8000/api/interactive/templates/${templateName}/verification_report?use_opt=true`)
-        ]);
-        let rCache = null;
-        let oCache = null;
-        if (rawRepRes.ok) {
-          rCache = await rawRepRes.json();
-          setRawReportCache(rCache);
-        }
-        if (optRepRes.ok) {
-          oCache = await optRepRes.json();
-          setOptReportCache(oCache);
-        }
-        
-        if (verifiedPathTab === 'opt' && oCache) {
-          setVerificationReport(oCache);
-        } else if (verifiedPathTab === 'raw' && rCache) {
-          setVerificationReport(rCache);
-        } else if (rCache) {
-          setVerificationReport(rCache);
-        } else if (oCache) {
-          setVerificationReport(oCache);
-        }
-      } catch (e) {
-        console.warn('Could not eager load reports:', e);
-      }
-
-    } catch (err) {
-      console.error('Failed to fetch manual paths:', err);
-      setManualPaths([]);
-      setRawManualPaths([]);
-      setOptManualPaths([]);
-    }
-  };
-
-
-
-  const fetchFiles = async (templateName: string) => {
-    try {
-      const res = await fetch(`http://localhost:8000/api/interactive/templates/${templateName}/files`);
-      if (res.ok) {
-        const data = await res.json();
-        // Ensure sorted by ctime descending (newest first)
-        const sorted = (data.files || []).sort((a: FileItem, b: FileItem) => b.ctime - a.ctime);
-        setFiles(sorted);
-        setImageVersion(Date.now());
-        
-        // Load existing masks from masks.yaml and manual paths from scan.manual_paths.yaml
-        fetchSavedMasks(templateName);
-        fetchManualPaths(templateName);
-      }
-
-    } catch (err) {
-      console.error('Failed to fetch template files:', err);
-    }
-  };
-
 
   useEffect(() => {
     if (activeTemplate) {
-      fetchFiles(activeTemplate);
+      loadTemplateAtomic(activeTemplate);
       // Reset seg mode, manual path mode and view transforms
       setSegMode(false);
       setManualPathMode(false);
@@ -723,7 +707,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     try {
       const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/capture`, { method: 'POST' });
       if (res.ok) {
-        fetchFiles(activeTemplate);
+        loadTemplateAtomic(activeTemplate);
       } else {
         const err = await res.json();
         showAlert('Capture Failed', err.detail || 'Failed to capture camera frames.');
@@ -742,7 +726,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/reconstruct`, { method: 'POST' });
       if (res.ok) {
         const data = await res.json();
-        fetchFiles(activeTemplate);
+        loadTemplateAtomic(activeTemplate);
         if (onMeshUpdated) {
           onMeshUpdated();
         }
@@ -784,28 +768,26 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     }));
   }, [activeTemplate, verificationReport, verifiedPathTab, isVerifyingPaths, isOptimizingPaths, kinParams]);
 
-  // Listen to requests from ConsoleLogZone
+  // Listen for actions dispatched from ConsoleLogZone
   useEffect(() => {
-    const onReqVerify = (e: any) => {
+    const handleSetKinParams = (e: any) => {
       if (e.detail?.kinParams) setKinParams(e.detail.kinParams);
-      handleVerifyPaths(e.detail?.useOpt || false);
     };
-    const onReqOpt = (e: any) => {
+    const handleTriggerVerify = (e: any) => {
       if (e.detail?.kinParams) setKinParams(e.detail.kinParams);
+      handleVerifyPaths(e.detail?.useOpt ?? (verifiedPathTab === 'opt'));
+    };
+    const handleTriggerOptimize = () => {
       handleOptimizePaths();
     };
-    const onReqTab = (e: any) => {
-      if (e.detail?.tab) switchVerifiedTab(e.detail.tab);
-    };
 
-    window.addEventListener('request_tcp_verify', onReqVerify);
-    window.addEventListener('request_tcp_optimize', onReqOpt);
-    window.addEventListener('request_tcp_tab_switch', onReqTab);
-
+    window.addEventListener('tcp_set_kin_params', handleSetKinParams);
+    window.addEventListener('tcp_trigger_verify', handleTriggerVerify);
+    window.addEventListener('tcp_trigger_optimize', handleTriggerOptimize);
     return () => {
-      window.removeEventListener('request_tcp_verify', onReqVerify);
-      window.removeEventListener('request_tcp_optimize', onReqOpt);
-      window.removeEventListener('request_tcp_tab_switch', onReqTab);
+      window.removeEventListener('tcp_set_kin_params', handleSetKinParams);
+      window.removeEventListener('tcp_trigger_verify', handleTriggerVerify);
+      window.removeEventListener('tcp_trigger_optimize', handleTriggerOptimize);
     };
   }, [activeTemplate, isVerifyingPaths, isOptimizingPaths, kinParams, rawReportCache, optReportCache]);
 
@@ -818,8 +800,6 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         options: {
           step_size_mm: Number(kinParams.stepSizeMm),
           linear_velocity_mm_s: Number(kinParams.linearSpeedMmS),
-          tcp_offset_xyz_mm: [Number(kinParams.tcpOffsetX), Number(kinParams.tcpOffsetY), Number(kinParams.tcpOffsetZ)],
-          tcp_offset_rpy_deg: [Number(kinParams.tcpOffsetRx), Number(kinParams.tcpOffsetRy), Number(kinParams.tcpOffsetRz)]
         }
       };
       const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/verify_paths`, {
@@ -907,8 +887,6 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         options: {
           step_size_mm: Number(kinParams.stepSizeMm),
           linear_velocity_mm_s: Number(kinParams.linearSpeedMmS),
-          tcp_offset_xyz_mm: [Number(kinParams.tcpOffsetX), Number(kinParams.tcpOffsetY), Number(kinParams.tcpOffsetZ)],
-          tcp_offset_rpy_deg: [Number(kinParams.tcpOffsetRx), Number(kinParams.tcpOffsetRy), Number(kinParams.tcpOffsetRz)]
         }
       };
       const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/optimize_paths`, {
@@ -922,8 +900,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         setVerificationReport(data);
         setVerifiedPathTab('opt');
         setDisplayPathSource('opt');
-        await fetchManualPaths(activeTemplate, true);
-        await fetchFiles(activeTemplate);
+        await loadTemplateAtomic(activeTemplate, true);
         if (onPathsUpdated) onPathsUpdated();
         showAlert(
           'Optimization Complete', 
@@ -1159,7 +1136,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       
       if (res.ok) {
         setSegMode(false);
-        fetchFiles(activeTemplate);
+        loadTemplateAtomic(activeTemplate);
       } else {
         const err = await res.json();
         showAlert('Save Failed', err.detail || 'Failed to write masks.');
@@ -1398,7 +1375,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         setManualPaths(allPaths);
         setSelectedPathIdForEdit(null);
         setCurrentManualPoints([]);
-        fetchFiles(activeTemplate);
+        loadTemplateAtomic(activeTemplate);
         if (onPathsUpdated) onPathsUpdated();
         showAlert('Save Successful', `Saved ${allPaths.length} manual TCP path(s) to scan.manual_paths.yaml.`);
       } else {
@@ -1850,72 +1827,29 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
 
                   {showParamsAccordion && (
                     <div className="p-4 border-t border-slate-800 bg-slate-950/90 flex flex-col gap-4 text-[11px]">
-                      {/* Section 1: Tool Center Point (TCP) Offsets */}
+                      {/* Section 1: Tool Center Point (TCP) from URDF */}
                       <div>
                         <div className="text-slate-400 font-semibold mb-2 flex items-center justify-between border-b border-slate-800 pb-1">
-                          <span>1. Tool Center Point (TCP) Flange Offsets</span>
-                          <span className="text-[10px] text-slate-500 font-normal">End-Effector Nozzle Calibration</span>
+                          <span>1. Tool Center Point (TCP) Configuration</span>
+                          <span className="text-[10px] text-emerald-400 font-mono">
+                            {urdfTcp?.has_tool ? `URDF Tool: ${urdfTcp.tool_name}` : 'Default Flange (No Tool)'}
+                          </span>
                         </div>
-                        <div className="grid grid-cols-2 md:grid-cols-6 gap-2.5">
-                          <div>
-                            <label className="text-slate-400 block mb-0.5 text-[10px]">TCP Offset X (mm)</label>
-                            <input
-                              type="number"
-                              step="1"
-                              value={kinParams.tcpOffsetX}
-                              onChange={e => setKinParams({ ...kinParams, tcpOffsetX: parseFloat(e.target.value) || 0 })}
-                              className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200 font-mono"
-                            />
+                        <div className="bg-slate-900/90 border border-slate-800 rounded-lg p-3 flex flex-wrap items-center justify-between gap-4">
+                          <div className="flex items-center gap-2">
+                            <span className="text-slate-400 text-xs">TCP Position (mm):</span>
+                            <span className="font-mono text-xs text-sky-300 font-medium">
+                              [{urdfTcp?.xyz_mm?.[0] ?? 0}, {urdfTcp?.xyz_mm?.[1] ?? 0}, {urdfTcp?.xyz_mm?.[2] ?? 0}]
+                            </span>
                           </div>
-                          <div>
-                            <label className="text-slate-400 block mb-0.5 text-[10px]">TCP Offset Y (mm)</label>
-                            <input
-                              type="number"
-                              step="1"
-                              value={kinParams.tcpOffsetY}
-                              onChange={e => setKinParams({ ...kinParams, tcpOffsetY: parseFloat(e.target.value) || 0 })}
-                              className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200 font-mono"
-                            />
+                          <div className="flex items-center gap-2">
+                            <span className="text-slate-400 text-xs">TCP Orientation (°):</span>
+                            <span className="font-mono text-xs text-emerald-300 font-medium">
+                              Rx: {urdfTcp?.rpy_deg?.[0] ?? 0}°, Ry: {urdfTcp?.rpy_deg?.[1] ?? 0}°, Rz: {urdfTcp?.rpy_deg?.[2] ?? 0}°
+                            </span>
                           </div>
-                          <div>
-                            <label className="text-slate-400 block mb-0.5 text-[10px]">TCP Offset Z (mm)</label>
-                            <input
-                              type="number"
-                              step="1"
-                              value={kinParams.tcpOffsetZ}
-                              onChange={e => setKinParams({ ...kinParams, tcpOffsetZ: parseFloat(e.target.value) || 0 })}
-                              className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200 font-mono"
-                            />
-                          </div>
-                          <div>
-                            <label className="text-slate-400 block mb-0.5 text-[10px]">Offset Rx (°)</label>
-                            <input
-                              type="number"
-                              step="1"
-                              value={kinParams.tcpOffsetRx}
-                              onChange={e => setKinParams({ ...kinParams, tcpOffsetRx: parseFloat(e.target.value) || 0 })}
-                              className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200 font-mono"
-                            />
-                          </div>
-                          <div>
-                            <label className="text-slate-400 block mb-0.5 text-[10px]">Offset Ry (°)</label>
-                            <input
-                              type="number"
-                              step="1"
-                              value={kinParams.tcpOffsetRy}
-                              onChange={e => setKinParams({ ...kinParams, tcpOffsetRy: parseFloat(e.target.value) || 0 })}
-                              className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200 font-mono"
-                            />
-                          </div>
-                          <div>
-                            <label className="text-slate-400 block mb-0.5 text-[10px]">Offset Rz (°)</label>
-                            <input
-                              type="number"
-                              step="1"
-                              value={kinParams.tcpOffsetRz}
-                              onChange={e => setKinParams({ ...kinParams, tcpOffsetRz: parseFloat(e.target.value) || 0 })}
-                              className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-slate-200 font-mono"
-                            />
+                          <div className="text-[10px] text-slate-500 font-mono">
+                            Source: {urdfTcp?.urdf_source || 'cr5_robot_with_gun.urdf'}
                           </div>
                         </div>
                       </div>
@@ -1980,6 +1914,15 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
           onWheel={handleWheel}
           onMouseDown={handleMouseDown}
         >
+          {isLoadingTemplate && (
+            <div className="absolute inset-0 bg-slate-950/60 backdrop-blur-[2px] flex items-center justify-center z-40 transition-opacity pointer-events-none">
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900/90 border border-slate-700 text-slate-300 text-xs shadow-xl">
+                <RefreshCw size={14} className="animate-spin text-sky-400" />
+                <span>Loading Template...</span>
+              </div>
+            </div>
+          )}
+
           {imageUrl ? (
             <div 
               className="relative inline-block max-w-full max-h-full"
@@ -2032,8 +1975,8 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                   {manualPaths.map((path, pIdx) => {
                     const pts = path.points;
                     const pId = path.path_id ?? (pIdx + 1);
-                    const pathColor = PATH_PALETTE[(pId - 1) % PATH_PALETTE.length];
                     const isHighlighted = highlightedPathId === pId;
+                    const pathStroke = isHighlighted ? '#38bdf8' : '#0284c7';
 
                     // Check if there are verification issues reported on this path
                     const pathRep = verificationReport?.path_reports?.find((r: any) => r.path_id === pId);
@@ -2052,7 +1995,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                               y1={prev.pixel[1]}
                               x2={p.pixel[0]}
                               y2={p.pixel[1]}
-                              stroke={pathColor}
+                              stroke="#38bdf8"
                               strokeWidth={9}
                               strokeOpacity={0.35}
                               strokeLinecap="round"
@@ -2076,7 +2019,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                                 y1={prev.pixel[1]}
                                 x2={p.pixel[0]}
                                 y2={p.pixel[1]}
-                                stroke={hasSegIssue ? '#f43f5e' : pathColor}
+                                stroke={hasSegIssue ? '#f43f5e' : pathStroke}
                                 strokeWidth={isHighlighted ? 3.5 : (hasSegIssue ? 3.0 : 2.5)}
                                 markerEnd="url(#view-traj-arrow)"
                                 strokeDasharray={hasSegIssue ? '6 3' : undefined}
@@ -2188,9 +2131,50 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                           );
                         })}
 
+                        {/* Start Point Number Badge (P1, P2, P3...) at Point 0 */}
+                        {pts.length > 0 && (() => {
+                          const p0 = pts[0];
+                          const [u0, v0] = p0.pixel;
+                          return (
+                            <g 
+                              key={`start-badge-${pId}`}
+                              className="cursor-pointer"
+                              onMouseEnter={() => {
+                                setHoveredWaypoint({ ...p0, path_id: pId } as any);
+                                setHighlightedPathId(pId);
+                              }}
+                              onMouseLeave={() => {
+                                setHoveredWaypoint(null);
+                                setHighlightedPathId(null);
+                              }}
+                            >
+                              <line x1={u0} y1={v0 - 6} x2={u0} y2={v0} stroke="#0284c7" strokeWidth={2} />
+                              <circle 
+                                cx={u0} 
+                                cy={v0 - 15} 
+                                r={10.5} 
+                                fill="#0284c7" 
+                                stroke="#ffffff" 
+                                strokeWidth={1.5}
+                                filter="drop-shadow(0px 2px 4px rgba(0,0,0,0.75))"
+                              />
+                              <text 
+                                x={u0} 
+                                y={v0 - 14.5} 
+                                textAnchor="middle" 
+                                dominantBaseline="central" 
+                                fill="#ffffff" 
+                                fontSize={9.5} 
+                                fontWeight="bold"
+                                style={{ pointerEvents: 'none' }}
+                              >
+                                {`P${pId}`}
+                              </text>
+                            </g>
+                          );
+                        })()}
 
-
-                        {/* Each Waypoint in Path */}
+                        {/* Each Waypoint in Path (Waypoints 1+) */}
                         {pts.map((pt, idx) => {
                           const [u, v] = pt.pixel;
                           const dx = pt.normal_2d_proj?.[0] ?? 0;
@@ -2223,35 +2207,39 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                                 <circle cx={u} cy={v} r={3.5} fill="#ef4444" opacity={0.85} style={{ pointerEvents: 'none' }} />
                               )}
 
-                              {/* Physical Surface Point Marker — large hit area */}
-                              <circle cx={u} cy={v} r={14} fill="transparent" />
-                              <circle 
-                                cx={u} 
-                                cy={v} 
-                                r={isHighlighted ? 9 : 7.5} 
-                                fill="white" 
-                                filter="drop-shadow(0px 0px 4px rgba(0,0,0,0.8))" 
-                                style={{ pointerEvents: 'none' }} 
-                              />
-                              <circle 
-                                cx={u} 
-                                cy={v} 
-                                r={isHighlighted ? 6.5 : 5.5} 
-                                fill={pathColor} 
-                                style={{ pointerEvents: 'none' }} 
-                              />
-                              <text 
-                                x={u} 
-                                y={v + 0.5} 
-                                textAnchor="middle" 
-                                dominantBaseline="central" 
-                                fill="white" 
-                                fontSize={isHighlighted ? 9 : 8} 
-                                fontWeight="bold" 
-                                style={{ pointerEvents: 'none' }}
-                              >
-                                {idx + 1}
-                              </text>
+                              {/* Physical Surface Point Marker for waypoints after start point */}
+                              {idx > 0 && (
+                                <>
+                                  <circle cx={u} cy={v} r={12} fill="transparent" />
+                                  <circle 
+                                    cx={u} 
+                                    cy={v} 
+                                    r={isHighlighted ? 7.5 : 6} 
+                                    fill="white" 
+                                    filter="drop-shadow(0px 0px 3px rgba(0,0,0,0.8))" 
+                                    style={{ pointerEvents: 'none' }} 
+                                  />
+                                  <circle 
+                                    cx={u} 
+                                    cy={v} 
+                                    r={isHighlighted ? 5.5 : 4.5} 
+                                    fill="#0284c7" 
+                                    style={{ pointerEvents: 'none' }} 
+                                  />
+                                  <text 
+                                    x={u} 
+                                    y={v + 0.5} 
+                                    textAnchor="middle" 
+                                    dominantBaseline="central" 
+                                    fill="white" 
+                                    fontSize={isHighlighted ? 8 : 7} 
+                                    fontWeight="bold" 
+                                    style={{ pointerEvents: 'none' }}
+                                  >
+                                    {idx + 1}
+                                  </text>
+                                </>
+                              )}
                             </g>
                           );
                         })}
@@ -2471,11 +2459,11 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                   {manualPaths.map((path, pIdx) => {
                     if (selectedPathIdForEdit === path.path_id) return null;
                     const pts = path.points;
-                    const pathColor = PATH_PALETTE[(path.path_id - 1) % PATH_PALETTE.length];
+                    const pId = path.path_id ?? (pIdx + 1);
                     return (
                       <g 
                         key={`committed-${pIdx}`} 
-                        className="cursor-pointer opacity-70 hover:opacity-100 transition-opacity"
+                        className="cursor-pointer opacity-75 hover:opacity-100 transition-opacity"
                         onClick={(e) => {
                           e.stopPropagation();
                           handleSelectPathForEdit(path.path_id);
@@ -2491,17 +2479,28 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                               y1={prev.pixel[1]}
                               x2={p.pixel[0]}
                               y2={p.pixel[1]}
-                              stroke={pathColor}
+                              stroke="#0284c7"
                               strokeWidth={2.5}
                               markerEnd="url(#edit-traj-arrow)"
                             />
                           );
                         })}
-                        {pts.map((pt, idx) => (
+                        {/* Start Point Badge */}
+                        {pts.length > 0 && (
+                          <g key={`c-start-${pId}`}>
+                            <line x1={pts[0].pixel[0]} y1={pts[0].pixel[1] - 5} x2={pts[0].pixel[0]} y2={pts[0].pixel[1]} stroke="#0284c7" strokeWidth={1.5} />
+                            <circle cx={pts[0].pixel[0]} cy={pts[0].pixel[1] - 14} r={9.5} fill="#0284c7" stroke="white" strokeWidth={1.5} />
+                            <text x={pts[0].pixel[0]} y={pts[0].pixel[1] - 13.5} textAnchor="middle" dominantBaseline="central" fill="white" fontSize={9} fontWeight="bold">
+                              {`P${pId}`}
+                            </text>
+                          </g>
+                        )}
+                        {/* Subsequent points */}
+                        {pts.slice(1).map((pt, idx) => (
                           <g key={idx}>
-                            <circle cx={pt.pixel[0]} cy={pt.pixel[1]} r={6} fill={pathColor} stroke="white" strokeWidth={1.2} />
-                            <text x={pt.pixel[0]} y={pt.pixel[1] + 0.5} textAnchor="middle" dominantBaseline="central" fill="white" fontSize={8} fontWeight="bold">
-                              {idx + 1}
+                            <circle cx={pt.pixel[0]} cy={pt.pixel[1]} r={5} fill="#0284c7" stroke="white" strokeWidth={1.2} />
+                            <text x={pt.pixel[0]} y={pt.pixel[1] + 0.5} textAnchor="middle" dominantBaseline="central" fill="white" fontSize={7} fontWeight="bold">
+                              {idx + 2}
                             </text>
                           </g>
                         ))}
@@ -3328,9 +3327,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
              <button 
                onClick={handleCapture}
                disabled={isCapturing || isReconstructing || !activeTemplate || segMode || manualPathMode}
-               className="w-full py-2.5 bg-gradient-to-r from-slate-800 to-slate-900 hover:from-slate-700 hover:to-slate-800 text-slate-200 font-medium rounded-lg shadow transition-all flex items-center justify-center gap-1.5 text-xs active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed border border-slate-700"
+               className="w-full py-2.5 bg-gradient-to-r from-slate-800 to-slate-900 hover:from-slate-700 hover:to-slate-800 text-slate-200 font-medium rounded-lg shadow transition-all flex items-center justify-center gap-1.5 text-xs active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed border border-slate-700"
              >
-               {isCapturing ? <RefreshCw size={14} className="animate-spin text-blue-400" /> : <Camera size={14} />}
+               {isCapturing ? <RefreshCw size={14} className="animate-spin text-sky-400" /> : <Camera size={14} className="text-slate-300" />}
                <span>{isCapturing ? 'Wait...' : 'Capture'}</span>
              </button>
              <div className="absolute bottom-full mb-2 right-0 hidden group-hover:flex flex-col items-end pointer-events-none z-50">
@@ -3345,14 +3344,14 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
              <button 
                onClick={toggleSegMode}
                disabled={!hasImage || isCapturing || isReconstructing || manualPathMode}
-               className={`w-full py-2.5 font-medium rounded-lg shadow transition-all flex items-center justify-center gap-1.5 text-xs active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed border ${
+               className={`w-full py-2.5 font-medium rounded-lg shadow transition-all flex items-center justify-center gap-1.5 text-xs active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed border ${
                  segMode 
-                   ? 'bg-red-600/20 text-red-300 border-red-500/50 hover:bg-red-600/30' 
-                   : 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white shadow-blue-900/30 border-blue-500/50'
+                   ? 'bg-slate-800 text-sky-300 border-sky-500 shadow-md shadow-sky-950/40 ring-1 ring-sky-500/40' 
+                   : 'bg-gradient-to-r from-slate-800 to-slate-900 hover:from-slate-700 hover:to-slate-800 text-slate-200 border-slate-700'
                }`}
              >
-               {segMode ? <X size={14} /> : <Sparkles size={14} />}
-               <span>{segMode ? 'Exit' : 'Segment'}</span>
+               {segMode ? <X size={14} className="text-rose-400" /> : <Sparkles size={14} className="text-sky-400" />}
+               <span>{segMode ? 'Exit Seg' : 'Segment'}</span>
              </button>
              <div className="absolute bottom-full mb-2 right-0 hidden group-hover:flex flex-col items-end pointer-events-none z-50">
                <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2.5 py-1 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
@@ -3366,14 +3365,14 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
              <button 
                onClick={toggleManualPathMode}
                disabled={!hasImage || isCapturing || isReconstructing || segMode}
-               className={`w-full py-2.5 font-medium rounded-lg shadow transition-all flex items-center justify-center gap-1.5 text-xs active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed border ${
+               className={`w-full py-2.5 font-medium rounded-lg shadow transition-all flex items-center justify-center gap-1.5 text-xs active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed border ${
                  manualPathMode 
-                   ? 'bg-rose-600/25 text-rose-300 border-rose-500/50 hover:bg-rose-600/35' 
-                   : 'bg-gradient-to-r from-rose-600 to-pink-600 hover:from-rose-500 hover:to-pink-500 text-white shadow-rose-900/30 border-rose-500/50'
+                   ? 'bg-slate-800 text-amber-300 border-amber-500 shadow-md shadow-amber-950/40 ring-1 ring-amber-500/40' 
+                   : 'bg-gradient-to-r from-slate-800 to-slate-900 hover:from-slate-700 hover:to-slate-800 text-slate-200 border-slate-700'
                }`}
              >
-               {manualPathMode ? <X size={14} /> : <Route size={14} />}
-               <span>{manualPathMode ? 'Exit' : 'Manual TCP'}</span>
+               {manualPathMode ? <X size={14} className="text-rose-400" /> : <Route size={14} className="text-amber-400" />}
+               <span>{manualPathMode ? 'Exit Manual' : 'Manual TCP'}</span>
              </button>
              <div className="absolute bottom-full mb-2 right-0 hidden group-hover:flex flex-col items-end pointer-events-none z-50">
                <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2.5 py-1 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
@@ -3398,11 +3397,11 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                 disabled={!hasImage || !hasManualPaths || isCapturing || isReconstructing || isVerifyingPaths || isOptimizingPaths || segMode || manualPathMode}
                 className={`w-full py-2.5 font-medium rounded-lg shadow transition-all flex items-center justify-center gap-1.5 text-xs active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed border ${
                   activeViewTab === 'diagnostics'
-                    ? 'bg-emerald-600/30 text-emerald-300 border-emerald-500/60 shadow-emerald-950/40'
-                    : 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white shadow-emerald-900/30 border-emerald-500/50'
+                    ? 'bg-slate-800 text-emerald-300 border-emerald-500 shadow-md shadow-emerald-950/40 ring-1 ring-emerald-500/40'
+                    : 'bg-gradient-to-r from-slate-800 to-slate-900 hover:from-slate-700 hover:to-slate-800 text-slate-200 border-slate-700'
                 }`}
               >
-                {isVerifyingPaths ? <RefreshCw size={14} className="animate-spin text-emerald-200" /> : <ShieldCheck size={14} />}
+                {isVerifyingPaths ? <RefreshCw size={14} className="animate-spin text-emerald-300" /> : <ShieldCheck size={14} className="text-emerald-400" />}
                 <span>{isVerifyingPaths ? 'Evaluating...' : 'TCP Opt'}</span>
               </button>
               <div className="absolute bottom-full mb-2 right-0 hidden group-hover:flex flex-col items-end pointer-events-none z-50">
@@ -3417,9 +3416,13 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
              <button 
                onClick={handleReconstruct}
                disabled={!hasImage || !hasMasks || !hasDepth || isCapturing || isReconstructing || segMode || manualPathMode}
-               className="w-full py-2.5 bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-500 hover:to-indigo-500 text-white font-medium rounded-lg shadow-lg shadow-purple-900/30 transition-all flex items-center justify-center gap-1.5 text-xs active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed border border-purple-500/50"
+               className={`w-full py-2.5 font-medium rounded-lg shadow transition-all flex items-center justify-center gap-1.5 text-xs active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed border ${
+                 isReconstructing
+                   ? 'bg-slate-800 text-purple-300 border-purple-500 shadow-md shadow-purple-950/40 ring-1 ring-purple-500/40'
+                   : 'bg-gradient-to-r from-slate-800 to-slate-900 hover:from-slate-700 hover:to-slate-800 text-slate-200 border-slate-700'
+               }`}
              >
-               {isReconstructing ? <RefreshCw size={14} className="animate-spin text-purple-200" /> : <Box size={14} />}
+               {isReconstructing ? <RefreshCw size={14} className="animate-spin text-purple-300" /> : <Box size={14} className="text-purple-400" />}
                <span>{isReconstructing ? 'Rebuilding...' : 'Reconstruct'}</span>
              </button>
              <div className="absolute bottom-full mb-2 right-0 hidden group-hover:flex flex-col items-end pointer-events-none z-50">

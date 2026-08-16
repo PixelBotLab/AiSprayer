@@ -117,36 +117,52 @@ const RobotModel: React.FC<RobotModelProps> = ({
   const surfaceMaterialRef = useRef<MeshStandardMaterial | null>(null);
   const pathsGroupRef = useRef<Group | null>(null);
 
-  // 1. Load Robot URDF Model
+  // 1. Load Robot URDF Model (dynamically synchronized with backend configs/aisprayer_config.yaml)
   useEffect(() => {
-    const manager = new LoadingManager();
-    const loader = new URDFLoader(manager);
+    let isCancelled = false;
 
-    loader.packages = {
-      dobot_rviz: 'http://localhost:8000/urdf',
-      dobot_gazebo_sim: 'http://localhost:8000/urdf',
-    };
-    (loader as any).loadMeshCb = loadUrdfMesh;
+    fetch('http://localhost:8000/api/interactive/robot/urdf_tool_tcp')
+      .then(res => res.ok ? res.json() : null)
+      .then(data => {
+        if (isCancelled) return;
+        const urdfFile = data?.urdf_source || 'cr5_robot.urdf';
+        const manager = new LoadingManager();
+        const loader = new URDFLoader(manager);
 
-    loader.load(`http://localhost:8000/urdf/cr5_robot.urdf?v=${Date.now()}`, (r: any) => {
-      stripEmbeddedLights(r);
-      r.rotation.x = -Math.PI / 2;
-      r.traverse((obj: Object3D) => {
-        const mesh = obj as Mesh;
-        if (!mesh.isMesh) return;
-        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-        mats.forEach((m: any) => {
-          if (!m) return;
-          m.side = DoubleSide;
-          m.needsUpdate = true;
-          if (m.color && m.color instanceof Color) {
-            const { r: cr, g: cg, b: cb } = m.color;
-            if (cr + cg + cb < 0.05) m.color.setRGB(0.08, 0.08, 0.08);
-          }
+        loader.packages = {
+          dobot_rviz: 'http://localhost:8000/urdf',
+          dobot_gazebo_sim: 'http://localhost:8000/urdf',
+        };
+        (loader as any).loadMeshCb = loadUrdfMesh;
+
+        loader.load(`http://localhost:8000/urdf/${urdfFile}?v=${Date.now()}`, (r: any) => {
+          if (isCancelled) return;
+          stripEmbeddedLights(r);
+          r.rotation.x = -Math.PI / 2;
+          r.traverse((obj: Object3D) => {
+            const mesh = obj as Mesh;
+            if (!mesh.isMesh) return;
+            const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+            mats.forEach((m: any) => {
+              if (!m) return;
+              m.side = DoubleSide;
+              m.needsUpdate = true;
+              if (m.color && m.color instanceof Color) {
+                const { r: cr, g: cg, b: cb } = m.color;
+                if (cr + cg + cb < 0.05) m.color.setRGB(0.08, 0.08, 0.08);
+              }
+            });
+          });
+          setRobot(r);
         });
+      })
+      .catch(err => {
+        console.warn('Could not fetch dynamic URDF config, falling back to cr5_robot.urdf:', err);
       });
-      setRobot(r);
-    });
+
+    return () => {
+      isCancelled = true;
+    };
   }, []);
 
   // 2. Update Joint Angles Dynamically

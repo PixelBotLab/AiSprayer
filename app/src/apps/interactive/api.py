@@ -386,6 +386,73 @@ def get_verification_report(name: str, use_opt: bool = False):
     raise HTTPException(status_code=404, detail="No saved verification report found.")
 
 
+@router.get("/robot/urdf_tool_tcp")
+def get_robot_urdf_tcp():
+    """Returns TCP offset extracted directly from URDF."""
+    return path_verification_service.get_urdf_tcp()
+
+
+@router.get("/templates/{name}/summary")
+def get_template_summary(name: str):
+    """
+    Returns complete atomic summary of template data in a single round-trip:
+    files, masks, raw paths, opt paths, cached reports, and URDF tool TCP info.
+    """
+    template_path = os.path.join(TEMPLATE_GROUP_DIR, name)
+    if not os.path.exists(template_path):
+        raise HTTPException(status_code=404, detail="Template not found")
+        
+    # 1. File items
+    files = []
+    for item in os.listdir(template_path):
+        item_path = os.path.join(template_path, item)
+        if os.path.isfile(item_path):
+            size = os.path.getsize(item_path)
+            ctime = os.path.getctime(item_path)
+            files.append({"name": item, "size": size, "ctime": ctime})
+    files.sort(key=lambda x: x["ctime"], reverse=True)
+
+    file_set = {f["name"] for f in files}
+    has_image = "scan.jpg" in file_set
+    has_depth = "scan.depth.npy" in file_set or "scan.depth.png" in file_set
+    has_mesh = "scan.mesh.ply" in file_set or "scan.mesh.stl" in file_set
+
+    # 2. Masks
+    masks_dict = sam_service.get_template_masks(template_path)
+    masks_data = masks_dict.get("masks", []) if masks_dict else []
+
+    # 3. Paths (Raw & Opt)
+    raw_paths_data = manual_path_service.load_manual_paths(name, use_opt=False)
+    opt_paths_data = manual_path_service.load_manual_paths(name, use_opt=True)
+
+    raw_paths = raw_paths_data.get("paths", [])
+    opt_paths = opt_paths_data.get("paths", []) if opt_paths_data.get("loaded_from") == "scan.manual_opt_paths.yaml" else []
+    standoff = raw_paths_data.get("standoff_distance_mm", 150.0)
+
+    # 4. Diagnostic Reports
+    raw_report = path_verification_service.get_saved_report(name, use_opt=False)
+    opt_report = path_verification_service.get_saved_report(name, use_opt=True)
+
+    # 5. URDF TCP
+    urdf_tcp = path_verification_service.get_urdf_tcp()
+
+    return {
+        "template": name,
+        "files": files,
+        "has_image": has_image,
+        "has_depth": has_depth,
+        "has_mesh": has_mesh,
+        "masks": masks_data,
+        "raw_paths": raw_paths,
+        "opt_paths": opt_paths,
+        "standoff_distance_mm": standoff,
+        "raw_report": raw_report,
+        "opt_report": opt_report,
+        "urdf_tcp": urdf_tcp
+    }
+
+
+
 
 
 

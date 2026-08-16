@@ -17,6 +17,38 @@ from .cr5_kinematics import CR5Kinematics
 logger = logging.getLogger(__name__)
 PI = math.pi
 
+
+def get_configured_robot_config() -> tuple[str, str]:
+    """
+    Reads hardware.robot.robot_urdf and hardware.robot.robot_tcp from configs/aisprayer_config.yaml.
+    """
+    candidates = [
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../configs/aisprayer_config.yaml")),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../configs/aisprayer_config.yaml")),
+    ]
+    cfg = {}
+    for p in candidates:
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    cfg = yaml.safe_load(f) or {}
+                break
+            except Exception as e:
+                logger.warning(f"Failed to read config from {p}: {e}")
+
+    robot_cfg = cfg.get("hardware", {}).get("robot", {})
+    urdf_rel = robot_cfg.get("robot_urdf", "app/urdf/cr5_robot.urdf")
+    tcp_target = robot_cfg.get("robot_tcp", "spray_nozzle_link")
+
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../.."))
+    if os.path.isabs(urdf_rel):
+        urdf_abs = urdf_rel
+    else:
+        urdf_abs = os.path.join(project_root, urdf_rel)
+
+    return urdf_abs, tcp_target
+
+
 class CR5PathVerifier:
     @classmethod
     def load_limits_from_urdf(cls, urdf_path: str = None) -> dict:
@@ -24,15 +56,7 @@ class CR5PathVerifier:
         Parses joint limit angles (lower, upper in deg) and max joint velocity (deg/s) from URDF XML.
         """
         if urdf_path is None:
-            candidates = [
-                os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../urdf/cr5_robot.urdf")),
-                os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../urdf/cr5_robot_with_gun.urdf")),
-                os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../configs/m530_r6.urdf.xml")),
-            ]
-            for c in candidates:
-                if os.path.exists(c):
-                    urdf_path = c
-                    break
+            urdf_path, _ = get_configured_robot_config()
 
         joint_limits_deg = {}
         joint_max_vel_deg_s = [180.0] * 6
@@ -44,31 +68,97 @@ class CR5PathVerifier:
                 root = tree.getroot()
                 for joint in root.findall('joint'):
                     name = joint.get('name', '')
-                    j_idx = None
-                    for idx in range(1, 7):
-                        if name.lower() in [f"joint{idx}", f"joint_{idx}", f"j{idx}"]:
-                            j_idx = idx - 1
-                            break
-                    if j_idx is not None:
-                        limit = joint.find('limit')
-                        if limit is not None:
-                            lower = float(limit.get('lower', -math.pi))
-                            upper = float(limit.get('upper', math.pi))
-                            vel = float(limit.get('velocity', math.pi))
-                            joint_limits_deg[f"joint{j_idx+1}"] = {
-                                "lower_deg": round(math.degrees(lower), 1),
-                                "upper_deg": round(math.degrees(upper), 1),
-                                "velocity_deg_s": round(math.degrees(vel), 1)
-                            }
-                            joint_max_vel_deg_s[j_idx] = round(math.degrees(vel), 1)
+                    limit = joint.find('limit')
+                    if limit is not None:
+                        lower_rad = float(limit.get('lower', -math.pi))
+                        upper_rad = float(limit.get('upper', math.pi))
+                        vel_rad_s = float(limit.get('velocity', math.pi))
+                        
+                        joint_limits_deg[name] = (
+                            round(math.degrees(lower_rad), 2),
+                            round(math.degrees(upper_rad), 2)
+                        )
+                        # Map joint1..joint6 velocity
+                        for j_idx in range(1, 7):
+                            if f"joint{j_idx}" == name:
+                                joint_max_vel_deg_s[j_idx - 1] = round(math.degrees(vel_rad_s), 2)
             except Exception as e:
                 logger.warning(f"Could not parse joint limits from URDF {urdf_path}: {e}")
 
         return {
             "joint_limits": joint_limits_deg,
+            "joint_limits_deg": joint_limits_deg,
             "max_joint_vel_deg_s": joint_max_vel_deg_s,
+            "joint_max_vel_deg_s": joint_max_vel_deg_s,
+            "urdf_path": urdf_path,
             "urdf_source": os.path.basename(urdf_path) if urdf_path else None
         }
+
+    @classmethod
+    def load_tcp_from_urdf(cls, urdf_path: str = None, target_tcp_name: str = None) -> dict:
+        """
+        Parses TCP offset (XYZ mm, RPY deg) from URDF attached to Link6.
+        """
+        if urdf_path is None or target_tcp_name is None:
+            cfg_urdf, cfg_tcp = get_configured_robot_config()
+            if urdf_path is None:
+                urdf_path = cfg_urdf
+            if target_tcp_name is None:
+                target_tcp_name = cfg_tcp
+
+        tcp_info = {
+            "has_tool": False,
+            "tool_name": "flange",
+            "xyz_mm": [0.0, 0.0, 0.0],
+            "rpy_deg": [0.0, 0.0, 0.0],
+            "urdf_source": os.path.basename(urdf_path) if urdf_path else None
+        }
+
+        if urdf_path and os.path.exists(urdf_path):
+            try:
+                import xml.etree.ElementTree as ET
+                tree = ET.parse(urdf_path)
+                root = tree.getroot()
+                best_score = -1
+                for joint in root.findall('joint'):
+                    parent = joint.find('parent')
+                    child = joint.find('child')
+                    if parent is not None and parent.get('link') in ['Link6', 'link6', 'flange']:
+                        child_name = child.get('link', '') if child is not None else ''
+                        origin = joint.find('origin')
+                        if origin is not None:
+                            xyz_str = origin.get('xyz', '0 0 0').split()
+                            rpy_str = origin.get('rpy', '0 0 0').split()
+                            xyz_m = [float(v) for v in xyz_str]
+                            rpy_rad = [float(v) for v in rpy_str]
+                            xyz_mm = [round(v * 1000.0, 2) for v in xyz_m]
+                            rpy_deg = [round(math.degrees(v), 2) for v in rpy_rad]
+                            
+                            score = 0
+                            if target_tcp_name and (child_name.lower() == target_tcp_name.lower() or target_tcp_name.lower() in child_name.lower()):
+                                score = 1000
+                            elif any(k in child_name.lower() for k in ['nozzle', 'tcp']):
+                                score = 100
+                            elif 'tip' in child_name.lower():
+                                score = 80
+                            elif 'gun' in child_name.lower():
+                                score = 50
+                            elif 'tool' in child_name.lower():
+                                score = 30
+
+                            if score > best_score:
+                                best_score = score
+                                tcp_info = {
+                                    "has_tool": True,
+                                    "tool_name": child_name,
+                                    "xyz_mm": xyz_mm,
+                                    "rpy_deg": rpy_deg,
+                                    "urdf_source": os.path.basename(urdf_path)
+                                }
+            except Exception as e:
+                logger.warning(f"Could not parse TCP from URDF {urdf_path}: {e}")
+
+        return tcp_info
 
     def __init__(self,
                  step_size_mm: float = 1.5,
@@ -87,8 +177,9 @@ class CR5PathVerifier:
         self.linear_velocity_mm_s = linear_velocity_mm_s
         self.solver = CR5Kinematics()
 
-        # Load limits dynamically from URDF
+        # Load limits and TCP dynamically from URDF
         self.urdf_info = self.load_limits_from_urdf(urdf_path)
+        self.urdf_tcp = self.load_tcp_from_urdf(urdf_path)
         urdf_max_vels = self.urdf_info["max_joint_vel_deg_s"]
 
         self.max_joint_vel_deg_s = np.array(
@@ -96,17 +187,20 @@ class CR5PathVerifier:
             dtype=np.float64
         )
 
-
-        # Default TCP transform: from configs/m530_r6.urdf.xml
-        # origin xyz="0.05 0 0" rpy="0 1.57079632679 0"
+        # Automatic TCP transform from URDF or explicit parameter
         if t_tcp_flange is not None:
             self.T_tcp_flange = np.array(t_tcp_flange, dtype=np.float64)
-        else:
-            # 50mm along X, +90 deg around Y
-            r_mat = R_scipy.from_euler('xyz', [0.0, 90.0, 0.0], degrees=True).as_matrix()
+        elif self.urdf_tcp["has_tool"]:
+            xyz_mm = self.urdf_tcp["xyz_mm"]
+            rpy_deg = self.urdf_tcp["rpy_deg"]
+            r_mat = R_scipy.from_euler('xyz', rpy_deg, degrees=True).as_matrix()
             self.T_tcp_flange = np.eye(4, dtype=np.float64)
             self.T_tcp_flange[:3, :3] = r_mat
-            self.T_tcp_flange[0, 3] = 0.05  # 50mm in meters
+            self.T_tcp_flange[0, 3] = xyz_mm[0] / 1000.0
+            self.T_tcp_flange[1, 3] = xyz_mm[1] / 1000.0
+            self.T_tcp_flange[2, 3] = xyz_mm[2] / 1000.0
+        else:
+            self.T_tcp_flange = np.eye(4, dtype=np.float64)
             
         self.T_tcp_flange_inv = np.linalg.inv(self.T_tcp_flange)
 

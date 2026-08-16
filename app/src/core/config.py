@@ -87,5 +87,11 @@ class SprayerConfig:
         return self.config_data.get("hardware", {}).get("robot", {}).get("port", 6001)
 
     @property
+    def robot_tcp(self):
+        """机器人末端工具 TCP 节点名称 (例如 spray_nozzle_link)"""
+        return self.config_data.get("hardware", {}).get("robot", {}).get("robot_tcp", "spray_nozzle_link")
+
+    @property
     def camera_model(self):
         return self.config_data.get("hardware", {}).get("camera", {}).get("model", "orbbec")
+
