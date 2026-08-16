@@ -101,6 +101,14 @@ export interface VerificationReport {
   path_reports?: PathReportItem[];
 }
 
+export interface LiveNormalInfo {
+  dx: number;
+  dy: number;
+  surfPointBase?: [number, number, number];
+  normalBase?: [number, number, number];
+  tcpPose?: { x: number; y: number; z: number; rx: number; ry: number; rz: number };
+}
+
 export interface SessionData {
   width: number;
   height: number;
@@ -121,3 +129,13 @@ export const MASK_COLORS = [
   { fill: 'rgba(236, 72, 153, 0.38)', stroke: '#ec4899' },
   { fill: 'rgba(6, 182, 212, 0.38)', stroke: '#06b6d4' },
 ];
+
+export const PATH_PALETTE = [
+  '#0284c7', // Sky blue
+  '#10b981', // Emerald
+  '#f59e0b', // Amber
+  '#a855f7', // Purple
+  '#ec4899', // Pink
+  '#06b6d4', // Cyan
+];
+

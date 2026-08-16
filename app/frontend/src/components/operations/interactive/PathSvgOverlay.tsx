@@ -1,5 +1,5 @@
-import React from 'react';
-import type { ManualPathItem, WaypointItem, VerificationReport } from './types';
+import React, { type MouseEvent } from 'react';
+import type { ManualPathItem, WaypointItem, VerificationReport, LiveNormalInfo } from './types';
 
 interface PathSvgOverlayProps {
   manualPathMode: boolean;
@@ -10,14 +10,14 @@ interface PathSvgOverlayProps {
   highlightedPathId: number | null;
   hoveredWaypoint: WaypointItem | null;
   mousePixel: { u: number; v: number } | null;
-  liveNormal: { dx: number; dy: number } | null;
+  liveNormal: LiveNormalInfo | null;
   natSize: { w: number; h: number };
   verificationReport: VerificationReport | null;
   onSelectPathForEdit?: (pathId: number) => void;
   setHighlightedPathId: (id: number | null) => void;
   setHoveredWaypoint: (wp: WaypointItem | null) => void;
-  onManualMouseMove?: (e: React.MouseEvent<SVGSVGElement>) => void;
-  onManualImageClick?: (e: React.MouseEvent<SVGSVGElement>) => void;
+  onManualMouseMove?: (e: MouseEvent<SVGSVGElement>) => void;
+  onManualImageClick?: (e: MouseEvent<SVGSVGElement>) => void;
   onDeleteSingleWaypoint?: (idx: number) => void;
 }
 
@@ -45,9 +45,8 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
       {/* 1. VIEW/OVERLAY MODE: Render Manual TCP Paths on top of scan.jpg */}
       {!manualPathMode && showManualPathsOverlay && manualPaths.length > 0 && (
         <svg
-          className="absolute inset-0 w-full h-full"
+          className="absolute inset-0 w-full h-full pointer-events-none select-none"
           viewBox={`0 0 ${natSize.w} ${natSize.h}`}
-          style={{ cursor: 'default' }}
           onMouseLeave={() => setHoveredWaypoint(null)}
         >
           <defs>
@@ -185,7 +184,7 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
                   return (
                     <g
                       key={`start-badge-${pId}`}
-                      className="cursor-pointer"
+                      className="pointer-events-auto cursor-pointer"
                       onMouseEnter={() => {
                         setHoveredWaypoint({ ...p0, path_id: pId });
                         setHighlightedPathId(pId);
@@ -216,6 +215,7 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
                   return (
                     <g
                       key={idx}
+                      className="pointer-events-auto cursor-pointer"
                       onMouseEnter={() => {
                         setHoveredWaypoint({ ...pt, path_id: pId });
                         setHighlightedPathId(pId);
@@ -224,7 +224,6 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
                         setHoveredWaypoint(null);
                         setHighlightedPathId(null);
                       }}
-                      style={{ cursor: 'pointer' }}
                     >
                       {arrowLen >= 3.0 ? (
                         <line x1={u} y1={v} x2={tcpU} y2={tcpV} stroke="#ef4444" strokeWidth={2.2} strokeLinecap="round" markerEnd="url(#view-normal-arrow)" style={{ pointerEvents: 'none' }} />
@@ -267,7 +266,7 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
               return false;
             });
 
-            const tipW = 210, tipH = matchingIssue ? 115 : 95;
+            const tipW = 230, tipH = matchingIssue ? 125 : 100;
             const tipX = Math.min(u + 14, natSize.w - tipW - 10);
             const tipY = Math.max(v - tipH - 10, 10);
 
@@ -278,17 +277,20 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
                 <text x={8} y={15} fill="#38bdf8" fontSize={10.5} fontWeight="bold" fontFamily="monospace">
                   Path {pId} · Point {wpIdx}
                 </text>
+                <text x={tipW - 8} y={15} textAnchor="end" fill="#93c5fd" fontSize={9} fontFamily="monospace">
+                  {pt.standoff_distance_mm}mm
+                </text>
                 <text x={8} y={38} fill="#94a3b8" fontSize={9.5} fontFamily="monospace">
-                  Base: <tspan fill="#f1f5f9">[{pt.surface_point_base_mm.map(n => n.toFixed(1)).join(', ')}]</tspan> mm
+                  Surf [mm]: <tspan fill="#f1f5f9">[{pt.surface_point_base_mm.map(n => n.toFixed(1)).join(', ')}]</tspan>
                 </text>
                 <text x={8} y={53} fill="#94a3b8" fontSize={9.5} fontFamily="monospace">
-                  Normal: <tspan fill="#34d399">[{pt.surface_normal_base.map(n => n.toFixed(2)).join(', ')}]</tspan>
+                  TCP [mm]: <tspan fill="#fde047" fontWeight="bold">[{pt.tcp_pose_base.x.toFixed(1)}, {pt.tcp_pose_base.y.toFixed(1)}, {pt.tcp_pose_base.z.toFixed(1)}]</tspan>
                 </text>
                 <text x={8} y={68} fill="#94a3b8" fontSize={9.5} fontFamily="monospace">
-                  Euler: <tspan fill="#f59e0b">Rx:{pt.tcp_pose_base.rx}° Ry:{pt.tcp_pose_base.ry}° Rz:{pt.tcp_pose_base.rz}°</tspan>
+                  Normal: <tspan fill="#34d399">[{pt.surface_normal_base.map(n => n.toFixed(2)).join(', ')}]</tspan>
                 </text>
                 <text x={8} y={83} fill="#94a3b8" fontSize={9.5} fontFamily="monospace">
-                  Standoff: <tspan fill="#60a5fa">{pt.standoff_distance_mm} mm</tspan>
+                  Euler [°]: <tspan fill="#f59e0b">Rx:{pt.tcp_pose_base.rx}° Ry:{pt.tcp_pose_base.ry}° Rz:{pt.tcp_pose_base.rz}°</tspan>
                 </text>
                 {matchingIssue && (
                   <text x={8} y={102} fill="#f43f5e" fontSize={9.5} fontWeight="bold" fontFamily="monospace">

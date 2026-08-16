@@ -11,6 +11,7 @@ import type {
   KinematicsParams,
   VerificationReport,
   SessionData,
+  LiveNormalInfo,
 } from './interactive/types';
 import { computeNormalClientSide } from './interactive/normalComputation';
 import { InteractiveCanvas } from './interactive/InteractiveCanvas';
@@ -69,7 +70,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const [highlightedPathId, setHighlightedPathId] = useState<number | null>(null);
   const [sessionData, setSessionData] = useState<SessionData | null>(null);
   const [mousePixel, setMousePixel] = useState<{ u: number; v: number } | null>(null);
-  const [liveNormal, setLiveNormal] = useState<{ dx: number; dy: number } | null>(null);
+  const [liveNormal, setLiveNormal] = useState<LiveNormalInfo | null>(null);
 
   // ─── 5. Diagnostics & Verification State ────────────────────────────────
   const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
@@ -214,29 +215,57 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const loadSessionData = async (templateName: string) => {
     try {
       const res = await fetch(`http://localhost:8000/api/interactive/templates/${templateName}/session_data`);
-      if (!res.ok) return;
+      if (!res.ok) throw new Error('Session data fetch failed');
       const data = await res.json();
-      const depthRes = await fetch(`http://localhost:8000/templates/${templateName}/scan.depth.bin?v=${Date.now()}`);
-      if (!depthRes.ok) return;
-      const buf = await depthRes.arrayBuffer();
+      const b64 = data.depth_flat_b64 as string;
+      const binary = atob(b64);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      const depthF32 = new Float32Array(bytes.buffer);
       setSessionData({
         width: data.width,
         height: data.height,
-        depth: new Float32Array(buf),
-        fx: data.fx,
-        fy: data.fy,
-        cx: data.cx,
-        cy: data.cy,
-        T: data.T_base_cam_mm,
+        depth: depthF32,
+        fx: data.intrinsics.fx,
+        fy: data.intrinsics.fy,
+        cx: data.intrinsics.cx,
+        cy: data.intrinsics.cy,
+        T: data.T_base_camera,
         calib_source: data.calib_source,
       });
     } catch (err) {
-      console.error('Failed to load session depth data:', err);
+      console.warn('Failed to load session depth data, server-side sampling fallback active:', err);
     }
   };
 
   // ─── SAM Segmentation Handlers ──────────────────────────────────────────
-  const handleSegImageClick = async (e: MouseEvent<HTMLImageElement>) => {
+  const handleToggleSegMode = async () => {
+    if (segMode) {
+      setSegMode(false);
+      setCurrentPoints([]);
+      setCurrentPolygons([]);
+      return;
+    }
+    if (!activeTemplate || !hasImage) return;
+    setSegMode(true);
+    setCurrentPoints([]);
+    setCurrentPolygons([]);
+    if (savedMasks.length > 0) {
+      setCommittedMasks([...savedMasks]);
+    } else {
+      setCommittedMasks([]);
+    }
+
+    try {
+      await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/sam/init`, {
+        method: 'POST',
+      });
+    } catch (err) {
+      console.warn('Failed to init SAM session:', err);
+    }
+  };
+
+  const handleSegImageClick = async (e: MouseEvent<SVGSVGElement>) => {
     if (!segMode || !natSize || !activeTemplate || isSpacePressed) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const x = Math.round(((e.clientX - rect.left) / rect.width) * natSize.w);
@@ -247,7 +276,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     predictMask(newPoints);
   };
 
-  const handleSegContextMenu = (e: MouseEvent<HTMLImageElement>) => {
+  const handleSegContextMenu = (e: MouseEvent<SVGSVGElement>) => {
     if (!segMode || !natSize || !activeTemplate) return;
     e.preventDefault();
     const rect = e.currentTarget.getBoundingClientRect();
@@ -260,12 +289,18 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   };
 
   const predictMask = async (pts: Point[]) => {
-    if (!activeTemplate || pts.length === 0) return;
+    if (!activeTemplate || pts.length === 0) {
+      setCurrentPolygons([]);
+      return;
+    }
     try {
-      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/sam_predict`, {
+      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/sam/predict`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ points: pts }),
+        body: JSON.stringify({
+          points: pts.map((p) => [p.x, p.y]),
+          labels: pts.map((p) => p.label),
+        }),
       });
       if (!res.ok) return;
       const data = await res.json();
@@ -285,17 +320,35 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     setCurrentPolygons([]);
   };
 
-  const handleSaveAllSegMasks = async () => {
-    if (!activeTemplate) return;
+  const fetchTemplateFiles = async (templateName: string) => {
     try {
-      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/save_sam`, {
+      const res = await fetch(`http://localhost:8000/api/interactive/templates/${templateName}/files`);
+      if (res.ok) {
+        const data = await res.json();
+        setFiles(data.files || []);
+      }
+    } catch (err) {
+      console.error('Failed to fetch template files:', err);
+    }
+  };
+
+  const handleSaveAllSegMasks = async () => {
+    if (!activeTemplate || committedMasks.length === 0) return;
+    try {
+      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/sam/save`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ committed_masks: committedMasks }),
+        body: JSON.stringify({
+          committed_masks: committedMasks.map((m) => ({
+            points: m.points ? m.points.map((p) => [p.x, p.y]) : [],
+            labels: m.points ? m.points.map((p) => p.label) : [],
+          })),
+        }),
       });
       if (!res.ok) throw new Error('Failed to save masks');
       setSavedMasks(committedMasks);
       setSegMode(false);
+      await fetchTemplateFiles(activeTemplate);
       setModalConfig({
         isOpen: true,
         title: 'Success',
@@ -314,7 +367,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
 
   // ─── Manual TCP Path Designer Handlers ──────────────────────────────────
   const handleManualMouseMove = (e: MouseEvent<SVGSVGElement>) => {
-    if (!natSize || !sessionData) return;
+    if (!natSize) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const u = Math.round(((e.clientX - rect.left) / rect.width) * natSize.w);
     const v = Math.round(((e.clientY - rect.top) / rect.height) * natSize.h);
@@ -326,48 +379,93 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     }
 
     setMousePixel({ u, v });
-    const norm = computeNormalClientSide(sessionData, u, v, standoffDistMm);
-    if (norm) {
-      setLiveNormal({ dx: norm.proj_dx, dy: norm.proj_dy });
-    } else {
-      setLiveNormal(null);
+    if (sessionData) {
+      const norm = computeNormalClientSide(sessionData, u, v, standoffDistMm);
+      if (norm) {
+        setLiveNormal({
+          dx: norm.proj_dx,
+          dy: norm.proj_dy,
+          surfPointBase: norm.surf_base,
+          normalBase: norm.normal_base,
+          tcpPose: {
+            x: norm.tcp_base[0],
+            y: norm.tcp_base[1],
+            z: norm.tcp_base[2],
+            rx: norm.euler_deg[0],
+            ry: norm.euler_deg[1],
+            rz: norm.euler_deg[2],
+          },
+        });
+      } else {
+        setLiveNormal(null);
+      }
     }
   };
 
-  const handleManualImageClick = () => {
-    if (!manualPathMode || !natSize || !sessionData || !mousePixel || isSpacePressed) return;
-    const { u, v } = mousePixel;
-    const norm = computeNormalClientSide(sessionData, u, v, standoffDistMm);
-    if (!norm) {
+  const handleManualImageClick = async (e: MouseEvent<SVGSVGElement>) => {
+    if (!manualPathMode || !natSize || !activeTemplate || isSpacePressed) return;
+    e.preventDefault();
+
+    const rect = e.currentTarget.getBoundingClientRect();
+    const u = Math.round(((e.clientX - rect.left) / rect.width) * natSize.w);
+    const v = Math.round(((e.clientY - rect.top) / rect.height) * natSize.h);
+
+    // 1. Client-side instant calculation if sessionData is ready
+    if (sessionData) {
+      const norm = computeNormalClientSide(sessionData, u, v, standoffDistMm);
+      if (norm) {
+        const newWp: WaypointItem = {
+          index: currentManualPoints.length + 1,
+          pixel: [u, v],
+          surface_point_cam_mm: norm.surf_cam,
+          surface_point_base_mm: norm.surf_base,
+          surface_normal_base: norm.normal_base,
+          surface_normal_cam: norm.normal_cam,
+          standoff_distance_mm: standoffDistMm,
+          tcp_pose_base: {
+            x: norm.tcp_base[0],
+            y: norm.tcp_base[1],
+            z: norm.tcp_base[2],
+            rx: norm.euler_deg[0],
+            ry: norm.euler_deg[1],
+            rz: norm.euler_deg[2],
+          },
+          normal_2d_proj: [norm.proj_dx, norm.proj_dy],
+        };
+        setCurrentManualPoints((prev) => [...prev, newWp]);
+        return;
+      }
+    }
+
+    // 2. Server-side fallback sampling
+    try {
+      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/sample_point`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ u, v, standoff_dist_mm: standoffDistMm }),
+      });
+      if (!res.ok) throw new Error('Failed to sample point');
+      const pointData = await res.json();
+      const newWp: WaypointItem = {
+        index: currentManualPoints.length + 1,
+        pixel: [u, v],
+        surface_point_cam_mm: pointData.surface_point_cam_mm,
+        surface_point_base_mm: pointData.surface_point_base_mm,
+        surface_normal_base: pointData.surface_normal_base,
+        surface_normal_cam: pointData.surface_normal_cam,
+        standoff_distance_mm: standoffDistMm,
+        tcp_pose_base: pointData.tcp_pose_base,
+        normal_2d_proj: pointData.normal_2d_proj,
+      };
+      setCurrentManualPoints((prev) => [...prev, newWp]);
+    } catch (err) {
       setModalConfig({
         isOpen: true,
         title: 'Invalid Waypoint',
         message: 'No valid 3D depth found at this pixel location. Please click on the scanned surface.',
         type: 'alert',
       });
-      return;
     }
-
-    const newWp: WaypointItem = {
-      index: currentManualPoints.length + 1,
-      pixel: [u, v],
-      surface_point_cam_mm: norm.surf_cam,
-      surface_point_base_mm: norm.surf_base,
-      surface_normal_base: norm.normal_base,
-      surface_normal_cam: norm.normal_cam,
-      standoff_distance_mm: standoffDistMm,
-      tcp_pose_base: {
-        x: norm.tcp_base[0],
-        y: norm.tcp_base[1],
-        z: norm.tcp_base[2],
-        rx: norm.euler_deg[0],
-        ry: norm.euler_deg[1],
-        rz: norm.euler_deg[2],
-      },
-      normal_2d_proj: [norm.proj_dx, norm.proj_dy],
-    };
-
-    setCurrentManualPoints([...currentManualPoints, newWp]);
   };
 
   const handleCommitManualPath = () => {
@@ -398,14 +496,18 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const handleSaveManualPaths = async () => {
     if (!activeTemplate) return;
     try {
-      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/save_manual_paths`, {
+      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/manual_paths`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ paths: manualPaths }),
+        body: JSON.stringify({
+          paths: manualPaths,
+          standoff_distance_mm: standoffDistMm,
+        }),
       });
       if (!res.ok) throw new Error('Failed to save manual paths');
       setRawPaths(manualPaths);
       setManualPathMode(false);
+      await fetchTemplateFiles(activeTemplate);
       if (onPathsUpdated) onPathsUpdated();
       setModalConfig({
         isOpen: true,
@@ -684,6 +786,16 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
           }}
           onCommitCurrentSegMask={handleCommitCurrentSegMask}
           onSaveAllSegMasks={handleSaveAllSegMasks}
+          onClearAllMasks={() => {
+            setCommittedMasks([]);
+            setCurrentPoints([]);
+            setCurrentPolygons([]);
+          }}
+          onExitSegMode={() => {
+            setSegMode(false);
+            setCurrentPoints([]);
+            setCurrentPolygons([]);
+          }}
           onUndoManualPoint={() => {
             if (currentManualPoints.length === 0) return;
             setCurrentManualPoints(currentManualPoints.slice(0, -1));
@@ -698,86 +810,92 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
               setCurrentManualPoints([]);
             }
           }}
+          onExitManualPathMode={() => {
+            setManualPathMode(false);
+            setCurrentManualPoints([]);
+            setSelectedPathIdForEdit(null);
+          }}
           renderPolygons={renderPolygons}
         />
 
-        {/* Column 2: Middle Column (Consistent Width w-[230px] for both Files and TCP Opt) */}
-        <div className="w-[230px] shrink-0 border-r border-slate-800 bg-slate-950/40 flex flex-col h-full min-h-0 overflow-hidden">
-          {!showDiagnostics ? (
-            <TemplateFileList
-              files={files}
-              onOpenDeleteFileModal={(f) => {
-                if (!activeTemplate) return;
-                setModalConfig({
-                  isOpen: true,
-                  title: 'Delete File',
-                  message: `Delete file '${f}' from template '${activeTemplate}'?`,
-                  type: 'confirm',
-                  onConfirm: async () => {
-                    try {
-                      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/files/${f}`, {
-                        method: 'DELETE',
-                      });
-                      if (!res.ok) throw new Error('Failed to delete file');
-                      await handleSelectTemplate(activeTemplate);
-                    } catch (err: any) {
-                      alert(err.message);
-                    }
-                  },
-                });
-              }}
-            />
-          ) : (
-            <DiagnosticsDashboard
-              verificationReport={verificationReport}
-              isVerifying={isVerifying}
-              isOptimizing={isOptimizing}
-              activeTemplate={activeTemplate}
-              optPaths={optPaths}
-              usingOptimizedPaths={usingOptimizedPaths}
-              hasPaths={manualPaths.length > 0}
-              kinParams={kinParams}
-              urdfTcpInfo={urdfTcpInfo}
-              isKinParamsOpen={isKinParamsOpen}
-              highlightedPathId={highlightedPathId}
-              setKinParams={setKinParams}
-              setIsKinParamsOpen={setIsKinParamsOpen}
-              setHighlightedPathId={setHighlightedPathId}
-              onRunDiagnostics={handleRunDiagnostics}
-              onApplyOptimization={handleApplyOptimization}
-              onToggleUseOptimized={handleToggleUseOptimized}
-              onClose={() => setShowDiagnostics(false)}
-            />
-          )}
-        </div>
+        {/* Right Side Panel (w-[320px]): Top Action Toolbar + File List / Diagnostics Dashboard */}
+        <div className="w-[320px] shrink-0 border-l border-slate-800 bg-slate-950/40 flex flex-col h-full min-h-0 overflow-hidden">
+          {/* Top Horizontal Action Toolbar */}
+          <InteractiveActionColumn
+            hasImage={hasImage}
+            activeTemplate={activeTemplate}
+            isCapturing={isCapturing}
+            isReconstructing={isReconstructing}
+            segMode={segMode}
+            manualPathMode={manualPathMode}
+            showDiagnostics={showDiagnostics}
+            onTriggerCapture={handleTriggerCapture}
+            onToggleSegMode={handleToggleSegMode}
+            onToggleManualPathMode={() => {
+              if (manualPathMode) {
+                setCurrentManualPoints([]);
+                setSelectedPathIdForEdit(null);
+              } else {
+                if (activeTemplate && !sessionData) {
+                  loadSessionData(activeTemplate);
+                }
+              }
+              setManualPathMode(!manualPathMode);
+            }}
+            onToggleDiagnostics={() => setShowDiagnostics(!showDiagnostics)}
+            onTriggerReconstruct={handleTriggerReconstruct}
+          />
 
-        {/* Column 3: Narrow Fixed Action Buttons on Far Right */}
-        <InteractiveActionColumn
-          hasImage={hasImage}
-          activeTemplate={activeTemplate}
-          isCapturing={isCapturing}
-          isReconstructing={isReconstructing}
-          segMode={segMode}
-          manualPathMode={manualPathMode}
-          showDiagnostics={showDiagnostics}
-          onTriggerCapture={handleTriggerCapture}
-          onToggleSegMode={() => {
-            if (segMode) {
-              setCurrentPoints([]);
-              setCurrentPolygons([]);
-            }
-            setSegMode(!segMode);
-          }}
-          onToggleManualPathMode={() => {
-            if (manualPathMode) {
-              setCurrentManualPoints([]);
-              setSelectedPathIdForEdit(null);
-            }
-            setManualPathMode(!manualPathMode);
-          }}
-          onToggleDiagnostics={() => setShowDiagnostics(!showDiagnostics)}
-          onTriggerReconstruct={handleTriggerReconstruct}
-        />
+          {/* Panel Content (File List or TCP Diagnostics) */}
+          <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
+            {!showDiagnostics ? (
+              <TemplateFileList
+                files={files}
+                onOpenDeleteFileModal={(f) => {
+                  if (!activeTemplate) return;
+                  setModalConfig({
+                    isOpen: true,
+                    title: 'Delete File',
+                    message: `Delete file '${f}' from template '${activeTemplate}'?`,
+                    type: 'confirm',
+                    onConfirm: async () => {
+                      try {
+                        const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/files/${f}`, {
+                          method: 'DELETE',
+                        });
+                        if (!res.ok) throw new Error('Failed to delete file');
+                        await handleSelectTemplate(activeTemplate);
+                      } catch (err: any) {
+                        alert(err.message);
+                      }
+                    },
+                  });
+                }}
+              />
+            ) : (
+              <DiagnosticsDashboard
+                verificationReport={verificationReport}
+                isVerifying={isVerifying}
+                isOptimizing={isOptimizing}
+                activeTemplate={activeTemplate}
+                optPaths={optPaths}
+                usingOptimizedPaths={usingOptimizedPaths}
+                hasPaths={manualPaths.length > 0}
+                kinParams={kinParams}
+                urdfTcpInfo={urdfTcpInfo}
+                isKinParamsOpen={isKinParamsOpen}
+                highlightedPathId={highlightedPathId}
+                setKinParams={setKinParams}
+                setIsKinParamsOpen={setIsKinParamsOpen}
+                setHighlightedPathId={setHighlightedPathId}
+                onRunDiagnostics={handleRunDiagnostics}
+                onApplyOptimization={handleApplyOptimization}
+                onToggleUseOptimized={handleToggleUseOptimized}
+                onClose={() => setShowDiagnostics(false)}
+              />
+            )}
+          </div>
+        </div>
       </div>
 
       {/* Global Dialog Modal */}

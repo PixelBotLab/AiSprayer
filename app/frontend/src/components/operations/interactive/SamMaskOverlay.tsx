@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { type MouseEvent } from 'react';
 import type { MaskData, Point } from './types';
 import { MASK_COLORS } from './types';
 
@@ -10,6 +10,8 @@ interface SamMaskOverlayProps {
   currentPolygons: number[][][];
   currentPoints: Point[];
   natSize: { w: number; h: number };
+  onSegImageClick?: (e: MouseEvent<SVGSVGElement>) => void;
+  onSegContextMenu?: (e: MouseEvent<SVGSVGElement>) => void;
   renderPolygons: (polygons: number[][][], fill: string, stroke?: string) => React.ReactNode;
 }
 
@@ -21,6 +23,8 @@ export const SamMaskOverlay: React.FC<SamMaskOverlayProps> = ({
   currentPolygons,
   currentPoints,
   natSize,
+  onSegImageClick,
+  onSegContextMenu,
   renderPolygons,
 }) => {
   return (
@@ -42,11 +46,13 @@ export const SamMaskOverlay: React.FC<SamMaskOverlayProps> = ({
         </svg>
       )}
 
-      {/* 2. SEGMENTATION MODE: Active SAM Overlay */}
+      {/* 2. SEGMENTATION MODE: Active Interactive SAM Overlay */}
       {segMode && (
         <svg
-          className="absolute inset-0 w-full h-full pointer-events-none"
+          className="absolute inset-0 w-full h-full cursor-crosshair"
           viewBox={`0 0 ${natSize.w} ${natSize.h}`}
+          onClick={onSegImageClick}
+          onContextMenu={onSegContextMenu}
         >
           {/* Committed masks */}
           {committedMasks.map((m, idx) => {
@@ -68,15 +74,32 @@ export const SamMaskOverlay: React.FC<SamMaskOverlayProps> = ({
 
           {/* Current user prompt points (Green = FG, Red = BG) */}
           {currentPoints.map((p, idx) => (
-            <circle
-              key={idx}
-              cx={p.x}
-              cy={p.y}
-              r={6}
-              fill={p.label === 1 ? '#22c55e' : '#ef4444'}
-              stroke="#ffffff"
-              strokeWidth={2}
-            />
+            <g key={idx}>
+              <circle
+                cx={p.x}
+                cy={p.y}
+                r={8}
+                fill="white"
+                filter="drop-shadow(0px 0px 3px rgba(0,0,0,0.8))"
+              />
+              <circle
+                cx={p.x}
+                cy={p.y}
+                r={6}
+                fill={p.label === 1 ? '#10b981' : '#ef4444'}
+              />
+              <text
+                x={p.x}
+                y={p.y + 0.5}
+                textAnchor="middle"
+                dominantBaseline="central"
+                fill="white"
+                fontSize={9}
+                fontWeight="bold"
+              >
+                {p.label === 1 ? '+' : '-'}
+              </text>
+            </g>
           ))}
         </svg>
       )}

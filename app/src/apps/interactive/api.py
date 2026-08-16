@@ -77,6 +77,46 @@ def list_template_files(name: str):
     files.sort(key=lambda x: x["ctime"], reverse=True)
     return {"files": files}
 
+@router.delete("/templates/{name}")
+def delete_template(name: str):
+    template_path = os.path.join(TEMPLATE_GROUP_DIR, name)
+    if not os.path.exists(template_path):
+        raise HTTPException(status_code=404, detail="Template not found")
+    try:
+        shutil.rmtree(template_path)
+        logger.info(f"Deleted template directory: {template_path}")
+        return {"message": f"Template '{name}' deleted successfully"}
+    except Exception as e:
+        logger.error(f"Failed to delete template '{name}': {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.delete("/templates/{name}/files/{filename}")
+def delete_template_file(name: str, filename: str):
+    template_path = os.path.join(TEMPLATE_GROUP_DIR, name)
+    if not os.path.exists(template_path):
+        raise HTTPException(status_code=404, detail="Template not found")
+    
+    file_path = os.path.join(template_path, filename)
+    # Prevent path traversal
+    if not os.path.abspath(file_path).startswith(os.path.abspath(template_path)):
+        raise HTTPException(status_code=400, detail="Invalid filename")
+        
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail=f"File '{filename}' not found")
+        
+    try:
+        if os.path.isfile(file_path):
+            os.remove(file_path)
+            logger.info(f"Deleted template file: {file_path}")
+            return {"message": f"File '{filename}' deleted successfully"}
+        elif os.path.isdir(file_path):
+            shutil.rmtree(file_path)
+            logger.info(f"Deleted template directory: {file_path}")
+            return {"message": f"Directory '{filename}' deleted successfully"}
+    except Exception as e:
+        logger.error(f"Failed to delete file '{filename}' in '{name}': {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/templates/{name}/capture")
 def capture_template_data(name: str):
     template_path = os.path.join(TEMPLATE_GROUP_DIR, name)

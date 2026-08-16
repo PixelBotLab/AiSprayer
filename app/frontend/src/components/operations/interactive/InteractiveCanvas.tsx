@@ -12,8 +12,10 @@ import {
   Save,
   Plus,
   Minus,
+  X,
 } from 'lucide-react';
-import type { MaskData, ManualPathItem, WaypointItem, VerificationReport, Point } from './types';
+import type { MaskData, ManualPathItem, WaypointItem, VerificationReport, Point, LiveNormalInfo } from './types';
+import { PATH_PALETTE } from './types';
 import { SamMaskOverlay } from './SamMaskOverlay';
 import { PathSvgOverlay } from './PathSvgOverlay';
 
@@ -34,7 +36,7 @@ interface InteractiveCanvasProps {
   highlightedPathId: number | null;
   hoveredWaypoint: WaypointItem | null;
   mousePixel: { u: number; v: number } | null;
-  liveNormal: { dx: number; dy: number } | null;
+  liveNormal: LiveNormalInfo | null;
   natSize: { w: number; h: number } | null;
   verificationReport: VerificationReport | null;
   zoom: number;
@@ -53,19 +55,22 @@ interface InteractiveCanvasProps {
   onManualMouseMove?: (e: MouseEvent<SVGSVGElement>) => void;
   onManualImageClick?: (e: MouseEvent<SVGSVGElement>) => void;
   onDeleteSingleWaypoint?: (idx: number) => void;
-  onSegImageClick?: (e: MouseEvent<HTMLImageElement>) => void;
-  onSegContextMenu?: (e: MouseEvent<HTMLImageElement>) => void;
+  onSegImageClick?: (e: MouseEvent<SVGSVGElement>) => void;
+  onSegContextMenu?: (e: MouseEvent<SVGSVGElement>) => void;
   onToggleMasksOverlay: () => void;
   onToggleManualPathsOverlay: () => void;
   onUndoSegPoint: () => void;
   onClearCurrentSegPoints: () => void;
+  onClearAllMasks: () => void;
   onCommitCurrentSegMask: () => void;
   onSaveAllSegMasks: () => void;
+  onExitSegMode: () => void;
   onUndoManualPoint: () => void;
   onClearCurrentManualPoints: () => void;
   onCommitManualPath: () => void;
   onSaveManualPaths: () => void;
   onDeleteCurrentPath: () => void;
+  onExitManualPathMode: () => void;
   renderPolygons: (polygons: number[][][], fill: string, stroke?: string) => React.ReactNode;
 }
 
@@ -111,13 +116,16 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
   onToggleManualPathsOverlay,
   onUndoSegPoint,
   onClearCurrentSegPoints,
+  onClearAllMasks,
   onCommitCurrentSegMask,
   onSaveAllSegMasks,
+  onExitSegMode,
   onUndoManualPoint,
   onClearCurrentManualPoints,
   onCommitManualPath,
   onSaveManualPaths,
   onDeleteCurrentPath,
+  onExitManualPathMode,
   renderPolygons,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -151,7 +159,6 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
   }, [isPanning, setIsPanning, setPan]);
 
   const handleMouseDown = (e: MouseEvent<HTMLDivElement>) => {
-    // Normal view mode: left-click drag freely pans
     if ((e.button === 0 && !segMode && !manualPathMode) || e.button === 1 || isSpacePressed) {
       e.preventDefault();
       setIsPanning(true);
@@ -197,50 +204,50 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
       onWheel={handleWheel}
       onMouseDown={handleMouseDown}
     >
-      {/* 1. Floating Top-Left Zoom & Layer Controls */}
-      <div className="absolute left-3 top-3 z-20 flex items-center gap-1 bg-slate-900/80 backdrop-blur border border-slate-700/80 rounded-lg p-1 shadow-lg text-slate-300">
+      {/* 1. Floating Top-Left Zoom & Layer Controls (Ultra-compact h-6 at left-2 top-2) */}
+      <div className="absolute left-2 top-2 z-20 flex items-center gap-0.5 bg-slate-950/70 hover:bg-slate-950/85 backdrop-blur-md border border-white/10 rounded-md px-1 py-0.5 shadow-xl text-slate-300 h-6 select-none transition-all">
         <button
           onClick={() => setZoom((z) => Math.min(15, z * 1.25))}
-          className="p-1.5 hover:bg-slate-800 rounded text-slate-300 hover:text-white"
+          className="p-1 hover:bg-white/10 rounded text-slate-400 hover:text-slate-200 transition-colors"
           title="Zoom In"
         >
-          <ZoomIn size={13} />
+          <ZoomIn size={11} />
         </button>
         <button
           onClick={() => setZoom((z) => Math.max(0.2, z * 0.8))}
-          className="p-1.5 hover:bg-slate-800 rounded text-slate-300 hover:text-white"
+          className="p-1 hover:bg-white/10 rounded text-slate-400 hover:text-slate-200 transition-colors"
           title="Zoom Out"
         >
-          <ZoomOut size={13} />
+          <ZoomOut size={11} />
         </button>
         <button
           onClick={() => {
             setZoom(1);
             setPan({ x: 0, y: 0 });
           }}
-          className="px-1.5 py-0.5 hover:bg-slate-800 rounded font-mono text-[10px] text-slate-300 hover:text-white"
+          className="px-1 hover:bg-white/10 rounded font-mono text-[9px] text-slate-300 hover:text-white transition-colors"
           title="Reset Zoom & Pan"
         >
           {(zoom * 100).toFixed(0)}%
         </button>
-        <div className="w-[1px] h-3.5 bg-slate-700 mx-0.5" />
+        <div className="w-[1px] h-2.5 bg-white/10 mx-0.5" />
         <button
           onClick={onToggleMasksOverlay}
-          className={`p-1.5 rounded transition-colors ${
-            showMasksOverlay ? 'bg-sky-500/20 text-sky-300' : 'text-slate-500 hover:text-slate-300'
+          className={`p-1 rounded transition-colors ${
+            showMasksOverlay ? 'bg-sky-500/25 text-sky-300' : 'text-slate-500 hover:text-slate-300'
           }`}
           title="Toggle Mask Overlay"
         >
-          {showMasksOverlay ? <Eye size={13} /> : <EyeOff size={13} />}
+          {showMasksOverlay ? <Eye size={11} /> : <EyeOff size={11} />}
         </button>
         <button
           onClick={onToggleManualPathsOverlay}
-          className={`p-1.5 rounded transition-colors ${
-            showManualPathsOverlay ? 'bg-amber-500/20 text-amber-300' : 'text-slate-500 hover:text-slate-300'
+          className={`p-1 rounded transition-colors ${
+            showManualPathsOverlay ? 'bg-amber-500/25 text-amber-300' : 'text-slate-500 hover:text-slate-300'
           }`}
           title="Toggle Manual Paths Overlay"
         >
-          <Route size={13} />
+          <Route size={11} />
         </button>
       </div>
 
@@ -266,9 +273,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
         >
           <img
             src={imageUrl}
-            className={`block max-w-full max-h-full object-contain ${
-              segMode ? 'cursor-crosshair' : 'pointer-events-none'
-            }`}
+            className="block max-w-full max-h-full object-contain pointer-events-none"
             alt="Captured view"
             onLoad={(e) =>
               setNatSize({
@@ -276,8 +281,6 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
                 h: e.currentTarget.naturalHeight,
               })
             }
-            onClick={onSegImageClick}
-            onContextMenu={onSegContextMenu}
           />
 
           {natSize && (
@@ -291,6 +294,8 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
                 currentPolygons={currentPolygons}
                 currentPoints={currentPoints}
                 natSize={natSize}
+                onSegImageClick={onSegImageClick}
+                onSegContextMenu={onSegContextMenu}
                 renderPolygons={renderPolygons}
               />
 
@@ -323,124 +328,323 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
         </div>
       )}
 
-      {/* 4. Floating Bottom Toolbar: SAM Segmentation Mode */}
+      {/* 3.5 Floating Live Pose HUD: Bottom-left info card during Manual TCP mode */}
+      {manualPathMode && (hoveredWaypoint || currentManualPoints.length > 0 || (mousePixel && liveNormal?.tcpPose)) && (
+        <div className="absolute bottom-14 left-3 z-30 pointer-events-none flex flex-col gap-1 bg-slate-950/90 backdrop-blur-md border border-amber-500/40 rounded-lg px-3 py-1.5 shadow-2xl transition-all select-none">
+          {(() => {
+            const pt = hoveredWaypoint || (currentManualPoints.length > 0 ? currentManualPoints[currentManualPoints.length - 1] : null);
+            const displayPt = pt
+              ? {
+                  title: hoveredWaypoint ? `Point #${pt.index} (Hovered)` : `Point #${pt.index} (Latest)`,
+                  dist: pt.standoff_distance_mm,
+                  tcp: pt.tcp_pose_base,
+                  surf: pt.surface_point_base_mm,
+                  norm: pt.surface_normal_base,
+                }
+              : {
+                  title: 'Cursor Live Pose',
+                  dist: standoffDistMm,
+                  tcp: liveNormal?.tcpPose || { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 },
+                  surf: liveNormal?.surfPointBase || null,
+                  norm: liveNormal?.normalBase || null,
+                };
+
+            return (
+              <>
+                <div className="flex items-center justify-between gap-3 text-[10px] border-b border-white/10 pb-0.5">
+                  <span className="font-bold text-amber-400 flex items-center gap-1.5">
+                    <Route size={11} className="text-amber-400" />
+                    {displayPt.title}
+                  </span>
+                  <span className="text-amber-300 font-mono text-[9px] bg-amber-950/60 px-1.5 py-0.2 rounded border border-amber-500/30">
+                    Standoff: {displayPt.dist}mm
+                  </span>
+                </div>
+                {displayPt.surf && (
+                  <div className="flex items-center gap-2 text-[9px] font-mono text-slate-400">
+                    <span className="text-slate-500">Surf:</span>
+                    <span className="text-slate-300">
+                      [{Array.isArray(displayPt.surf) ? displayPt.surf.map((v: number) => v.toFixed(1)).join(', ') : '—'}]
+                    </span>
+                    {displayPt.norm && (
+                      <>
+                        <span className="text-slate-600">|</span>
+                        <span className="text-slate-500">Norm:</span>
+                        <span className="text-emerald-400">
+                          [{displayPt.norm.map((v: number) => v.toFixed(2)).join(', ')}]
+                        </span>
+                      </>
+                    )}
+                  </div>
+                )}
+                <div className="flex items-center gap-2 text-[9.5px] font-mono text-slate-300">
+                  <span className="text-slate-400">TCP [mm]:</span>
+                  <span className="text-amber-200 font-bold">
+                    [{displayPt.tcp.x}, {displayPt.tcp.y}, {displayPt.tcp.z}]
+                  </span>
+                  <span className="text-slate-600">|</span>
+                  <span className="text-slate-400">Ori [°]:</span>
+                  <span className="text-slate-200">
+                    [{displayPt.tcp.rx}°, {displayPt.tcp.ry}°, {displayPt.tcp.rz}°]
+                  </span>
+                </div>
+              </>
+            );
+          })()}
+        </div>
+      )}
+
+      {/* 4. Sleek Minimal Floating Toolbar: SAM Segmentation Mode (h-7 rounded-full icon-only) */}
       {segMode && (
-        <div className="absolute bottom-5 left-1/2 -translate-x-1/2 z-30 bg-slate-900/95 backdrop-blur-md border border-slate-700/80 rounded-xl p-1.5 shadow-2xl flex items-center gap-2.5 text-xs text-slate-200">
-          <div className="flex items-center gap-1.5 px-2 border-r border-slate-700 text-[11px]">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 inline-block animate-pulse" />
-            <span className="font-medium text-sky-300">Left: FG</span>
-            <span className="w-2 h-2 rounded-full bg-rose-500 inline-block ml-1.5" />
-            <span className="font-medium text-slate-400">Right: BG</span>
+        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-slate-950/70 hover:bg-slate-950/85 backdrop-blur-md border border-sky-500/30 rounded-full px-2.5 h-7 flex items-center gap-1.5 shadow-2xl z-30 transition-all select-none">
+          {/* Prompt indicators */}
+          <div className="flex items-center gap-1 px-1 border-r border-white/10 text-[10px]">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block animate-pulse" title="Left Click: Foreground" />
+            <span className="w-1.5 h-1.5 rounded-full bg-rose-400 inline-block ml-0.5" title="Right Click: Background" />
           </div>
 
-          <div className="flex items-center gap-1">
+          {/* Undo Point */}
+          <div className="relative group flex items-center">
             <button
               onClick={onUndoSegPoint}
               disabled={currentPoints.length === 0}
-              className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 disabled:opacity-40 flex items-center gap-1 text-[11px] font-medium transition-colors"
+              className="p-1 text-slate-300 hover:text-white hover:bg-white/10 rounded-full disabled:opacity-30 transition-colors"
             >
               <Undo2 size={12} />
-              <span>Undo</span>
             </button>
+            <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
+              <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2 py-0.5 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+                Undo Point
+              </div>
+            </div>
+          </div>
+
+          {/* Reset Current Points */}
+          <div className="relative group flex items-center">
             <button
               onClick={onClearCurrentSegPoints}
               disabled={currentPoints.length === 0}
-              className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-rose-300 disabled:opacity-40 flex items-center gap-1 text-[11px] font-medium transition-colors"
+              className="p-1 text-amber-400 hover:text-amber-300 hover:bg-amber-400/20 rounded-full disabled:opacity-30 transition-colors"
             >
-              <Trash2 size={12} />
-              <span>Clear</span>
+              <RefreshCw size={12} />
             </button>
+            <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
+              <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2 py-0.5 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+                Reset Points
+              </div>
+            </div>
+          </div>
+
+          {/* Commit Mask */}
+          <div className="relative group flex items-center">
             <button
               onClick={onCommitCurrentSegMask}
-              disabled={currentPoints.length === 0}
-              className="px-2.5 py-1 rounded bg-sky-600 hover:bg-sky-500 text-white text-[11px] font-medium flex items-center gap-1 shadow-md shadow-sky-900/40 disabled:opacity-40 transition-all"
+              disabled={currentPolygons.length === 0}
+              className="p-1 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-400/20 rounded-full disabled:opacity-30 transition-colors"
             >
               <Check size={12} />
-              <span>Commit</span>
             </button>
+            <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
+              <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2 py-0.5 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+                Commit Current Mask
+              </div>
+            </div>
+          </div>
+
+          <div className="w-px h-3 bg-white/10 mx-0.5" />
+
+          {/* Clear All Masks */}
+          <div className="relative group flex items-center">
+            <button
+              onClick={onClearAllMasks}
+              disabled={committedMasks.length === 0 && currentPoints.length === 0}
+              className="p-1 text-rose-400 hover:text-rose-300 hover:bg-rose-400/20 rounded-full disabled:opacity-30 transition-colors"
+            >
+              <Trash2 size={12} />
+            </button>
+            <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
+              <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2 py-0.5 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+                Clear All Masks
+              </div>
+            </div>
+          </div>
+
+          {/* Save Masks to YAML */}
+          <div className="relative group flex items-center">
             <button
               onClick={onSaveAllSegMasks}
-              className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-medium flex items-center gap-1 shadow-md shadow-emerald-900/40 transition-all ml-0.5"
+              disabled={committedMasks.length === 0}
+              className="p-1 bg-sky-600/80 hover:bg-sky-600 text-white rounded-full shadow-lg shadow-sky-900/30 border border-sky-400/30 disabled:opacity-30 transition-all active:scale-95"
             >
               <Save size={12} />
-              <span>Save Masks</span>
             </button>
+            <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
+              <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2 py-0.5 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+                Save Masks to YAML
+              </div>
+            </div>
+          </div>
+
+          {/* Exit Seg Mode */}
+          <div className="relative group flex items-center">
+            <button
+              onClick={onExitSegMode}
+              className="p-1 text-slate-400 hover:text-slate-200 hover:bg-white/10 rounded-full transition-colors"
+            >
+              <X size={12} />
+            </button>
+            <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
+              <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2 py-0.5 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+                Exit Segmentation
+              </div>
+            </div>
           </div>
         </div>
       )}
 
-      {/* 5. Floating Bottom Toolbar: Manual TCP Path Designer */}
+      {/* 5. Sleek Minimal Floating Toolbar: Manual TCP Path Designer (h-7 rounded-full icon-only) */}
       {manualPathMode && (
-        <div className="absolute bottom-5 left-1/2 -translate-x-1/2 z-30 bg-slate-900/95 backdrop-blur-md border border-amber-500/40 rounded-xl p-1.5 shadow-2xl flex items-center gap-2.5 text-xs text-slate-200">
-          <div className="flex items-center gap-1.5 px-2 border-r border-slate-700 text-[11px]">
-            <Route size={13} className="text-amber-400 animate-pulse" />
-            <span className="font-medium text-amber-300">
-              {selectedPathIdForEdit ? `Edit P${selectedPathIdForEdit}` : `Path P${manualPaths.length + 1}`}
-            </span>
-            <span className="text-[10px] text-slate-400 font-mono">
-              ({currentManualPoints.length} pts)
-            </span>
-          </div>
+        <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-slate-950/70 hover:bg-slate-950/85 backdrop-blur-md border border-amber-500/30 rounded-full px-2.5 h-7 flex items-center gap-1.5 shadow-2xl z-30 transition-all select-none">
+          {/* Existing Paths Chips */}
+          {manualPaths.length > 0 && (
+            <div className="flex items-center gap-1 px-1 border-r border-white/10 max-w-[240px] overflow-x-auto custom-scrollbar">
+              {manualPaths.map((p) => {
+                const isSelected = selectedPathIdForEdit === p.path_id;
+                const color = PATH_PALETTE[(p.path_id - 1) % PATH_PALETTE.length];
+                return (
+                  <div
+                    key={p.path_id}
+                    onClick={() => onSelectPathForEdit && onSelectPathForEdit(p.path_id)}
+                    className={`flex items-center gap-1 px-2 py-0.2 rounded-full border text-[9px] cursor-pointer select-none transition-all ${
+                      isSelected
+                        ? 'bg-amber-950/90 border-amber-400 text-amber-100 shadow-md ring-1 ring-amber-400/50'
+                        : 'bg-slate-900/90 border-white/10 text-slate-300 hover:border-slate-500 hover:text-white'
+                    }`}
+                    title={`Click to edit Path ${p.path_id}`}
+                  >
+                    <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: color }} />
+                    <span className="font-bold">P{p.path_id}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
 
-          {/* Standoff Distance Adjustment */}
-          <div className="flex items-center gap-1 px-1.5 border-r border-slate-700">
-            <span className="text-[10px] text-slate-400 font-mono">Standoff:</span>
+          {/* Standoff Adjuster */}
+          <div className="flex items-center gap-0.5 px-1 border-r border-white/10 text-[10px] text-slate-300">
             <button
               onClick={() => setStandoffDistMm(Math.max(50, standoffDistMm - 10))}
-              className="p-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300"
+              className="p-0.5 hover:bg-white/10 rounded text-slate-400 hover:text-white"
+              title="Decrease Standoff"
             >
               <Minus size={10} />
             </button>
-            <span className="font-mono text-amber-400 text-[11px] px-0.5">{standoffDistMm}mm</span>
+            <span className="font-mono text-amber-400 px-0.5">{standoffDistMm}mm</span>
             <button
               onClick={() => setStandoffDistMm(Math.min(300, standoffDistMm + 10))}
-              className="p-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300"
+              className="p-0.5 hover:bg-white/10 rounded text-slate-400 hover:text-white"
+              title="Increase Standoff"
             >
               <Plus size={10} />
             </button>
           </div>
 
-          <div className="flex items-center gap-1">
+          {/* Undo Waypoint */}
+          <div className="relative group flex items-center">
             <button
               onClick={onUndoManualPoint}
               disabled={currentManualPoints.length === 0}
-              className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 disabled:opacity-40 flex items-center gap-1 text-[11px] font-medium transition-colors"
+              className="p-1 text-slate-300 hover:text-white hover:bg-white/10 rounded-full disabled:opacity-30 transition-colors"
             >
               <Undo2 size={12} />
-              <span>Undo</span>
             </button>
+            <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
+              <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2 py-0.5 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+                Undo Waypoint
+              </div>
+            </div>
+          </div>
+
+          {/* Clear Current Waypoints */}
+          <div className="relative group flex items-center">
             <button
               onClick={onClearCurrentManualPoints}
               disabled={currentManualPoints.length === 0}
-              className="px-2 py-1 rounded bg-slate-800 hover:bg-slate-700 text-rose-300 disabled:opacity-40 flex items-center gap-1 text-[11px] font-medium transition-colors"
+              className="p-1 text-amber-400 hover:text-amber-300 hover:bg-amber-400/20 rounded-full disabled:opacity-30 transition-colors"
             >
-              <Trash2 size={12} />
-              <span>Clear</span>
+              <RefreshCw size={12} />
             </button>
+            <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
+              <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2 py-0.5 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+                Clear Current Points
+              </div>
+            </div>
+          </div>
+
+          {/* Commit Path */}
+          <div className="relative group flex items-center">
             <button
               onClick={onCommitManualPath}
               disabled={currentManualPoints.length === 0}
-              className="px-2.5 py-1 rounded bg-amber-600 hover:bg-amber-500 text-white text-[11px] font-medium flex items-center gap-1 shadow-md shadow-amber-900/40 disabled:opacity-40 transition-all"
+              className="p-1 text-emerald-400 hover:text-emerald-300 hover:bg-emerald-400/20 rounded-full disabled:opacity-30 transition-colors"
             >
               <Check size={12} />
-              <span>{selectedPathIdForEdit ? 'Update' : 'Commit'}</span>
             </button>
-            <button
-              onClick={onSaveManualPaths}
-              className="px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-medium flex items-center gap-1 shadow-md shadow-emerald-900/40 transition-all ml-0.5"
-            >
-              <Save size={12} />
-              <span>Save</span>
-            </button>
-            {selectedPathIdForEdit && (
+            <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
+              <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2 py-0.5 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+                {selectedPathIdForEdit ? 'Update Path' : 'Commit New Path'}
+              </div>
+            </div>
+          </div>
+
+          <div className="w-px h-3 bg-white/10 mx-0.5" />
+
+          {/* Delete Path */}
+          {selectedPathIdForEdit && (
+            <div className="relative group flex items-center">
               <button
                 onClick={onDeleteCurrentPath}
-                className="px-2 py-1 rounded bg-rose-600/80 hover:bg-rose-600 text-white text-[11px] font-medium flex items-center gap-1 transition-all ml-0.5"
-                title="Delete Selected Path"
+                className="p-1 text-rose-400 hover:text-rose-300 hover:bg-rose-400/20 rounded-full transition-colors"
               >
                 <Trash2 size={12} />
               </button>
-            )}
+              <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
+                <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2 py-0.5 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+                  Delete Path {selectedPathIdForEdit}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Save Paths */}
+          <div className="relative group flex items-center">
+            <button
+              onClick={onSaveManualPaths}
+              disabled={manualPaths.length === 0 && currentManualPoints.length === 0}
+              className="p-1 bg-amber-600/80 hover:bg-amber-600 text-white rounded-full shadow-lg shadow-amber-900/30 border border-amber-400/30 disabled:opacity-30 transition-all active:scale-95"
+            >
+              <Save size={12} />
+            </button>
+            <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
+              <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2 py-0.5 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+                Save Paths to YAML
+              </div>
+            </div>
+          </div>
+
+          {/* Exit Manual Mode */}
+          <div className="relative group flex items-center">
+            <button
+              onClick={onExitManualPathMode}
+              className="p-1 text-slate-400 hover:text-slate-200 hover:bg-white/10 rounded-full transition-colors"
+            >
+              <X size={12} />
+            </button>
+            <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
+              <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2 py-0.5 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+                Exit Manual TCP
+              </div>
+            </div>
           </div>
         </div>
       )}
