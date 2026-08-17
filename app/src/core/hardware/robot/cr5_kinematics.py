@@ -450,24 +450,27 @@ class CR5Kinematics:
         stays in limits (same winding as the live robot); otherwise the in-limit
         expanded representative is returned.
         """
-        valid_sols = self.solve_ik(T, expand=True)
+        valid_sols = self.solve_ik(T, expand=False)
         if not valid_sols:
             return None
 
-        curr = np.array(current_joints, dtype=np.float64)
-        w = np.array(weights if weights is not None else [1.0] * 6, dtype=np.float64)
+        curr = np.asarray(current_joints, dtype=np.float64)
+        w = np.asarray(weights if weights is not None else [1.0] * 6, dtype=np.float64)
         best_sol = None
-        best_unwrapped = None
         min_dist = float("inf")
         for sol in valid_sols:
             d = np.mod(sol - curr + PI, 2.0 * PI) - PI
-            dist = float(np.sum(w * (d ** 2)))
-            if dist < min_dist:
-                min_dist = dist
-                best_sol = sol
-                best_unwrapped = curr + d
-        if best_unwrapped is not None and self.is_joint_valid(best_unwrapped):
-            return best_unwrapped
+            unwrapped = curr + d
+            if self.is_joint_valid(unwrapped):
+                dist = float(np.sum(w * (d ** 2)))
+                if dist < min_dist:
+                    min_dist = dist
+                    best_sol = unwrapped
+            elif self.is_joint_valid(sol):
+                dist = float(np.sum(w * (d ** 2)))
+                if dist < min_dist:
+                    min_dist = dist
+                    best_sol = sol
         return best_sol
 
     def get_best_ik_controller(
