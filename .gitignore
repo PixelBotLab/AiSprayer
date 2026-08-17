@@ -30,6 +30,7 @@ build_venv/
 *.so
 *.dylib
 *.dll
+test_cr5_kinematics
 
 # 编译器/IDE
 .idea/

@@ -3,6 +3,10 @@
 
 #include <vector>
 
+// High-level CR5 kinematics in the URDF frame (DH q2/q4 offsets applied here).
+// ctypes entry points are in c_wrapper.cpp (c_forward, c_inverse, …).
+// Python twin: CR5Kinematics(backend="python"|"cpp").
+
 namespace cr5_kinematics {
   
   // =========================================================================
@@ -35,6 +39,9 @@ namespace cr5_kinematics {
   // @return: true if at least one solution is found
   bool ComputeIk(const double* eetrans, const double* eerot, std::vector<std::vector<double>>& vsolutions);
 
+  // Fast path: write up to 8 solutions into q_sols[8*6], same layout as inverse().
+  int ComputeIk(const double* eetrans, const double* eerot, double* q_sols);
+
   // =========================================================================
   // CONTROLLER INTERFACES (Mapped to Dobot Controller Coordinate Frame)
   // Base rotated 180 deg around Z. Tool permuted (X_t=-Y_u, Y_t=-Z_u, Z_t=X_u)
@@ -50,6 +57,9 @@ namespace cr5_kinematics {
   // @param vsolutions: output vector of joint solutions, each is a vector of 6 doubles (radians)
   // @return: number of solutions found
   int inverse_controller(const double* xyz, const double* rpy, std::vector<std::vector<double>>& vsolutions);
+
+  // Fast path: write up to 8 solutions into q_sols[8*6], same layout as inverse().
+  int inverse_controller(const double* xyz, const double* rpy, double* q_sols);
 
 }
 

@@ -1,8 +1,11 @@
+// Analytical DH-frame FK/IK (UR-style closed form). Same math as cr5_ur_kin.py.
+// URDF callers must use cr5_kinematics::forward/inverse (q2/q4 ±π/2, wrap [-π, π]).
+// CR5 DH lengths are compiled under CR5_PARAMS.
 
 #include <math.h>
 #include <stdio.h>
 
- 
+
 namespace ur_kinematics {
 
   namespace {

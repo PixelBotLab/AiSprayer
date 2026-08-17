@@ -187,6 +187,21 @@ class RobotConfig:
                 self.urdf_tcp["rpy_deg"]
             )
 
+        self.joint_min_rad, self.joint_max_rad = self._limits_rad_from_urdf()
+
+    def _limits_rad_from_urdf(self) -> tuple[np.ndarray, np.ndarray]:
+        """CR5 defaults, overwritten by URDF joint1..joint6 when present."""
+        joint_min = np.array([-math.pi, -math.pi, -2.86159, -math.pi, -math.pi, -2.0 * math.pi], dtype=np.float64)
+        joint_max = np.array([ math.pi,  math.pi,  2.86159,  math.pi,  math.pi,  2.0 * math.pi], dtype=np.float64)
+        limits = self.urdf_info.get("joint_limits_deg") or self.urdf_info.get("joint_limits") or {}
+        for i in range(6):
+            name = f"joint{i + 1}"
+            if name in limits:
+                lo_deg, hi_deg = limits[name]
+                joint_min[i] = math.radians(float(lo_deg))
+                joint_max[i] = math.radians(float(hi_deg))
+        return joint_min, joint_max
+
     def set_tcp_offset(self, xyz_mm: list[float], rpy_deg: list[float]):
         """
         Sets the TCP transform matrix T_flange_tool in meters.

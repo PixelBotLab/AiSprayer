@@ -6,6 +6,7 @@ Coordinates modular verification, interpolation, and optimization subsystems:
 - KinematicChainVerifier: Continuous IK branch tracking, singularity diagnosis, and trajectory recording
 - AxialSpinOptimizer: Free axial tool rotation (OPT) auto-fix
 - PoiConstraintOptimizer: Bounded tolerance envelope spray-cone constraint optimization (POI)
+- SprayWaypointOptimizer: Sparse Viterbi attitude search for controller-native MoveL
 """
 
 import logging
@@ -23,6 +24,7 @@ from .verification import (
     KinematicChainVerifier,
     AxialSpinOptimizer,
     PoiConstraintOptimizer,
+    SprayWaypointOptimizer,
 )
 
 logger = logging.getLogger(__name__)
@@ -30,7 +32,10 @@ logger = logging.getLogger(__name__)
 
 class CR5PathVerifier:
     """
-    Unified Facade coordinator for CR5 path kinematics verification and multi-mode trajectory optimization.
+    Unified facade for CR5 path kinematics verification and trajectory optimization.
+
+    :param kinematics_backend: passed to CR5Kinematics — "python", "cpp", or "auto"
+        (prefer libur_kin for dense MoveL IK when the shared library is built).
     """
     @classmethod
     def load_limits_from_urdf(cls, urdf_path: str = None) -> dict:
@@ -47,7 +52,8 @@ class CR5PathVerifier:
         urdf_path: str = None,
         step_size_mm: float = 1.5,
         linear_velocity_mm_s: float = 120.0,
-        max_joint_vel_deg_s: list[float] = None
+        max_joint_vel_deg_s: list[float] = None,
+        kinematics_backend: str = "auto",
     ):
         self.step_size_mm = step_size_mm
         self.linear_velocity_mm_s = linear_velocity_mm_s
@@ -61,8 +67,12 @@ class CR5PathVerifier:
         self.urdf_tcp = self.config.urdf_tcp
         self.max_joint_vel_deg_s = self.config.max_joint_vel_deg_s
 
-        # 2. Kinematics Solver
-        self.solver = CR5Kinematics()
+        # 2. Kinematics Solver ("auto" prefers libur_kin when the C++ lib is built)
+        self.solver = CR5Kinematics(
+            joint_min=self.config.joint_min_rad.tolist(),
+            joint_max=self.config.joint_max_rad.tolist(),
+            backend=kinematics_backend,
+        )
 
         # 3. Cartesian Trajectory Interpolator Subsystem
         self.interpolator = PathInterpolator(
@@ -90,6 +100,12 @@ class CR5PathVerifier:
             robot_config=self.config,
             interpolator=self.interpolator,
             verifier=self.verifier
+        )
+
+        # 7. Sparse Viterbi MoveL optimizer (path_opt)
+        self.spray_optimizer = SprayWaypointOptimizer(
+            solver=self.solver,
+            verifier=self.verifier,
         )
 
     # ─── TCP Offset Configuration ───────────────────────────────────────────
@@ -160,4 +176,47 @@ class CR5PathVerifier:
             ref_rpy_deg=ref_rpy_deg,
             tolerance_rpy_deg=tolerance_rpy_deg,
             tol_rpy_deg=tol_rpy_deg
+        )
+
+    # ─── Sparse Viterbi MoveL Optimizer ─────────────────────────────────────
+    def optimize_spray_path(
+        self,
+        path_item: dict,
+        init_q: list[float] = None,
+        ref_rpy_deg: list[float] = None,
+        tolerance_rpy_deg: list[float] = None,
+    ):
+        """
+        稀疏 Waypoint 姿态全局优化（工具系网格 + 锚点包络 + MoveL 抽检 + Viterbi）。
+        输出仍是稀疏 tcp_pose_base，供控制器原生 MoveL，不生成密关节轨。
+
+        :param path_item: 单条路径 {"points": [{"tcp_pose_base": {x,y,z,rx,ry,rz}}, ...]}
+        :param init_q: 起始关节，弧度
+        :param ref_rpy_deg: 锚点参考姿态 [rx, ry, rz]（度）
+        :param tolerance_rpy_deg: 锚点硬包络 [tol_rx, tol_ry, tol_rz]（度）
+        :return: (optimized_path_item, was_modified)
+        """
+        return self.spray_optimizer.optimize_path_item(
+            path_item,
+            init_q=init_q,
+            ref_rpy_deg=ref_rpy_deg,
+            tolerance_rpy_deg=tolerance_rpy_deg,
+        )
+
+    def optimize_spray_all_paths(
+        self,
+        paths_data: dict,
+        init_q: list[float] = None,
+        ref_rpy_deg: list[float] = None,
+        tolerance_rpy_deg: list[float] = None,
+    ):
+        """
+        对 paths_data 中每条路径做稀疏 Viterbi 选姿，路径之间用上一终点关节衔接，
+        最后用密采样校验器出总报告。
+        """
+        return self.spray_optimizer.optimize_all_paths(
+            paths_data,
+            init_q=init_q,
+            ref_rpy_deg=ref_rpy_deg,
+            tolerance_rpy_deg=tolerance_rpy_deg,
         )

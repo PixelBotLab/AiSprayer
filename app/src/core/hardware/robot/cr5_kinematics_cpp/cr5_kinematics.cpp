@@ -1,6 +1,6 @@
-#include "cr5_kinematics/cr5_kinematics.h"
+#include "cr5_kinematics.h"
 #include <cmath>
-#include <iostream>
+#include <cstring>
 
 #define CR5_PARAMS
 namespace ur_kinematics {
@@ -15,12 +15,54 @@ namespace ur_kinematics {
     int inverse(const double* T, double* q_sols, double q6_des);
 }
 
+namespace {
+
+void fill_sols(std::vector<std::vector<double>>& vsolutions, const double* q_sols, int num_sols) {
+    vsolutions.resize(num_sols);
+    for (int i = 0; i < num_sols; ++i) {
+        vsolutions[i].resize(6);
+        std::memcpy(vsolutions[i].data(), q_sols + i * 6, 6 * sizeof(double));
+    }
+}
+
+// T_urdf = T_base_inv * T_ctrl * T_tool_inv, with R_ctrl = Rz(rz)*Ry(ry)*Rx(rx).
+void controller_pose_to_urdf(const double* xyz_mm, const double* rpy_deg, double* T_urdf) {
+    const double rx = rpy_deg[0] * M_PI / 180.0;
+    const double ry = rpy_deg[1] * M_PI / 180.0;
+    const double rz = rpy_deg[2] * M_PI / 180.0;
+    const double sx = sin(rx), cx = cos(rx);
+    const double sy = sin(ry), cy = cos(ry);
+    const double sz = sin(rz), cz = cos(rz);
+
+    const double r00 = cz * cy;
+    const double r01 = cz * sy * sx - sz * cx;
+    const double r02 = cz * sy * cx + sz * sx;
+    const double r10 = sz * cy;
+    const double r11 = sz * sy * sx + cz * cx;
+    const double r12 = sz * sy * cx - cz * sx;
+    const double r20 = -sy;
+    const double r21 = cy * sx;
+    const double r22 = cy * cx;
+
+    const double x = xyz_mm[0] / 1000.0;
+    const double y = xyz_mm[1] / 1000.0;
+    const double z = xyz_mm[2] / 1000.0;
+
+    T_urdf[0] = -r02; T_urdf[1] =  r00; T_urdf[2] =  r01; T_urdf[3] = -x;
+    T_urdf[4] = -r12; T_urdf[5] =  r10; T_urdf[6] =  r11; T_urdf[7] = -y;
+    T_urdf[8] =  r22; T_urdf[9] = -r20; T_urdf[10] = -r21; T_urdf[11] = z;
+    T_urdf[12] = 0.0; T_urdf[13] = 0.0; T_urdf[14] = 0.0; T_urdf[15] = 1.0;
+}
+
+}  // namespace
+
 namespace cr5_kinematics {
     
     // =========================================================================
     // STANDARD INTERFACES
     // =========================================================================
 
+    // URDF FK: convert q2/q4 by −π/2 into DH, then analytical product of transforms.
     void forward(const double* q_urdf, double* T) {
         double q_dh[6];
         q_dh[0] = q_urdf[0];
@@ -33,6 +75,8 @@ namespace cr5_kinematics {
         ur_kinematics::forward(q_dh, T);
     }
 
+    // URDF IK: DH inverse (q6_des=0), then q2/q4 += π/2 and wrap each joint to [-π, π].
+    // Up to 8 solutions written densely into q_sols[8*6].
     int inverse(const double* T, double* q_sols) {
         double q_dh_sols[8 * 6];
         int num_sols = ur_kinematics::inverse(T, q_dh_sols, 0.0);
@@ -69,27 +113,22 @@ namespace cr5_kinematics {
         }
     }
 
-    bool ComputeIk(const double* eetrans, const double* eerot, std::vector<std::vector<double>>& vsolutions) {
+    int ComputeIk(const double* eetrans, const double* eerot, double* q_sols) {
         double T[16];
-        for(int i=0; i<3; ++i) {
-            T[i*4+3] = eetrans[i];
-            T[i*4+0] = eerot[i*3+0];
-            T[i*4+1] = eerot[i*3+1];
-            T[i*4+2] = eerot[i*3+2];
+        for (int i = 0; i < 3; ++i) {
+            T[i * 4 + 3] = eetrans[i];
+            T[i * 4 + 0] = eerot[i * 3 + 0];
+            T[i * 4 + 1] = eerot[i * 3 + 1];
+            T[i * 4 + 2] = eerot[i * 3 + 2];
         }
-        T[3*4+0] = 0; T[3*4+1] = 0; T[3*4+2] = 0; T[3*4+3] = 1;
+        T[12] = 0; T[13] = 0; T[14] = 0; T[15] = 1;
+        return inverse(T, q_sols);
+    }
 
-        double q_sols[8*6];
-        int num_sols = inverse(T, q_sols);
-
-        vsolutions.clear();
-        for(int i=0; i<num_sols; ++i) {
-            std::vector<double> sol(6);
-            for(int j=0; j<6; ++j) {
-                sol[j] = q_sols[i*6+j];
-            }
-            vsolutions.push_back(sol);
-        }
+    bool ComputeIk(const double* eetrans, const double* eerot, std::vector<std::vector<double>>& vsolutions) {
+        double q_sols[8 * 6];
+        int num_sols = ComputeIk(eetrans, eerot, q_sols);
+        fill_sols(vsolutions, q_sols, num_sols);
         return num_sols > 0;
     }
 
@@ -130,67 +169,16 @@ namespace cr5_kinematics {
         rpy[2] = sol_rz * 180.0 / M_PI;
     }
 
-    int inverse_controller(const double* xyz, const double* rpy, std::vector<std::vector<double>>& vsolutions) {
-        double rx = rpy[0] * M_PI / 180.0;
-        double ry = rpy[1] * M_PI / 180.0;
-        double rz = rpy[2] * M_PI / 180.0;
-
-        double R_z[9] = { cos(rz), -sin(rz), 0,  sin(rz), cos(rz), 0,  0, 0, 1 };
-        double R_y[9] = { cos(ry), 0, sin(ry),   0, 1, 0,  -sin(ry), 0, cos(ry) };
-        double R_x[9] = { 1, 0, 0,   0, cos(rx), -sin(rx),   0, sin(rx), cos(rx) };
-
-        // R_ctrl = R_z * R_y * R_x
-        double R_zy[9];
-        for(int i=0; i<3; i++) {
-            for(int j=0; j<3; j++) {
-                R_zy[i*3+j] = R_z[i*3+0]*R_y[0*3+j] + R_z[i*3+1]*R_y[1*3+j] + R_z[i*3+2]*R_y[2*3+j];
-            }
-        }
-        double R_ctrl[9];
-        for(int i=0; i<3; i++) {
-            for(int j=0; j<3; j++) {
-                R_ctrl[i*3+j] = R_zy[i*3+0]*R_x[0*3+j] + R_zy[i*3+1]*R_x[1*3+j] + R_zy[i*3+2]*R_x[2*3+j];
-            }
-        }
-
-        double T_ctrl[16] = {
-            R_ctrl[0], R_ctrl[1], R_ctrl[2], xyz[0] / 1000.0,
-            R_ctrl[3], R_ctrl[4], R_ctrl[5], xyz[1] / 1000.0,
-            R_ctrl[6], R_ctrl[7], R_ctrl[8], xyz[2] / 1000.0,
-            0,         0,         0,         1
-        };
-
-        // T_urdf = T_base_inv * T_ctrl * T_tool_inv
-        // T_base_inv = RotZ(-180) = RotZ(180) -> x=-x, y=-y
-        // T_tool_inv = [0 -1 0; 0 0 -1; 1 0 0]
-        
-        double T_bt[16];
-        for(int i=0; i<16; i++) T_bt[i] = T_ctrl[i];
-        for(int i=0; i<4; i++) {
-            T_bt[0*4+i] = -T_ctrl[0*4+i];
-            T_bt[1*4+i] = -T_ctrl[1*4+i];
-        }
-
+    int inverse_controller(const double* xyz, const double* rpy, double* q_sols) {
         double T_urdf[16];
-        for(int i=0; i<3; i++) {
-            T_urdf[i*4+0] =  T_bt[i*4+2];
-            T_urdf[i*4+1] = -T_bt[i*4+0];
-            T_urdf[i*4+2] = -T_bt[i*4+1];
-            T_urdf[i*4+3] =  T_bt[i*4+3];
-        }
-        T_urdf[12] = 0; T_urdf[13] = 0; T_urdf[14] = 0; T_urdf[15] = 1;
+        controller_pose_to_urdf(xyz, rpy, T_urdf);
+        return inverse(T_urdf, q_sols);
+    }
 
-        double q_sols[8*6];
-        int num_sols = inverse(T_urdf, q_sols);
-
-        vsolutions.clear();
-        for(int i=0; i<num_sols; ++i) {
-            std::vector<double> sol(6);
-            for(int j=0; j<6; ++j) {
-                sol[j] = q_sols[i*6+j];
-            }
-            vsolutions.push_back(sol);
-        }
+    int inverse_controller(const double* xyz, const double* rpy, std::vector<std::vector<double>>& vsolutions) {
+        double q_sols[8 * 6];
+        int num_sols = inverse_controller(xyz, rpy, q_sols);
+        fill_sols(vsolutions, q_sols, num_sols);
         return num_sols;
     }
 }

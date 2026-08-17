@@ -22,6 +22,9 @@ from .axial_optimizer import (
 from .poi_optimizer import (
     PoiConstraintOptimizer
 )
+from .path_opt import (
+    SprayWaypointOptimizer
+)
 
 __all__ = [
     "get_configured_robot_config",
@@ -34,4 +37,5 @@ __all__ = [
     "KinematicChainVerifier",
     "AxialSpinOptimizer",
     "PoiConstraintOptimizer",
+    "SprayWaypointOptimizer",
 ]

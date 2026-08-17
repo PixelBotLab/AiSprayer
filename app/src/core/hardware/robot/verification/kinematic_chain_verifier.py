@@ -1,7 +1,17 @@
 """
 Kinematic Chain Path Verifier for Dobot CR5.
-Performs offline Cartesian continuous inverse kinematics tracking, velocity profiling,
-singularity diagnosis (elbow/wrist), unreachable point detection, and records dense simulation trajectories.
+
+Simulates a dense MoveL Cartesian path as a continuous IK chain:
+
+1. Interpolate waypoints to ~step_size_mm Cartesian samples.
+2. At each sample, pick the IK branch nearest to the previous q
+   (`get_best_ik_controller`: expand ±2π then unwrap onto the live winding).
+   Using sols[0] would flip shoulder/elbow/wrist and produce ~180° jumps.
+3. Diagnose joint limits, branch jumps (>45°), and singularities.
+   Shoulder/elbow/wrist warnings are rising-edge only (enter once, not every 1.5 mm).
+4. Joint overspeed near a singularity is ERROR (Cartesian speed maps to huge Δq);
+   overspeed far from singularity is WARNING (slow the path).
+5. Record trajectory_q / trajectory_tcp for playback.
 """
 
 import math
@@ -15,29 +25,111 @@ from .path_interpolator import PathInterpolator
 
 logger = logging.getLogger(__name__)
 PI = math.pi
+BRANCH_JUMP_DEG = 45.0
 
 
 class KinematicChainVerifier:
     """
-    Simulates continuous MoveL Cartesian execution along robot kinematic chain.
+    Simulates continuous MoveL Cartesian execution along the robot kinematic chain.
+
+    Pass a pre-built `kinematics_solver` (with python/cpp backend) from CR5PathVerifier.
+    If omitted, a solver is created with URDF limits and backend="auto".
     """
     def __init__(
         self,
         robot_config: RobotConfig,
         interpolator: PathInterpolator,
-        kinematics_solver: CR5Kinematics = None
+        kinematics_solver: CR5Kinematics = None,
+        kinematics_backend: str = "auto",
     ):
         self.config = robot_config
         self.interpolator = interpolator
-        self.solver = kinematics_solver or CR5Kinematics()
+        if kinematics_solver is not None:
+            self.solver = kinematics_solver
+        else:
+            self.solver = CR5Kinematics(
+                joint_min=getattr(robot_config, "joint_min_rad", None),
+                joint_max=getattr(robot_config, "joint_max_rad", None),
+                backend=kinematics_backend,
+            )
+
+    def _loc_xyz(self, T_gun: np.ndarray) -> list[float]:
+        return [round(float(x), 2) for x in T_gun[:3, 3] * 1000.0]
+
+    def _append_issue(self, issues: list, **kwargs):
+        issues.append(kwargs)
+
+    def _diagnose_step(
+        self,
+        q: np.ndarray,
+        T_gun: np.ndarray,
+        step_idx: int,
+        seg_idx: int,
+        issues: list,
+        prev_flags: dict,
+        emit_even_if_continuing: bool = False,
+    ) -> dict:
+        """
+        Per-step diagnosis. Joint-limit ERROR every time it is out of range.
+        Singularity WARNINGs fire on rising edge (or always on the first point)
+        so a long near-singular segment does not spam one issue per millimetre.
+        """
+        loc = self._loc_xyz(T_gun)
+        T_urdf = self.solver.controller_matrix_to_urdf(T_gun)
+        risk = self.solver.check_singularity_risk(q, T=T_urdf)
+
+        if not self.solver.is_joint_valid(q):
+            q_deg = [round(math.degrees(a), 2) for a in q]
+            logger.error(
+                f"❌ [KinematicChainVerifier] JOINT_LIMIT step={step_idx} q_deg={q_deg} XYZ={loc}"
+            )
+            self._append_issue(
+                issues,
+                type="JOINT_LIMIT",
+                severity="ERROR",
+                segment_index=seg_idx,
+                step_index=step_idx,
+                detail=f"Joint angles out of URDF/CR5 limits: {q_deg} deg",
+                location_xyz=loc,
+            )
+
+        specs = (
+            ("shoulder_singularity", "SHOULDER_SINGULARITY",
+             f"Near shoulder singularity: two q1 branches separated by "
+             f"{risk['shoulder_q1_separation_deg']:.1f}° (wrist near J1-axis cylinder)."),
+            ("elbow_singularity", "ELBOW_SINGULARITY",
+             f"Near elbow singularity: Joint 3 angle={risk['elbow_angle_deg']:.1f}° "
+             f"(a2/a3 collinear, sin(q3)~0)."),
+            ("wrist_singularity", "WRIST_SINGULARITY",
+             f"Near wrist singularity: Joint 5 angle={risk['wrist_angle_deg']:.1f}° "
+             f"(J4/J6 collinear, sin(q5)~0)."),
+        )
+        for flag, itype, detail in specs:
+            active = bool(risk[flag])
+            entered = active and (emit_even_if_continuing or not prev_flags.get(flag, False))
+            if entered:
+                logger.warning(
+                    f"⚠️ [KinematicChainVerifier] {itype} step={step_idx} XYZ={loc} {detail}"
+                )
+                self._append_issue(
+                    issues,
+                    type=itype,
+                    severity="WARNING",
+                    segment_index=seg_idx,
+                    step_index=step_idx,
+                    detail=detail,
+                    location_xyz=loc,
+                )
+            prev_flags[flag] = active
+
+        return risk
 
     def verify_single_path(self, path_item: dict, init_q: list[float] = None) -> dict:
         """
         Verifies kinematic feasibility of a single path item:
         - Interpolates dense MoveL Cartesian steps
-        - Solves continuous inverse kinematics
-        - Checks joint angle limits and joint velocities against URDF limits
-        - Diagnoses elbow / wrist singularities and unreachable steps
+        - Tracks continuous IK with get_best_ik (expand + unwrap onto current q)
+        - Checks joint limits, joint velocities, shoulder/elbow/wrist singularities
         - Records trajectory_q and trajectory_tcp for 60 FPS simulation playback
         """
         path_id = path_item.get("path_id", 1)
@@ -62,14 +154,22 @@ class KinematicChainVerifier:
         issues = []
         joint_velocities_deg_s = []
         trajectory_q = []
+        prev_flags = {
+            "shoulder_singularity": False,
+            "elbow_singularity": False,
+            "wrist_singularity": False,
+        }
 
-        # 1. Solve initial waypoint seed configuration
-        # Pass T_gun (T_ctrl) directly to inverse_controller_matrix to avoid double-application of base/tool transforms
         first_T_gun = dense_points[0][0]
-        ik_sols_first = self.solver.inverse_controller_matrix(first_T_gun)
+        # Seed must be a reachable posture close to the real start; default is a typical
+        # CR5 "ready" pose. When chaining paths, pass the previous path's last q as init_q
+        # so the first step does not jump to a different IK branch.
+        default_seed_q = np.array([PI, 0.0, PI / 2.0, PI / 2.0, PI / 2.0, 0.0], dtype=np.float64)
+        q_ref = np.array(init_q, dtype=np.float64) if init_q is not None else default_seed_q
 
-        if not ik_sols_first:
-            loc_xyz = [round(float(x), 2) for x in dense_points[0][0][:3, 3] * 1000.0]
+        curr_q = self.solver.get_best_ik_controller(first_T_gun, q_ref)
+        if curr_q is None:
+            loc_xyz = self._loc_xyz(first_T_gun)
             logger.error(f"❌ [KinematicChainVerifier] Path {path_id} Start Point Unreachable: XYZ={loc_xyz}")
             return {
                 "path_id": path_id,
@@ -79,7 +179,7 @@ class KinematicChainVerifier:
                 "issues": [{
                     "severity": "ERROR",
                     "type": "UNREACHABLE_START",
-                    "detail": "Start waypoint has no valid IK solutions (out of robot workspace).",
+                    "detail": "Start waypoint has no valid IK solutions within joint limits.",
                     "location_xyz": loc_xyz,
                     "step_index": 0,
                     "segment_index": 0
@@ -90,120 +190,92 @@ class KinematicChainVerifier:
                 "trajectory_tcp": []
             }
 
-        # Choose seed configuration closest to init_q (or standard home posture) with angular difference unwrapping
-        default_seed_q = np.array([PI, 0.0, PI / 2.0, PI / 2.0, PI / 2.0, 0.0], dtype=np.float64)
-        q_ref = np.array(init_q, dtype=np.float64) if init_q is not None else default_seed_q
-        
-        branch_diffs = []
-        for sol in ik_sols_first:
-            d = (sol - q_ref + PI) % (2 * PI) - PI
-            branch_diffs.append(np.linalg.norm(d))
-        
-        best_idx = int(np.argmin(branch_diffs))
-        curr_q = ik_sols_first[best_idx]
-
+        self._diagnose_step(
+            curr_q, first_T_gun, 0, 0, issues, prev_flags, emit_even_if_continuing=True
+        )
         trajectory_q.append(curr_q.tolist())
 
-        # 2. Continuous IK chain tracking across all steps
         for step_idx in range(1, total_steps):
-            T_gun, T_flange, dt, seg_idx = dense_points[step_idx]
+            T_gun, _, dt, seg_idx = dense_points[step_idx]
+            loc_xyz = self._loc_xyz(T_gun)
 
-            # Always use the controller matrix (T_gun) for inverse kinematics
-            ik_sols = self.solver.inverse_controller_matrix(T_gun)
-            if not ik_sols:
-                loc_xyz = [round(float(x), 2) for x in T_gun[:3, 3] * 1000.0]
-                logger.error(f"❌ [KinematicChainVerifier] Path {path_id} [UNREACHABLE]: Step {step_idx}/{total_steps} (Seg {seg_idx}) at XYZ={loc_xyz}")
-                issues.append({
-                    "severity": "ERROR",
-                    "type": "UNREACHABLE_STEP",
-                    "detail": f"Step {step_idx} (segment {seg_idx}) has no analytical IK solutions.",
-                    "step_index": step_idx,
-                    "segment_index": seg_idx,
-                    "location_xyz": loc_xyz
-                })
+            # Nearest of the 8 IK branches, unwrapped onto curr_q so J6 stays on
+            # the same ±2π winding instead of snapping to the [-π, π] representative.
+            next_q = self.solver.get_best_ik_controller(T_gun, curr_q)
+            if next_q is None:
+                logger.error(
+                    f"❌ [KinematicChainVerifier] Path {path_id} [UNREACHABLE]: "
+                    f"Step {step_idx}/{total_steps} (Seg {seg_idx}) at XYZ={loc_xyz}"
+                )
+                self._append_issue(
+                    issues,
+                    severity="ERROR",
+                    type="UNREACHABLE_STEP",
+                    detail=f"Step {step_idx} (segment {seg_idx}) has no valid IK within joint limits.",
+                    step_index=step_idx,
+                    segment_index=seg_idx,
+                    location_xyz=loc_xyz,
+                )
                 break
 
-            # Find nearest IK branch solution to minimize joint movement
-            diffs = []
-            for sol in ik_sols:
-                d = sol - curr_q
-                # Unwrap angular differences to [-pi, pi]
-                d = (d + PI) % (2 * PI) - PI
-                diffs.append(np.linalg.norm(d))
+            dq = next_q - curr_q
+            # 45° in one Cartesian millimetre is not a continuous MoveL — usually a
+            # different IK branch (shoulder/elbow/wrist flip) or a joint-limit bounce.
+            if np.max(np.abs(np.degrees(dq))) > BRANCH_JUMP_DEG:
+                logger.warning(
+                    f"⚠️ [KinematicChainVerifier] Path {path_id} [DISCONTINUITY]: "
+                    f"Step {step_idx} jump={np.max(np.abs(np.degrees(dq))):.1f}° at XYZ={loc_xyz}"
+                )
+                self._append_issue(
+                    issues,
+                    severity="ERROR",
+                    type="KINEMATIC_DISCONTINUITY",
+                    segment_index=seg_idx,
+                    step_index=step_idx,
+                    detail=(
+                        f"Branch jump detected (max Δq={np.max(np.abs(np.degrees(dq))):.1f}°). "
+                        f"Near singularity or joint limit."
+                    ),
+                    location_xyz=loc_xyz,
+                )
 
-            best_sol_idx = int(np.argmin(diffs))
-            raw_next_q = ik_sols[best_sol_idx]
+            risk = self._diagnose_step(next_q, T_gun, step_idx, seg_idx, issues, prev_flags)
+            is_near_singularity = bool(risk["is_singular"])
 
-            # Continuous branch unwrapping
-            dq = (raw_next_q - curr_q + PI) % (2 * PI) - PI
-            next_q = curr_q + dq
-
-            # Check kinematic branch discontinuity (> 45 deg in single step)
-            if np.max(np.abs(np.degrees(dq))) > 45.0:
-                loc_xyz = [round(float(x), 2) for x in T_gun[:3, 3] * 1000.0]
-                logger.warning(f"⚠️ [KinematicChainVerifier] Path {path_id} [DISCONTINUITY]: Step {step_idx} jump={np.max(np.abs(np.degrees(dq))):.1f}° at XYZ={loc_xyz}")
-                issues.append({
-                    "severity": "ERROR",
-                    "type": "KINEMATIC_DISCONTINUITY",
-                    "segment_index": seg_idx,
-                    "step_index": step_idx,
-                    "detail": f"Branch jump detected (max Δq={np.max(np.abs(np.degrees(dq))):.1f}°). Near singularity or joint limit.",
-                    "location_xyz": loc_xyz
-                })
-
-            # Check singularity proximity (Elbow / Wrist)
-            theta3 = next_q[2]
-            theta5 = next_q[4]
-            is_near_singularity = False
-
-            if abs(math.sin(theta3)) < 0.05:
-                is_near_singularity = True
-                loc_xyz = [round(float(x), 2) for x in T_gun[:3, 3] * 1000.0]
-                issues.append({
-                    "type": "ELBOW_SINGULARITY",
-                    "severity": "WARNING",
-                    "segment_index": seg_idx,
-                    "step_index": step_idx,
-                    "detail": f"Near elbow singularity: Joint 3 angle={math.degrees(theta3):.1f}° (near 0°/180° collinear stretch).",
-                    "location_xyz": loc_xyz
-                })
-
-            if abs(math.sin(theta5)) < 0.05:
-                is_near_singularity = True
-                loc_xyz = [round(float(x), 2) for x in T_gun[:3, 3] * 1000.0]
-                issues.append({
-                    "type": "WRIST_SINGULARITY",
-                    "severity": "WARNING",
-                    "segment_index": seg_idx,
-                    "step_index": step_idx,
-                    "detail": f"Near wrist singularity: Joint 5 angle={math.degrees(theta5):.1f}° (Joints 4 and 6 collinear alignment).",
-                    "location_xyz": loc_xyz
-                })
-
-            # Compute joint angular velocities
-            vel_rad_s = np.abs(dq) / dt
-            vel_deg_s = np.degrees(vel_rad_s)
-            joint_velocities_deg_s.append(vel_deg_s.tolist())
-
-            over_limits = vel_deg_s > self.config.max_joint_vel_deg_s
-            # If not near singularity, report pure kinematic joint overspeed
-            if np.any(over_limits) and not is_near_singularity:
-                bad_joints = [f"J{j+1}:{vel_deg_s[j]:.1f}°/s" for j in range(6) if over_limits[j]]
-                loc_xyz = [round(float(x), 2) for x in T_gun[:3, 3] * 1000.0]
-                logger.warning(f"⚠️ [KinematicChainVerifier] Path {path_id} [OVERSPEED]: Step {step_idx} (Seg {seg_idx}) -> {', '.join(bad_joints)} (XYZ={loc_xyz})")
-                issues.append({
-                    "type": "JOINT_OVERSPEED",
-                    "severity": "WARNING",
-                    "segment_index": seg_idx,
-                    "step_index": step_idx,
-                    "detail": f"Joint overspeed detected: {', '.join(bad_joints)} (max: {self.config.max_joint_vel_deg_s.tolist()})",
-                    "location_xyz": loc_xyz
-                })
+            # ω = Δq/dt from the interpolator's Cartesian dt. Near a singularity
+            # that Δq explodes; treat as ERROR so the path is not marked "just slow it".
+            if dt > 1e-9:
+                vel_rad_s = np.abs(dq) / dt
+                vel_deg_s = np.degrees(vel_rad_s)
+                joint_velocities_deg_s.append(vel_deg_s.tolist())
+                over_limits = vel_deg_s > self.config.max_joint_vel_deg_s
+                if np.any(over_limits):
+                    bad_joints = [
+                        f"J{j + 1}:{vel_deg_s[j]:.1f}°/s"
+                        for j in range(6) if over_limits[j]
+                    ]
+                    severity = "ERROR" if is_near_singularity else "WARNING"
+                    logger.warning(
+                        f"⚠️ [KinematicChainVerifier] Path {path_id} [OVERSPEED/{severity}]: "
+                        f"Step {step_idx} (Seg {seg_idx}) -> {', '.join(bad_joints)} (XYZ={loc_xyz})"
+                    )
+                    self._append_issue(
+                        issues,
+                        type="JOINT_OVERSPEED",
+                        severity=severity,
+                        segment_index=seg_idx,
+                        step_index=step_idx,
+                        detail=(
+                            f"Joint overspeed detected: {', '.join(bad_joints)} "
+                            f"(max: {self.config.max_joint_vel_deg_s.tolist()})"
+                            + ("; near singularity" if is_near_singularity else "")
+                        ),
+                        location_xyz=loc_xyz,
+                    )
 
             curr_q = next_q
             trajectory_q.append(curr_q.tolist())
 
-        # Build trajectory TCP poses for simulation playback
         trajectory_tcp = []
         for step_idx in range(len(trajectory_q)):
             T_g = dense_points[step_idx][0]
@@ -211,10 +283,8 @@ class KinematicChainVerifier:
             rpy = [round(float(v), 2) for v in R_scipy.from_matrix(T_g[:3, :3]).as_euler('xyz', degrees=True)]
             trajectory_tcp.append(pos_xyz + rpy)
 
-        # Determine overall status and recommended safe velocity
         has_errors = any(issue["severity"] == "ERROR" for issue in issues)
         has_warnings = any(issue["severity"] == "WARNING" for issue in issues)
-
         status = "FAILED" if has_errors else ("WARNING" if has_warnings else "PASS")
 
         if joint_velocities_deg_s:
@@ -280,7 +350,7 @@ class KinematicChainVerifier:
                     singularity_cnt += 1
                 elif "OVERSPEED" in t:
                     overspeed_cnt += 1
-                elif "UNREACHABLE" in t or "DISCONTINUITY" in t:
+                elif "UNREACHABLE" in t or "DISCONTINUITY" in t or t == "JOINT_LIMIT":
                     unreachable_cnt += 1
 
             if rep.get("trajectory_q"):

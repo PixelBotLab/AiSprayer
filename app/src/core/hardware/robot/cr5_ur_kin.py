@@ -1,6 +1,23 @@
 """
-CR5 / UR-style Analytical Forward and Inverse Kinematics Core.
-Pure Python implementation faithfully translating ur_kinematics math.
+CR5 / UR-style analytical FK/IK core (DH frame, not URDF).
+
+This is the math used by `CR5Kinematics(backend="python")`. The C++ twin lives in
+`cr5_kinematics_cpp/cr5_ur_kin.cpp` and must stay numerically equivalent.
+
+DH vs URDF
+----------
+These functions take/return DH joint angles. CR5 URDF q2/q4 differ by ±π/2:
+    q_dh[1] = q_urdf[1] - π/2
+    q_dh[3] = q_urdf[3] - π/2
+`CR5Kinematics` applies that offset; do not pass URDF angles in here directly.
+
+IK
+--
+`inverse` returns up to 8 DH solutions in [0, 2π): 2 q1 (shoulder) × 2 q5 (wrist)
+× 2 q3 (elbow). Wrist-singular poses (sin(q5)≈0) use `q6_des` as the free q6 hint.
+Unreachable poses (D4² > R, or |c3| > 1) return [].
+
+`forward_all` is still a stub (identity frames) — Jacobian/manipulability is unused.
 """
 
 import math
@@ -9,12 +26,13 @@ import numpy as np
 PI = math.pi
 ZERO_THRESH = 1e-8
 
-D1 = 0.147
-A2 = -0.427
-A3 = -0.357
-D4 = 0.141
-D5 = 0.116
-D6 = 0.105
+# Modified DH (metres), same numbers as cr5_ur_kin.cpp / CR5 URDF.
+D1 = 0.147   # base height
+A2 = -0.427  # upper arm (negative DH convention)
+A3 = -0.357  # forearm
+D4 = 0.141   # shoulder offset (wrist cylinder radius about J1)
+D5 = 0.116   # wrist 1
+D6 = 0.105   # flange / wrist 2
 
 def _sign(x: float) -> float:
     if x > 0: return 1.0
@@ -60,6 +78,7 @@ def forward(q: list[float] | np.ndarray) -> np.ndarray:
     return T
 
 def inverse(T: np.ndarray, q6_des: float = 0.0) -> list[list[float]]:
+    # ur_kinematics indexes T with a column permutation (T02=-T[0,0], …).
     T_flat = T.flatten()
     T02 = -T_flat[0]; T00 =  T_flat[1]; T01 =  T_flat[2]; T03 = -T_flat[3]
     T12 = -T_flat[4]; T10 =  T_flat[5]; T11 =  T_flat[6]; T13 = -T_flat[7]
@@ -67,7 +86,8 @@ def inverse(T: np.ndarray, q6_des: float = 0.0) -> list[list[float]]:
 
     q_sols = []
     
-    # shoulder rotate joint (q1)
+    # q1: two shoulders from the wrist-centre projection onto the XY plane.
+    # Discriminant R = A²+B²; unreachable if |d4| > sqrt(R) (inside J1 cylinder).
     q1 = [0.0, 0.0]
     A = D6 * T12 - T13
     B = D6 * T02 - T03
@@ -95,7 +115,7 @@ def inverse(T: np.ndarray, q6_des: float = 0.0) -> list[list[float]]:
         q1[0] = pos if pos >= 0.0 else 2.0 * PI + pos
         q1[1] = neg if neg >= 0.0 else 2.0 * PI + neg
 
-    # wrist 2 joint (q5)
+    # q5: two wrist pitches per q1 (acos of the J4/J6 alignment residual).
     q5 = [[0.0, 0.0], [0.0, 0.0]]
     for i in range(2):
         numer = (T03 * math.sin(q1[i]) - T13 * math.cos(q1[i]) - D4)
@@ -109,7 +129,7 @@ def inverse(T: np.ndarray, q6_des: float = 0.0) -> list[list[float]]:
             c1, s1 = math.cos(q1[i]), math.sin(q1[i])
             c5, s5 = math.cos(q5[i][j]), math.sin(q5[i][j])
             
-            # wrist 3 joint (q6)
+            # q6: from the wrist-2 rotation; free (q6_des) when sin(q5)≈0 (wrist singular).
             if abs(s5) < ZERO_THRESH:
                 q6 = q6_des
             else:
@@ -118,7 +138,7 @@ def inverse(T: np.ndarray, q6_des: float = 0.0) -> list[list[float]]:
                 if abs(q6) < ZERO_THRESH: q6 = 0.0
                 if q6 < 0.0: q6 += 2.0 * PI
 
-            # RRR joints (q2, q3, q4)
+            # q2/q3/q4: planar 3R (elbow up/down). Skip if |c3|>1 (reach exceeded).
             c6, s6 = math.cos(q6), math.sin(q6)
             x04x = -s5 * (T02 * c1 + T12 * s1) - c5 * (s6 * (T01 * c1 + T11 * s1) - c6 * (T00 * c1 + T10 * s1))
             x04y = c5 * (T20 * c6 - T21 * s6) - T22 * s5

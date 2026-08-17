@@ -1,5 +1,9 @@
 """
-C++ Wrapped CR5 / UR-style Analytical Forward and Inverse Kinematics Core.
+Low-level ctypes wrapper around c_ur_forward / c_ur_inverse (DH frame only).
+
+Prefer `CR5Kinematics(backend="cpp")` for URDF / controller APIs: that path
+loads libur_kin from the CMake build dir and calls c_forward / c_inverse / …
+This module looks for libur_kin.so next to itself and does not apply URDF offsets.
 """
 
 import math
