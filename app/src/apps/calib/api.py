@@ -22,14 +22,14 @@ class JogReq(BaseModel):
     axis: str
     direction: int
     step: float = 1.0
-    speed_l: float = 20.0
-    acc_l: float = 20.0
-    speed_j: float = 20.0
-    acc_j: float = 20.0
+    speed_l: float = 10.0
+    acc_l: float = 10.0
+    speed_j: float = 10.0
+    acc_j: float = 10.0
 
 class HomeReq(BaseModel):
-    speed: float = 20.0
-    acc: float = 20.0
+    speed: float = 10.0
+    acc: float = 10.0
 
 class SpeedReq(BaseModel):
     speed_l: float

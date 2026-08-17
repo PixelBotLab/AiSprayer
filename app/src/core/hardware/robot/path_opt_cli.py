@@ -214,20 +214,50 @@ def run_cli():
     opt_points = opt_path_item.get("points", [])
     opt_joints_list = opt_path_item.get("spray_opt_joints_deg", [])
 
+    def _char_width(c: str) -> int:
+        code = ord(c)
+        if (0x4E00 <= code <= 0x9FFF or 0x3400 <= code <= 0x4DBF or
+            0x3000 <= code <= 0x303F or 0xFF01 <= code <= 0xFF60 or
+            0x2500 <= code <= 0x257F or 0x2580 <= code <= 0x259F):
+            return 2
+        return 1
+
+    def _disp_len(s: str) -> int:
+        return sum(_char_width(c) for c in str(s))
+
+    def _pad(s: str, width: int, align: str = "left") -> str:
+        s = str(s)
+        cur_len = _disp_len(s)
+        pad_len = max(0, width - cur_len)
+        if align == "right":
+            return " " * pad_len + s
+        elif align == "center":
+            l = pad_len // 2
+            r = pad_len - l
+            return " " * l + s + " " * r
+        return s + " " * pad_len
+
+    def _format_table(headers: list[str], widths: list[int], rows: list[list[str]], title: str = "") -> str:
+        lines = []
+        tot_w = sum(widths) + 3 * (len(widths) - 1) + 4
+        lines.append("=" * tot_w)
+        if title:
+            lines.append(f"📊 {title}")
+            lines.append("-" * tot_w)
+        hdr_str = "| " + " | ".join(_pad(h, w, "center" if i == 0 else "left") for i, (h, w) in enumerate(zip(headers, widths))) + " |"
+        sep_str = "+-" + "-+-".join("-" * w for w in widths) + "-+"
+        lines.append(hdr_str)
+        lines.append(sep_str)
+        for r in rows:
+            r_str = "| " + " | ".join(_pad(v, w, "center" if i == 0 else "left") for i, (v, w) in enumerate(zip(r, widths))) + " |"
+            lines.append(r_str)
+        lines.append("=" * tot_w)
+        return "\n".join(lines)
+
     # 8. 打印三张详细对比表格
-    print("\n" + "=" * 145)
-    print("📊 6.1 优化前 (原始 Raw) 航点姿态、相对锚点偏角与关节角度")
-    print("=" * 145)
-    header_raw = (
-        f"{'序号':<4} | "
-        f"{'位置 (X,Y,Z) mm':<22} | "
-        f"{'原始姿态 RPY°':<23} | "
-        f"{'相对锚点偏角 (Rx,Ry,Rz)°':<25} | "
-        f"{'相对锚点指向角':<12} | "
-        f"{'原始关节 (J1~J6)°'}"
-    )
-    print(header_raw)
-    print("-" * 145)
+    h1 = ["序号", "位置 (X,Y,Z) mm", "原始姿态 RPY°", "相对锚点偏角", "指向偏角", "原始关节 J1~J6 (deg)"]
+    w1 = [6, 21, 21, 17, 10, 42]
+    r1 = []
     for i in range(len(raw_points)):
         raw_p = raw_points[i].get("tcp_pose_base", raw_points[i])
         r_raw = R_scipy.from_euler("xyz", [raw_p["rx"], raw_p["ry"], raw_p["rz"]], degrees=True)
@@ -235,29 +265,21 @@ def run_cli():
 
         rel_raw = (r_anchor.inv() * r_raw).as_euler("xyz", degrees=True)
         rel_raw = (rel_raw + 180.0) % 360.0 - 180.0
-        rel_raw_str = f"[{rel_raw[0]:+5.1f}°, {rel_raw[1]:+5.1f}°, {rel_raw[2]:+6.1f}°]"
+        rel_raw_str = f"[{rel_raw[0]:+4.0f}, {rel_raw[1]:+4.0f}, {rel_raw[2]:+5.0f}]"
 
         pt_raw = float(np.degrees(np.arccos(np.clip(np.dot(z_raw, z_anchor), -1.0, 1.0))))
         q_raw = raw_joints_list[i]
-        q_raw_str = f"[{q_raw[0]:5.1f},{q_raw[1]:5.1f},{q_raw[2]:5.1f},{q_raw[3]:5.1f},{q_raw[4]:5.1f},{q_raw[5]:5.1f}]"
-        pos_str = f"{raw_p['x']:5.1f},{raw_p['y']:5.1f},{raw_p['z']:5.1f}"
-        raw_rpy_str = f"{raw_p['rx']:6.2f},{raw_p['ry']:6.2f},{raw_p['rz']:6.2f}"
+        q_raw_str = f"[{q_raw[0]:5.1f}, {q_raw[1]:5.1f}, {q_raw[2]:5.1f}, {q_raw[3]:5.1f}, {q_raw[4]:5.1f}, {q_raw[5]:5.1f}]"
+        pos_str = f"{raw_p['x']:5.1f}, {raw_p['y']:5.1f}, {raw_p['z']:5.1f}"
+        raw_rpy_str = f"{raw_p['rx']:6.2f}, {raw_p['ry']:6.2f}, {raw_p['rz']:6.2f}"
 
-        print(f"#{i+1:<3} | {pos_str:<22} | {raw_rpy_str:<23} | {rel_raw_str:<25} | {pt_raw:6.2f}°       | {q_raw_str}")
+        r1.append([f"#{i+1}", pos_str, raw_rpy_str, rel_raw_str, f"{pt_raw:6.2f}°", q_raw_str])
 
-    print("\n" + "=" * 145)
-    print("📊 6.2 优化后 (优化 Opt) 航点姿态、相对锚点偏角与关节角度")
-    print("=" * 145)
-    header_opt = (
-        f"{'序号':<4} | "
-        f"{'位置 (X,Y,Z) mm':<22} | "
-        f"{'优化后姿态 RPY°':<23} | "
-        f"{'相对锚点偏角 (Rx,Ry,Rz)°':<25} | "
-        f"{'相对锚点指向角':<12} | "
-        f"{'优化关节 (J1~J6)°'}"
-    )
-    print(header_opt)
-    print("-" * 145)
+    print("\n" + _format_table(h1, w1, r1, "6.1 优化前 (原始 Raw) 航点姿态、相对锚点偏角与关节角度"))
+
+    h2 = ["序号", "位置 (X,Y,Z) mm", "优化后姿态 RPY°", "相对锚点偏角", "指向偏角", "优化关节 J1~J6 (deg)"]
+    w2 = [6, 21, 21, 17, 10, 42]
+    r2 = []
     for i in range(len(raw_points)):
         raw_p = raw_points[i].get("tcp_pose_base", raw_points[i])
         opt_p = opt_points[i].get("tcp_pose_base", opt_points[i])
@@ -266,29 +288,21 @@ def run_cli():
 
         rel_opt = (r_anchor.inv() * r_opt).as_euler("xyz", degrees=True)
         rel_opt = (rel_opt + 180.0) % 360.0 - 180.0
-        rel_opt_str = f"[{rel_opt[0]:+5.1f}°, {rel_opt[1]:+5.1f}°, {rel_opt[2]:+6.1f}°]"
+        rel_opt_str = f"[{rel_opt[0]:+4.0f}, {rel_opt[1]:+4.0f}, {rel_opt[2]:+5.0f}]"
 
         pt_opt = float(np.degrees(np.arccos(np.clip(np.dot(z_opt, z_anchor), -1.0, 1.0))))
         q_opt = opt_joints_list[i] if i < len(opt_joints_list) else [0.0] * 6
-        q_opt_str = f"[{q_opt[0]:5.1f},{q_opt[1]:5.1f},{q_opt[2]:5.1f},{q_opt[3]:5.1f},{q_opt[4]:5.1f},{q_opt[5]:5.1f}]"
-        pos_str = f"{raw_p['x']:5.1f},{raw_p['y']:5.1f},{raw_p['z']:5.1f}"
-        opt_rpy_str = f"{opt_p['rx']:6.2f},{opt_p['ry']:6.2f},{opt_p['rz']:6.2f}"
+        q_opt_str = f"[{q_opt[0]:5.1f}, {q_opt[1]:5.1f}, {q_opt[2]:5.1f}, {q_opt[3]:5.1f}, {q_opt[4]:5.1f}, {q_opt[5]:5.1f}]"
+        pos_str = f"{raw_p['x']:5.1f}, {raw_p['y']:5.1f}, {raw_p['z']:5.1f}"
+        opt_rpy_str = f"{opt_p['rx']:6.2f}, {opt_p['ry']:6.2f}, {opt_p['rz']:6.2f}"
 
-        print(f"#{i+1:<3} | {pos_str:<22} | {opt_rpy_str:<23} | {rel_opt_str:<25} | {pt_opt:6.2f}°       | {q_opt_str}")
+        r2.append([f"#{i+1}", pos_str, opt_rpy_str, rel_opt_str, f"{pt_opt:6.2f}°", q_opt_str])
 
-    print("\n" + "=" * 145)
-    print("📊 6.3 优化前后综合指标对比总表 (Raw vs Opt)")
-    print("=" * 145)
-    header_diff = (
-        f"{'序号':<4} | "
-        f"{'原始姿态 RPY°':<22} | "
-        f"{'优化后姿态 RPY°':<22} | "
-        f"{'枪尖指向偏量(3D)':<14} | "
-        f"{'相对锚点偏角变化 (Raw -> Opt)':<32} | "
-        f"{'关节最大偏量 Δq_max'}"
-    )
-    print(header_diff)
-    print("-" * 145)
+    print("\n" + _format_table(h2, w2, r2, "6.2 优化后 (优化 Opt) 航点姿态、相对锚点偏角与关节角度"))
+
+    h3 = ["序号", "原始姿态 RPY°", "优化后姿态 RPY°", "3D指向偏量", "相对锚点偏角变化 (Raw -> Opt)", "关节偏量 Δq_max"]
+    w3 = [6, 21, 21, 12, 33, 16]
+    r3 = []
     for i in range(len(raw_points)):
         raw_p = raw_points[i].get("tcp_pose_base", raw_points[i])
         opt_p = opt_points[i].get("tcp_pose_base", opt_points[i])
@@ -297,7 +311,6 @@ def run_cli():
         z_raw = r_raw.as_matrix()[:, 2]
         z_opt = r_opt.as_matrix()[:, 2]
 
-        # 3D 空间中枪尖指向的实际偏转角 (Raw 与 Opt 之间的物理夹角)
         pointing_diff = float(np.degrees(np.arccos(np.clip(np.dot(z_raw, z_opt), -1.0, 1.0))))
 
         rel_raw = (r_anchor.inv() * r_raw).as_euler("xyz", degrees=True)
@@ -311,13 +324,14 @@ def run_cli():
         q_opt = np.array(opt_joints_list[i])
         dq_max = float(np.max(np.abs((q_opt - q_raw + 180.0) % 360.0 - 180.0)))
 
-        raw_rpy_str = f"{raw_p['rx']:5.1f},{raw_p['ry']:5.1f},{raw_p['rz']:5.1f}"
-        opt_rpy_str = f"{opt_p['rx']:5.1f},{opt_p['ry']:5.1f},{opt_p['rz']:5.1f}"
+        raw_rpy_str = f"{raw_p['rx']:5.1f}, {raw_p['ry']:5.1f}, {raw_p['rz']:5.1f}"
+        opt_rpy_str = f"{opt_p['rx']:5.1f}, {opt_p['ry']:5.1f}, {opt_p['rz']:5.1f}"
 
-        print(f"#{i+1:<3} | {raw_rpy_str:<22} | {opt_rpy_str:<22} | {pointing_diff:6.2f}°        | {rel_change:<32} | {dq_max:5.2f}°")
+        r3.append([f"#{i+1}", raw_rpy_str, opt_rpy_str, f"{pointing_diff:6.2f}°", rel_change, f"{dq_max:5.2f}°"])
 
-    print("-" * 145)
-    print("💡 注解说明:")
+    print("\n" + _format_table(h3, w3, r3, "6.3 优化前后综合指标对比总表 (Raw vs Opt)"))
+
+    print("\n💡 注解说明:")
     print("   1. [相对锚点偏角]: 表示当前姿态相对 Home 锚点 [90, 0, 90] 的旋转量，严格受控在容差包络 (Rx:±20°, Ry:±20°, Rz:±180°) 之内。")
     print("   2. [相对锚点指向角]: 表示喷枪中心法向与 Home 锚点喷枪法向在 3D 空间中的夹角。")
     print("   3. [枪尖指向偏量(3D)]: 表示优化前后喷枪法向的实际偏转角度（排除了 Euler 欧拉角在 Ry≈-90° 时的万向节死锁双重表示现象）。")

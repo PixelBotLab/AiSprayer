@@ -1,24 +1,241 @@
 """
 POI Pose Constraint Optimizer (POI).
-Optimizes waypoint orientations relative to an anchor reference pose within a bounded 3D tolerance envelope
-[±ΔRx, ±ΔRy, ±ΔRz] with adaptive feedrate scaling to satisfy physical spray cone consistency.
+Powered by SprayWaypointOptimizer (Viterbi DP global MoveL continuous optimization)
+with bounded tolerance envelope [±ΔRx, ±ΔRy, ±ΔRz] relative to an anchor reference pose.
+Outputs clean, beautifully aligned comparison diagnostics matching path_opt_cli.
 """
 
 import copy
 import logging
+import math
+import time
+from typing import Optional
 import numpy as np
 from scipy.spatial.transform import Rotation as R_scipy
 
 from .robot_config import RobotConfig
 from .path_interpolator import PathInterpolator, pose_dict_to_matrix, matrix_to_pose_dict
 from .kinematic_chain_verifier import KinematicChainVerifier
+from .path_opt import SprayWaypointOptimizer
 
 logger = logging.getLogger(__name__)
 
 
+def _char_width(c: str) -> int:
+    """Calculates visual display width for characters (handles East Asian fullwidth / CJK)."""
+    code = ord(c)
+    if (0x4E00 <= code <= 0x9FFF or 0x3400 <= code <= 0x4DBF or
+        0x3000 <= code <= 0x303F or 0xFF01 <= code <= 0xFF60 or
+        0x2500 <= code <= 0x257F or 0x2580 <= code <= 0x259F):
+        return 2
+    return 1
+
+
+def _disp_len(s: str) -> int:
+    """Returns visual string length in monospaced terminal columns."""
+    return sum(_char_width(c) for c in str(s))
+
+
+def _pad(s: str, width: int, align: str = "left") -> str:
+    """Pads string to visual column width considering wide CJK characters."""
+    s = str(s)
+    cur_len = _disp_len(s)
+    pad_len = max(0, width - cur_len)
+    if align == "right":
+        return " " * pad_len + s
+    elif align == "center":
+        l = pad_len // 2
+        r = pad_len - l
+        return " " * l + s + " " * r
+    return s + " " * pad_len
+
+
+def _format_table(headers: list[str], widths: list[int], rows: list[list[str]], title: str = "") -> str:
+    """Renders a pixel-perfect aligned ASCII table."""
+    lines = []
+    tot_w = sum(widths) + 3 * (len(widths) - 1) + 4
+    lines.append("=" * tot_w)
+    if title:
+        lines.append(f"📊 {title}")
+        lines.append("-" * tot_w)
+    hdr_str = "| " + " | ".join(_pad(h, w, "center" if i == 0 else "left") for i, (h, w) in enumerate(zip(headers, widths))) + " |"
+    sep_str = "+-" + "-+-".join("-" * w for w in widths) + "-+"
+    lines.append(hdr_str)
+    lines.append(sep_str)
+    for r in rows:
+        r_str = "| " + " | ".join(_pad(v, w, "center" if i == 0 else "left") for i, (v, w) in enumerate(zip(r, widths))) + " |"
+        lines.append(r_str)
+    lines.append("=" * tot_w)
+    return "\n".join(lines)
+
+
+def _format_comparison_report(
+    solver,
+    verifier,
+    optimizer: SprayWaypointOptimizer,
+    raw_path_item: dict,
+    opt_path_item: dict,
+    anchor_rpy: list[float],
+    anchor_tol: list[float],
+    home_rad: list[float],
+    elapsed_ms: float,
+    was_modified: bool,
+    rep: Optional[dict] = None,
+) -> str:
+    """Formats full before/after comparison tables and diagnostics identical to path_opt_cli."""
+    raw_points = raw_path_item.get("points", [])
+    opt_points = opt_path_item.get("points", [])
+    opt_joints_list = opt_path_item.get("spray_opt_joints_deg", [])
+
+    lines = []
+    lines.append("\n" + "=" * 136)
+    lines.append("⚡ 2. 运动学引擎状态:")
+    backend_str = solver.backend.upper() if hasattr(solver, "backend") else "PYTHON"
+    cpp_status = "已加载 (高吞吐模式 ~2.3 MHz)" if getattr(solver, "backend", "") == "cpp" else "未加载 (Python 模式)"
+    lines.append(f"   当前解算后端: {backend_str}")
+    lines.append(f"   C++ 加速动态库 (libur_kin): {cpp_status}")
+
+    home_deg = [round(math.degrees(a), 2) for a in home_rad]
+    anchor_xyz, _ = solver.forward_controller(home_rad)
+
+    lines.append(f"\n📍 3. 锚点配置 (Anchor Pose via Forward Kinematics):")
+    lines.append(f"   Home 关节角度: {home_deg} deg")
+    lines.append(f"   解算锚点位置: XYZ = [{anchor_xyz[0]:.2f}, {anchor_xyz[1]:.2f}, {anchor_xyz[2]:.2f}] mm")
+    lines.append(f"   解算锚点姿态: RPY = [{anchor_rpy[0]:.2f}, {anchor_rpy[1]:.2f}, {anchor_rpy[2]:.2f}] deg (Euler 'xyz')")
+
+    lines.append(f"\n⚙️  4. 优化参数设置:")
+    lines.append(f"   搜索网格: Tol_X={optimizer.tol_x_deg}, Tol_Y={optimizer.tol_y_deg}, Tol_Z={optimizer.tol_z_deg}")
+    lines.append(f"   锚点硬包络: (Tol_Rx=±{anchor_tol[0]:.1f}°, Tol_Ry=±{anchor_tol[1]:.1f}°, Tol_Rz=±{anchor_tol[2]:.1f}°)")
+    lines.append(
+        f"   Beam Width: {optimizer.beam_width}, 8支单桶容量: {optimizer.max_candidates_per_branch}, "
+        f"MoveL 抽检: [{optimizer.num_movel_checks}, {optimizer.max_movel_checks}] 点 (间距 {optimizer.movel_check_spacing_mm} mm)"
+    )
+
+    lines.append(f"\n🔄 5. 正在执行 Viterbi DP 全局连续性优化 (Waypoints 数量: {len(raw_points)})...")
+    lines.append(f"   优化完成! 耗时: {elapsed_ms:.2f} ms | 姿态已修改: {was_modified}")
+
+    r_anchor = R_scipy.from_euler("xyz", anchor_rpy, degrees=True)
+    z_anchor = r_anchor.as_matrix()[:, 2]
+
+    curr_q_raw = home_rad
+    raw_joints_list = []
+    for wp in raw_points:
+        raw_T = pose_dict_to_matrix(wp.get("tcp_pose_base", wp))
+        q_sol = solver.get_best_ik_controller(raw_T, curr_q_raw)
+        if q_sol is not None:
+            curr_q_raw = q_sol
+            raw_joints_list.append(np.degrees(q_sol))
+        else:
+            raw_joints_list.append(np.zeros(6))
+
+    # Table 6.1: Raw
+    h1 = ["序号", "位置 (X,Y,Z) mm", "原始姿态 RPY°", "相对锚点偏角", "指向偏角", "原始关节 J1~J6 (deg)"]
+    w1 = [6, 21, 21, 17, 10, 42]
+    r1 = []
+    for i in range(len(raw_points)):
+        raw_p = raw_points[i].get("tcp_pose_base", raw_points[i])
+        r_raw = R_scipy.from_euler("xyz", [raw_p["rx"], raw_p["ry"], raw_p["rz"]], degrees=True)
+        z_raw = r_raw.as_matrix()[:, 2]
+
+        rel_raw = (r_anchor.inv() * r_raw).as_euler("xyz", degrees=True)
+        rel_raw = (rel_raw + 180.0) % 360.0 - 180.0
+        rel_raw_str = f"[{rel_raw[0]:+4.0f}, {rel_raw[1]:+4.0f}, {rel_raw[2]:+5.0f}]"
+
+        pt_raw = float(np.degrees(np.arccos(np.clip(np.dot(z_raw, z_anchor), -1.0, 1.0))))
+        q_raw = raw_joints_list[i]
+        q_raw_str = f"[{q_raw[0]:5.1f}, {q_raw[1]:5.1f}, {q_raw[2]:5.1f}, {q_raw[3]:5.1f}, {q_raw[4]:5.1f}, {q_raw[5]:5.1f}]"
+        pos_str = f"{raw_p['x']:5.1f}, {raw_p['y']:5.1f}, {raw_p['z']:5.1f}"
+        raw_rpy_str = f"{raw_p['rx']:6.2f}, {raw_p['ry']:6.2f}, {raw_p['rz']:6.2f}"
+
+        r1.append([f"#{i+1}", pos_str, raw_rpy_str, rel_raw_str, f"{pt_raw:6.2f}°", q_raw_str])
+
+    lines.append("\n" + _format_table(h1, w1, r1, "6.1 优化前 (原始 Raw) 航点姿态、相对锚点偏角与关节角度"))
+
+    # Table 6.2: Opt
+    h2 = ["序号", "位置 (X,Y,Z) mm", "优化后姿态 RPY°", "相对锚点偏角", "指向偏角", "优化关节 J1~J6 (deg)"]
+    w2 = [6, 21, 21, 17, 10, 42]
+    r2 = []
+    for i in range(len(raw_points)):
+        raw_p = raw_points[i].get("tcp_pose_base", raw_points[i])
+        opt_p = opt_points[i].get("tcp_pose_base", opt_points[i])
+        r_opt = R_scipy.from_euler("xyz", [opt_p["rx"], opt_p["ry"], opt_p["rz"]], degrees=True)
+        z_opt = r_opt.as_matrix()[:, 2]
+
+        rel_opt = (r_anchor.inv() * r_opt).as_euler("xyz", degrees=True)
+        rel_opt = (rel_opt + 180.0) % 360.0 - 180.0
+        rel_opt_str = f"[{rel_opt[0]:+4.0f}, {rel_opt[1]:+4.0f}, {rel_opt[2]:+5.0f}]"
+
+        pt_opt = float(np.degrees(np.arccos(np.clip(np.dot(z_opt, z_anchor), -1.0, 1.0))))
+        q_opt = opt_joints_list[i] if i < len(opt_joints_list) else [0.0] * 6
+        q_opt_str = f"[{q_opt[0]:5.1f}, {q_opt[1]:5.1f}, {q_opt[2]:5.1f}, {q_opt[3]:5.1f}, {q_opt[4]:5.1f}, {q_opt[5]:5.1f}]"
+        pos_str = f"{raw_p['x']:5.1f}, {raw_p['y']:5.1f}, {raw_p['z']:5.1f}"
+        opt_rpy_str = f"{opt_p['rx']:6.2f}, {opt_p['ry']:6.2f}, {opt_p['rz']:6.2f}"
+
+        r2.append([f"#{i+1}", pos_str, opt_rpy_str, rel_opt_str, f"{pt_opt:6.2f}°", q_opt_str])
+
+    lines.append("\n" + _format_table(h2, w2, r2, "6.2 优化后 (优化 Opt) 航点姿态、相对锚点偏角与关节角度"))
+
+    # Table 6.3: Difference
+    h3 = ["序号", "原始姿态 RPY°", "优化后姿态 RPY°", "3D指向偏量", "相对锚点偏角变化 (Raw -> Opt)", "关节偏量 Δq_max"]
+    w3 = [6, 21, 21, 12, 33, 16]
+    r3 = []
+    for i in range(len(raw_points)):
+        raw_p = raw_points[i].get("tcp_pose_base", raw_points[i])
+        opt_p = opt_points[i].get("tcp_pose_base", opt_points[i])
+        r_raw = R_scipy.from_euler("xyz", [raw_p["rx"], raw_p["ry"], raw_p["rz"]], degrees=True)
+        r_opt = R_scipy.from_euler("xyz", [opt_p["rx"], opt_p["ry"], opt_p["rz"]], degrees=True)
+        z_raw = r_raw.as_matrix()[:, 2]
+        z_opt = r_opt.as_matrix()[:, 2]
+
+        pointing_diff = float(np.degrees(np.arccos(np.clip(np.dot(z_raw, z_opt), -1.0, 1.0))))
+
+        rel_raw = (r_anchor.inv() * r_raw).as_euler("xyz", degrees=True)
+        rel_raw = (rel_raw + 180.0) % 360.0 - 180.0
+        rel_opt = (r_anchor.inv() * r_opt).as_euler("xyz", degrees=True)
+        rel_opt = (rel_opt + 180.0) % 360.0 - 180.0
+
+        rel_change = f"[{rel_raw[0]:+4.0f},{rel_raw[1]:+4.0f},{rel_raw[2]:+4.0f}] -> [{rel_opt[0]:+4.0f},{rel_opt[1]:+4.0f},{rel_opt[2]:+4.0f}]"
+
+        q_raw = np.array(raw_joints_list[i])
+        q_opt = np.array(opt_joints_list[i])
+        dq_max = float(np.max(np.abs((q_opt - q_raw + 180.0) % 360.0 - 180.0)))
+
+        raw_rpy_str = f"{raw_p['rx']:5.1f}, {raw_p['ry']:5.1f}, {raw_p['rz']:5.1f}"
+        opt_rpy_str = f"{opt_p['rx']:5.1f}, {opt_p['ry']:5.1f}, {opt_p['rz']:5.1f}"
+
+        r3.append([f"#{i+1}", raw_rpy_str, opt_rpy_str, f"{pointing_diff:6.2f}°", rel_change, f"{dq_max:5.2f}°"])
+
+    lines.append("\n" + _format_table(h3, w3, r3, "6.3 优化前后综合指标对比总表 (Raw vs Opt)"))
+
+    lines.append("\n💡 注解说明:")
+    lines.append(f"   1. [相对锚点偏角]: 表示当前姿态相对 Home 锚点 [{anchor_rpy[0]:.0f}, {anchor_rpy[1]:.0f}, {anchor_rpy[2]:.0f}] 的旋转量，严格受控在容差包络 (Rx:±{anchor_tol[0]:.1f}°, Ry:±{anchor_tol[1]:.1f}°, Rz:±{anchor_tol[2]:.1f}°) 之内。")
+    lines.append("   2. [相对锚点指向角]: 表示喷枪中心法向与 Home 锚点喷枪法向在 3D 空间中的夹角。")
+    lines.append("   3. [枪尖指向偏量(3D)]: 表示优化前后喷枪法向的实际偏转角度（排除了 Euler 欧拉角在 Ry≈-90° 时的万向节死锁双重表示现象）。")
+
+    if rep:
+        status = rep.get("status", "UNKNOWN")
+        issues = rep.get("issues", [])
+        total_steps = rep.get("total_interpolated", len(rep.get("trajectory_q", [])))
+        max_speeds = rep.get("peak_joint_speeds_deg_s", [0.0] * 6)
+
+        lines.append("\n🔍 7. 全路径运动学链校验结果 (Kinematic Chain Verification):")
+        lines.append(f"   校验状态: {status} (总插值步数: {total_steps}, 发现问题数: {len(issues)})")
+        lines.append(f"   各轴峰值速度: {[round(s, 1) for s in max_speeds]} deg/s")
+
+        if issues:
+            lines.append("   ⚠️ 校验问题详情:")
+            for issue in issues[:10]:
+                lines.append(f"      - {issue}")
+        else:
+            lines.append("   🎉 校验完美通过 (0 奇异, 0 超速, 0 不可达, 关节连续平滑)!")
+    lines.append("=" * 136 + "\n")
+    return "\n".join(lines)
+
+
 class PoiConstraintOptimizer:
     """
-    Optimizes manual path waypoint orientations using anchor reference pose and tolerance envelope constraints.
+    Optimizes manual path waypoint orientations using anchor reference pose and tolerance envelope constraints
+    via global Viterbi DP MoveL continuous optimization (SprayWaypointOptimizer).
     """
     def __init__(
         self,
@@ -29,6 +246,17 @@ class PoiConstraintOptimizer:
         self.config = robot_config
         self.interpolator = interpolator
         self.verifier = verifier
+        self.spray_optimizer = SprayWaypointOptimizer(
+            solver=self.verifier.solver,
+            verifier=self.verifier,
+            dense_verify=True,
+            tol_x_deg=(-5.0, 5.0, 2.0),
+            tol_y_deg=(-5.0, 5.0, 2.0),
+            tol_z_deg=(-180.0, 180.0, 10.0),
+            num_movel_checks=10,
+            max_movel_checks=100,
+            movel_check_spacing_mm=5.0,
+        )
 
     def optimize_poi_single_path(
         self,
@@ -39,199 +267,115 @@ class PoiConstraintOptimizer:
         init_q: list[float] = None
     ) -> tuple[dict, bool]:
         """
-        Optimizes a single path within a bounded 3D tolerance envelope around a reference anchor pose:
-        - ref_rpy_deg: [ref_rx, ref_ry, ref_rz] anchor reference orientation in robot base frame
-        - tolerance_rpy_deg / tol_rpy_deg: [tol_rx, tol_ry, tol_rz] permissible variation envelope in degrees
-        - Evaluates candidates within the tolerance envelope to eliminate singularities and minimize joint speed spikes
-        - Performs adaptive feedrate scaling if joint overspeed persists
+        Optimizes a single path within a bounded 3D tolerance envelope around an anchor reference pose.
         Returns: (poi_optimized_path, was_modified)
         """
-        orig_waypoints = path_item.get("points", [])
-        if len(orig_waypoints) < 1:
-            return path_item, False
+        effective_tol = tolerance_rpy_deg or tol_rpy_deg or [20.0, 20.0, 180.0]
+        if len(effective_tol) != 3:
+            effective_tol = [20.0, 20.0, 180.0]
+        effective_tol = [float(v) for v in effective_tol]
 
-        effective_tol = tolerance_rpy_deg or tol_rpy_deg or [3.0, 15.0, 180.0]
-        tol = effective_tol if len(effective_tol) == 3 else [3.0, 15.0, 180.0]
-        tol_rx, tol_ry, tol_rz = float(tol[0]), float(tol[1]), float(tol[2])
-
-        # Anchor reference matrix (use lowercase 'xyz' matching Dobot controller / PathInterpolator convention)
-        if ref_rpy_deg and len(ref_rpy_deg) == 3:
-            R_ref = R_scipy.from_euler('xyz', ref_rpy_deg, degrees=True).as_matrix()
+        home_rad = init_q if init_q is not None else [0.0, 0.0, -math.pi / 2.0, -math.pi / 2.0, -math.pi / 2.0, 0.0]
+        
+        if ref_rpy_deg is not None and len(ref_rpy_deg) == 3:
+            effective_anchor_rpy = [float(v) for v in ref_rpy_deg]
         else:
-            # Fallback to first waypoint's orientation as anchor reference
-            first_pose = orig_waypoints[0].get("tcp_pose_base", orig_waypoints[0])
-            first_rpy = [first_pose.get("rx", 0.0), first_pose.get("ry", 0.0), first_pose.get("rz", 0.0)]
-            R_ref = R_scipy.from_euler('xyz', first_rpy, degrees=True).as_matrix()
+            _, effective_anchor_rpy = self.verifier.solver.forward_controller(home_rad)
+            effective_anchor_rpy = [round(float(v), 2) for v in effective_anchor_rpy]
 
-        # Build candidate search grid within tolerance envelope
-        rx_steps = np.linspace(-tol_rx, tol_rx, num=max(1, int(tol_rx * 2 + 1))) if tol_rx > 0 else [0.0]
-        ry_steps = np.linspace(-tol_ry, tol_ry, num=max(1, int(tol_ry / 3 + 1))) if tol_ry > 0 else [0.0]
+        t_start = time.time()
+        opt_path, was_modified = self.spray_optimizer.optimize_path_item(
+            path_item,
+            init_q=home_rad,
+            ref_rpy_deg=effective_anchor_rpy,
+            tolerance_rpy_deg=effective_tol,
+        )
+        elapsed_ms = (time.time() - t_start) * 1000.0
 
-        if tol_rz >= 170.0:
-            rz_steps = np.linspace(-180.0, 180.0, num=25)  # 15° steps
-        elif tol_rz > 0:
-            rz_steps = np.linspace(-tol_rz, tol_rz, num=max(1, int(tol_rz / 10 + 1)))
-        else:
-            rz_steps = [0.0]
+        rep = opt_path.get("verification_report")
+        if rep is None and self.verifier is not None:
+            rep = self.verifier.verify_single_path(opt_path, init_q=home_rad)
 
-        logger.info(f"🎯 [PoiConstraintOptimizer] Path {path_item.get('path_id')} starting POI search with envelope: Tol_Rx=±{tol_rx}°, Tol_Ry=±{tol_ry}°, Tol_Rz=±{tol_rz}° (Grid size={len(rx_steps)*len(ry_steps)*len(rz_steps)})...")
+        # 打印并记录对齐的结构化表格日志
+        report_text = _format_comparison_report(
+            solver=self.verifier.solver,
+            verifier=self.verifier,
+            optimizer=self.spray_optimizer,
+            raw_path_item=path_item,
+            opt_path_item=opt_path,
+            anchor_rpy=effective_anchor_rpy,
+            anchor_tol=effective_tol,
+            home_rad=home_rad,
+            elapsed_ms=elapsed_ms,
+            was_modified=was_modified,
+            rep=rep,
+        )
+        print(report_text)
+        logger.info(report_text)
 
-        opt_waypoints = []
-        curr_q = init_q
-        path_modified = False
-
-        for wp_idx, wp in enumerate(orig_waypoints):
-            orig_pose = wp.get("tcp_pose_base", wp)
-            T_orig_gun = pose_dict_to_matrix(orig_pose)
-            pos_m = T_orig_gun[:3, 3]
-
-            best_T_gun = None
-            best_q = None
-            best_score = float('inf')
-            best_normal_angle_deg = None
-            surface_normal = np.array(wp.get("surface_normal_base", [0.0, 0.0, 1.0]), dtype=np.float64)
-            n_norm = np.linalg.norm(surface_normal)
-            if n_norm > 1e-6:
-                surface_normal = surface_normal / n_norm
-            else:
-                surface_normal = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-            desired_tool_z = -surface_normal
-            for drx in rx_steps:
-                for dry in ry_steps:
-                    for drz in rz_steps:
-                        R_delta = R_scipy.from_euler('xyz', [drx, dry, drz], degrees=True).as_matrix()
-                        R_cand = R_ref @ R_delta
-
-                        T_cand_gun = np.eye(4, dtype=np.float64)
-                        T_cand_gun[:3, :3] = R_cand
-                        T_cand_gun[:3, 3] = pos_m
-
-                        # Always use the controller matrix (T_gun) for inverse kinematics
-                        ik_sols = self.verifier.solver.inverse_controller_matrix(T_cand_gun)
-
-                        if not ik_sols:
-                            continue
-
-                        for sol in ik_sols:
-                            if curr_q is not None:
-                                d = sol - np.array(curr_q)
-                                d = (d + np.pi) % (2 * np.pi) - np.pi
-                                dq_norm = np.linalg.norm(d)
-                                max_dq_deg = np.max(np.abs(np.degrees(d)))
-                            else:
-                                # Seed selection: prefer natural non-singular workspace branch close to Home
-                                home_q = np.array([np.pi, 0.0, np.pi/2.0, np.pi/2.0, np.pi/2.0, 0.0])
-                                d = sol - home_q
-                                d = (d + np.pi) % (2 * np.pi) - np.pi
-                                dq_norm = np.linalg.norm(d)
-                                max_dq_deg = 0.0
-
-                            # Singularity penalties
-                            sin_theta3 = abs(np.sin(sol[2]))
-                            sin_theta5 = abs(np.sin(sol[4]))
-
-                            singularity_penalty = 0.0
-                            if sin_theta3 < 0.08:
-                                singularity_penalty += (0.08 - sin_theta3) * 60.0
-                            if sin_theta5 < 0.08:
-                                singularity_penalty += (0.08 - sin_theta5) * 60.0
-
-                            # Prefer the absolute-anchor candidate whose tool Z axis is closest to the local surface normal direction.
-                            tool_z = R_cand[:, 2]
-                            cos_align = float(np.clip(np.dot(tool_z, desired_tool_z), -1.0, 1.0))
-                            normal_angle_deg = float(np.degrees(np.arccos(cos_align)))
-                            normal_alignment_penalty = normal_angle_deg * 0.08
-
-                            # Proximity penalty to anchor reference
-                            delta_penalty = (abs(drx) * 0.1 + abs(dry) * 0.05 + abs(drz) * 0.002)
-
-                            score = dq_norm + singularity_penalty + delta_penalty + normal_alignment_penalty
-                            if max_dq_deg > 50.0:
-                                score += 150.0
-
-                            if score < best_score:
-                                best_score = score
-                                best_T_gun = T_cand_gun
-                                best_q = sol
-                                best_normal_angle_deg = normal_angle_deg
-
-            if best_T_gun is not None:
-                new_wp = copy.deepcopy(wp)
-                new_pose = matrix_to_pose_dict(best_T_gun)
-                if "tcp_pose_base" in new_wp:
-                    new_wp["tcp_pose_base"] = new_pose
-                else:
-                    new_wp.update(new_pose)
-
-                new_wp["poi_alignment"] = {
-                    "surface_normal_angle_deg": round(float(best_normal_angle_deg or 0.0), 2),
-                    "score": round(float(best_score), 4),
-                    "model": "absolute_anchor_tolerance_closest_to_surface_normal",
-                }
-
-                opt_waypoints.append(new_wp)
-                curr_q = best_q
-                path_modified = True
-            else:
-                logger.warning(f"⚠️ [PoiConstraintOptimizer] Waypoint #{wp_idx+1} POI constraint unresolvable in envelope. Retaining original.")
-                opt_waypoints.append(wp)
-
-        # Adaptive feedrate check: if overspeed issues remain, automatically lower recommended safe velocity
-        poi_path = copy.deepcopy(path_item)
-        poi_path["points"] = opt_waypoints
-
-        rep = self.verifier.verify_single_path(poi_path, init_q=init_q)
-        if rep.get("recommended_safe_speed_mm_s") and rep["recommended_safe_speed_mm_s"] < self.interpolator.linear_velocity_mm_s:
-            poi_path["recommended_speed_mm_s"] = rep["recommended_safe_speed_mm_s"]
-            logger.info(f"⚡ [PoiConstraintOptimizer] Path {path_item.get('path_id')} tuned feedrate: {self.interpolator.linear_velocity_mm_s} -> {rep['recommended_safe_speed_mm_s']} mm/s")
-
-        return poi_path, path_modified
+        return opt_path, was_modified
 
     def optimize_poi_all_paths(
         self,
         paths_data: dict,
         ref_rpy_deg: list[float] = None,
         tolerance_rpy_deg: list[float] = None,
-        tol_rpy_deg: list[float] = None
+        tol_rpy_deg: list[float] = None,
+        init_q: list[float] = None,
     ) -> tuple[dict, dict]:
         """
-        Optimizes all manual paths in paths_data using POI constraint envelope search.
+        Optimizes all manual paths in paths_data using POI constraint envelope search (Viterbi DP).
         Returns: (poi_paths_data, poi_verification_report)
         """
-        effective_tol = tolerance_rpy_deg or tol_rpy_deg or [3.0, 15.0, 180.0]
+        effective_tol = tolerance_rpy_deg or tol_rpy_deg or [20.0, 20.0, 180.0]
         if len(effective_tol) != 3:
-            effective_tol = [3.0, 15.0, 180.0]
+            effective_tol = [20.0, 20.0, 180.0]
         effective_tol = [float(v) for v in effective_tol]
+
+        home_rad = init_q if init_q is not None else [0.0, 0.0, -math.pi / 2.0, -math.pi / 2.0, -math.pi / 2.0, 0.0]
+        if ref_rpy_deg is not None and len(ref_rpy_deg) == 3:
+            effective_anchor_rpy = [float(v) for v in ref_rpy_deg]
+        else:
+            _, effective_anchor_rpy = self.verifier.solver.forward_controller(home_rad)
+            effective_anchor_rpy = [round(float(v), 2) for v in effective_anchor_rpy]
+
         paths = paths_data.get("paths", [])
-        poi_paths = []
-        last_q = None
+        opt_paths = []
+        last_q = home_rad
 
-        for path in paths:
-            opt_path, _ = self.optimize_poi_single_path(
+        for idx, path in enumerate(paths):
+            opt_path, was_mod = self.optimize_poi_single_path(
                 path,
-                ref_rpy_deg=ref_rpy_deg,
+                ref_rpy_deg=effective_anchor_rpy,
                 tolerance_rpy_deg=effective_tol,
-                init_q=last_q
+                init_q=last_q,
             )
-            poi_paths.append(opt_path)
+            opt_paths.append(opt_path)
+            joints = opt_path.get("spray_opt_joints_deg")
+            if joints:
+                last_q = [math.radians(a) for a in joints[-1]]
 
-            rep = self.verifier.verify_single_path(opt_path, init_q=last_q)
-            if rep.get("trajectory_q"):
-                last_q = rep["trajectory_q"][-1]
-
-        poi_data = copy.deepcopy(paths_data)
-        poi_data["paths"] = poi_paths
-        poi_data["type"] = "poi"
-        poi_data["poi_config"] = {
+        opt_data = copy.deepcopy(paths_data)
+        opt_data["paths"] = opt_paths
+        opt_data["type"] = "poi"
+        opt_data["poi_config"] = {
             "mode": "absolute_anchor_tolerance",
-            "ref_rpy_deg": ref_rpy_deg,
+            "ref_rpy_deg": effective_anchor_rpy,
             "tolerance_rpy_deg": effective_tol,
             "euler_order": "xyz",
             "units": "deg",
         }
 
-        poi_report = self.verifier.verify_all_paths(poi_data)
-        poi_report["state_type"] = "poi"
-        poi_report["optimized_paths_available"] = True
-        poi_report["poi_config"] = poi_data["poi_config"]
-        return poi_data, poi_report
+        report = None
+        if self.verifier is not None:
+            report = self.verifier.verify_all_paths(opt_data)
+            report["poi_config"] = opt_data["poi_config"]
+            report["state_type"] = "poi"
+            report["optimized_paths_available"] = True
+            for i, p_rep in enumerate(report.get("path_reports", [])):
+                if i < len(opt_data["paths"]):
+                    opt_data["paths"][i]["trajectory_q"] = p_rep.get("trajectory_q", [])
+                    opt_data["paths"][i]["trajectory_tcp"] = p_rep.get("trajectory_tcp", [])
+                    opt_data["paths"][i]["total_interpolated"] = p_rep.get("total_interpolated", 0)
+
+        return opt_data, report

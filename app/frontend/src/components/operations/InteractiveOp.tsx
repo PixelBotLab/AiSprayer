@@ -125,8 +125,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     linearSpeedMmS: 120.0,
   });
   const [poiConfig, setPoiConfig] = useState<PoiConfig>({
-    ref_rpy_deg: [0.0, 0.0, 0.0],
-    tolerance_rpy_deg: [3.0, 15.0, 180.0],
+    anchor_source: 'home',
+    ref_rpy_deg: [90.0, 0.0, 90.0],
+    tolerance_rpy_deg: [20.0, 20.0, 180.0],
   });
 
   // ─── 6. Action Execution State ──────────────────────────────────────────

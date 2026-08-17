@@ -181,21 +181,26 @@ class PathVerificationService:
 
     def _normalize_poi_config(self, poi_config: dict | None, anchor_source: str | None = None) -> dict:
         cfg = poi_config or {}
-        ref_rpy = _validate_float_triplet(cfg.get("ref_rpy_deg"), "poi_config.ref_rpy_deg", default=None)
+        raw_ref = cfg.get("ref_rpy_deg")
+        source = cfg.get("anchor_source") or anchor_source or ("manual" if raw_ref is not None else "home")
+        if source not in {"home", "live", "manual", "raw"}:
+            raise ValueError("poi_config.anchor_source must be one of: home, live, manual, raw")
+
+        if raw_ref is not None:
+            ref_rpy = _validate_float_triplet(raw_ref, "poi_config.ref_rpy_deg")
+        elif source == "home":
+            ref_rpy = [90.0, 0.0, 90.0]
+        else:
+            ref_rpy = None
+
         tol_rpy = _validate_float_triplet(
             cfg.get("tolerance_rpy_deg"),
             "poi_config.tolerance_rpy_deg",
-            default=DEFAULT_POI_TOLERANCE_RPY_DEG,
+            default=[20.0, 20.0, 180.0],
             min_value=0.0,
             max_value=180.0,
         )
-        source = cfg.get("anchor_source") or anchor_source or "raw"
-        if source not in {"home", "live", "manual", "raw"}:
-            raise ValueError("poi_config.anchor_source must be one of: home, live, manual, raw")
-        
-        if source == "raw":
-            ref_rpy = None
-            
+
         return {
             "mode": "absolute_anchor_tolerance",
             "anchor_source": source,

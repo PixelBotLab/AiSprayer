@@ -15,10 +15,10 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
   const [mode, setMode] = useState<'cartesian' | 'joint'>('cartesian');
   const [xyzStep, setXyzStep] = useState<number>(5.0);
   const [angStep, setAngStep] = useState<number>(1.0);
-  const [speedL, setSpeedL] = useState<number>(20);
-  const [accL, setAccL] = useState<number>(20);
-  const [speedJ, setSpeedJ] = useState<number>(20);
-  const [accJ, setAccJ] = useState<number>(20);
+  const [speedL, setSpeedL] = useState<number>(10);
+  const [accL, setAccL] = useState<number>(10);
+  const [speedJ, setSpeedJ] = useState<number>(10);
+  const [accJ, setAccJ] = useState<number>(10);
 
   // Use prop robotState if provided, else fall back to internal zeros
   const displayState: RobotState = robotState ?? { pose: [0,0,0,0,0,0], joint: [0,0,0,0,0,0] };
@@ -60,10 +60,10 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
       const spdRes = await fetch('http://localhost:8000/api/calib/robot/speed');
       if (spdRes.ok) {
         const spdData = await spdRes.json();
-        setSpeedL(spdData.speed_l || 20);
-        setAccL(spdData.acc_l || 20);
-        setSpeedJ(spdData.speed_j || 20);
-        setAccJ(spdData.acc_j || 20);
+        setSpeedL(spdData.speed_l || 10);
+        setAccL(spdData.acc_l || 10);
+        setSpeedJ(spdData.speed_j || 10);
+        setAccJ(spdData.acc_j || 10);
       }
     } catch (e) {
       console.error("Failed to fetch initial speed", e);

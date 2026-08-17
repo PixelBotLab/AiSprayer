@@ -127,14 +127,31 @@ const ConsoleLogZone: React.FC = () => {
         {logs.length === 0 ? (
           <div className="text-slate-600 italic py-8 text-center">No logs captured yet.</div>
         ) : (
-          logs.map((log, idx) => (
-            <div key={idx} className="flex gap-3 hover:bg-slate-900/50 px-1 -mx-1 rounded transition-colors break-all">
-              <span className="text-slate-500 shrink-0 select-none">[{log.time}]</span>
-              <span className={`${getLevelColor(log.level)} font-semibold shrink-0 select-none w-16`}>[{log.level}]</span>
-              <span className="text-slate-500 shrink-0 select-none hidden md:inline-block w-32 truncate" title={log.logger}>{log.logger}:</span>
-              <span className="text-slate-200">{log.message}</span>
-            </div>
-          ))
+          logs.map((log, idx) => {
+            const isMultiline = log.message.includes('\n');
+            if (isMultiline) {
+              return (
+                <div key={idx} className="flex flex-col hover:bg-slate-900/40 px-2 py-1 rounded transition-colors my-1 border border-slate-800/60 bg-slate-950/70">
+                  <div className="flex items-center gap-2.5 text-[10.5px] border-b border-slate-800/60 pb-1 mb-1 select-none">
+                    <span className="text-slate-500">[{log.time}]</span>
+                    <span className={`${getLevelColor(log.level)} font-semibold`}>[{log.level}]</span>
+                    <span className="text-slate-400 font-medium">{log.logger}:</span>
+                  </div>
+                  <pre className="font-mono text-[10.5px] leading-snug text-slate-200 overflow-x-auto whitespace-pre custom-scrollbar py-1 select-text">
+                    {log.message}
+                  </pre>
+                </div>
+              );
+            }
+            return (
+              <div key={idx} className="flex items-start gap-3 hover:bg-slate-900/50 px-1 py-0.5 -mx-1 rounded transition-colors">
+                <span className="text-slate-500 shrink-0 select-none text-[10.5px]">[{log.time}]</span>
+                <span className={`${getLevelColor(log.level)} font-semibold shrink-0 select-none text-[10.5px] w-14`}>[{log.level}]</span>
+                <span className="text-slate-500 shrink-0 select-none hidden md:inline-block w-28 truncate text-[10.5px]" title={log.logger}>{log.logger}:</span>
+                <span className="text-slate-200 whitespace-pre-wrap break-words flex-1 text-[11px]">{log.message}</span>
+              </div>
+            );
+          })
         )}
         
         {/* Blinking cursor */}

@@ -26,8 +26,8 @@ class RobotService:
         self._polling_thread = None
         self._stop_polling = False
         self._ws_callbacks: List[Callable] = []
-        self._global_speed = 20.0
-        self._global_acc = 20.0
+        self._global_speed = 10.0
+        self._global_acc = 10.0
 
     def connect(self, robot_type: str, ip: str, port: str, **kwargs) -> tuple[bool, str]:
         if self._is_connected:
@@ -38,7 +38,15 @@ class RobotService:
             self._driver = get_robot(robot_type, ip, port, **kwargs)
             if self._driver and self._driver.startup():
                 self._is_connected = True
-                logger.info("Robot connected successfully.")
+                logger.info("Robot connected successfully. Setting initial speeds to 10% (SpeedFactor, MoveL, MoveJ)...")
+                # Enforce 10% speed on real robot upon connection
+                try:
+                    self.set_speed(speed_l=10.0, acc_l=10.0, speed_j=10.0, acc_j=10.0)
+                    if hasattr(self._driver, 'set_global_speed'):
+                        self._driver.set_global_speed(10)
+                except Exception as e:
+                    logger.warning(f"Failed to set initial 10% speed after connect: {e}")
+
                 self.start_status_polling()
                 return True, ""
             else:
@@ -127,7 +135,7 @@ class RobotService:
             logger.error(msg)
             return None, msg
 
-    def move_to_pose(self, pose: List[float], speed: float = 50.0, acc: float = 50.0) -> tuple[bool, str]:
+    def move_to_pose(self, pose: List[float], speed: float = 10.0, acc: float = 10.0) -> tuple[bool, str]:
         if not self._driver or not self._is_connected:
             msg = "move_to_pose: Robot is not connected"
             logger.error(msg)
@@ -145,7 +153,7 @@ class RobotService:
             logger.error(msg)
             return False, msg
 
-    def move_to_joint(self, joints: List[float], speed: float = 50.0, acc: float = 50.0) -> tuple[bool, str]:
+    def move_to_joint(self, joints: List[float], speed: float = 10.0, acc: float = 10.0) -> tuple[bool, str]:
         if not self._driver or not self._is_connected:
             msg = "move_to_joint: Robot is not connected"
             logger.error(msg)
@@ -163,7 +171,7 @@ class RobotService:
             logger.error(msg)
             return False, msg
 
-    def jog_step(self, axis: str, direction: int, step_size: float = 1.0, speed: float = 20.0, acc: float = 20.0) -> tuple[bool, str]:
+    def jog_step(self, axis: str, direction: int, step_size: float = 1.0, speed: float = 10.0, acc: float = 10.0) -> tuple[bool, str]:
         if not self._driver or not self._is_connected:
             msg = "jog_step: Robot is not connected"
             logger.error(msg)
@@ -204,7 +212,7 @@ class RobotService:
             
         return False, f"jog_step: Invalid axis {axis}"
 
-    def go_zero(self, speed: float = 20.0, acc: float = 20.0) -> tuple[bool, str]:
+    def go_zero(self, speed: float = 10.0, acc: float = 10.0) -> tuple[bool, str]:
         logger.info(f"go_zero: speed:{speed}, acc:{acc}")
         if not self._driver or not self._is_connected:
             msg = "go_zero: Robot is not connected"
@@ -218,7 +226,7 @@ class RobotService:
             logger.error(msg)
             return False, msg
 
-    def go_home(self, speed: float = 20.0, acc: float = 20.0) -> tuple[bool, str]:
+    def go_home(self, speed: float = 10.0, acc: float = 10.0) -> tuple[bool, str]:
         logger.info(f"go_home: speed:{speed}, acc:{acc}")
         if not self._driver or not self._is_connected:
             msg = "go_home: Robot is not connected"

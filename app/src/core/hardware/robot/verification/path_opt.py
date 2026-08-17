@@ -49,8 +49,8 @@ logger = logging.getLogger(__name__)
 PI = math.pi
 # 与 KinematicChainVerifier.BRANCH_JUMP_DEG 对齐：单步超过该值视为换支 / 翻腕
 _BRANCH_JUMP_DEG = 45.0
-# 无 init_q 时的种子构型（CR5 常用 ready 姿态，同校验器默认种子）
-_DEFAULT_SEED_Q = np.array([PI, 0.0, PI / 2.0, PI / 2.0, PI / 2.0, 0.0], dtype=np.float64)
+# 无 init_q 时的默认种子构型 (Dobot CR5 Home 姿态 [0, 0, -90, -90, -90, 0]°)
+_DEFAULT_SEED_Q = np.array([0.0, 0.0, -PI / 2.0, -PI / 2.0, -PI / 2.0, 0.0], dtype=np.float64)
 
 
 def _wrap_pi(dq: np.ndarray) -> np.ndarray:
@@ -168,12 +168,12 @@ class SprayWaypointOptimizer:
         solver: CR5Kinematics = None,
         verifier=None,
         ik_solver: Callable[[np.ndarray], list[np.ndarray]] = None,
-        tol_x_deg: tuple[float, float, float] = (-5.0, 5.0, 5.0),
-        tol_y_deg: tuple[float, float, float] = (-5.0, 5.0, 5.0),
-        tol_z_deg: tuple[float, float, float] = (-180.0, 180.0, 30.0),
-        num_movel_checks: int = 4,
-        max_movel_checks: int = 8,
-        movel_check_spacing_mm: float = 20.0,
+        tol_x_deg: tuple[float, float, float] = (-5.0, 5.0, 2.0),
+        tol_y_deg: tuple[float, float, float] = (-5.0, 5.0, 2.0),
+        tol_z_deg: tuple[float, float, float] = (-180.0, 180.0, 10.0),
+        num_movel_checks: int = 10,
+        max_movel_checks: int = 100,
+        movel_check_spacing_mm: float = 5.0,
         max_joint_jump_deg: float = _BRANCH_JUMP_DEG,
         weight_zero_dev: tuple[float, float, float] = (1.0, 1.0, 0.01),
         joint_weights: Optional[list[float]] = None,
@@ -639,14 +639,14 @@ class SprayWaypointOptimizer:
             for a, b in zip(points, new_points)
         )
 
-        # 密采样硬门：DP 抽检是 2 cm 量级，真机 MoveL 近奇异时可能更密才暴露问题
-        if self.dense_verify and self.verifier is not None and len(new_points) >= 2:
+        # 密采样校验与轨迹插值挂载：生成 60 FPS 连续仿真与执行所需的 dense 轨迹点
+        if self.verifier is not None and len(new_points) >= 2:
             rep = self.verifier.verify_single_path(out, init_q=init_q)
             hard = [
                 iss for iss in rep.get("issues", [])
                 if iss.get("severity") == "ERROR" or "SINGULARITY" in str(iss.get("type", ""))
             ]
-            if hard or rep.get("status") == "FAILED":
+            if self.dense_verify and (hard or rep.get("status") == "FAILED"):
                 types = sorted({iss.get("type", "?") for iss in hard}) or ["FAILED"]
                 raise RuntimeError(
                     f"Dense MoveL verifier rejected the DP path: {types}. "
@@ -654,6 +654,12 @@ class SprayWaypointOptimizer:
                 )
             if rep.get("recommended_safe_speed_mm_s"):
                 out["recommended_speed_mm_s"] = rep["recommended_safe_speed_mm_s"]
+
+            # 直接返回并挂载密插值轨迹点供 3D/2D 仿真与控制引擎直接取用
+            out["trajectory_q"] = rep.get("trajectory_q", [])
+            out["trajectory_tcp"] = rep.get("trajectory_tcp", [])
+            out["total_interpolated"] = rep.get("total_interpolated", len(out["trajectory_q"]))
+            out["verification_report"] = rep
         return out, modified
 
     def optimize_all_paths(
@@ -662,10 +668,12 @@ class SprayWaypointOptimizer:
         init_q: Optional[list[float] | np.ndarray] = None,
         ref_rpy_deg: Optional[list[float]] = None,
         tolerance_rpy_deg: Optional[list[float]] = None,
+        state_type: str = "poi",
     ) -> tuple[dict, dict | None]:
         """
         优化 paths_data["paths"] 中的全部路径。
         后一条的 init_q 取前一条最后一个展开关节，避免路径衔接处换支。
+        同时挂载密插值轨迹点供 3D/2D 仿真与控制引擎直接取用。
 
         :return: (优化后的 paths_data, 校验报告或 None)
         """
@@ -686,9 +694,16 @@ class SprayWaypointOptimizer:
 
         data = copy.deepcopy(paths_data)
         data["paths"] = out_paths
-        data["type"] = "spray_opt"
+        data["type"] = state_type
         report = None
         if self.verifier is not None:
             report = self.verifier.verify_all_paths(data)
-            report["state_type"] = "spray_opt"
+            report["state_type"] = state_type
+            report["optimized_paths_available"] = True
+            # 同步挂载每条路径的插值点
+            for idx, p_rep in enumerate(report.get("path_reports", [])):
+                if idx < len(data["paths"]):
+                    data["paths"][idx]["trajectory_q"] = p_rep.get("trajectory_q", [])
+                    data["paths"][idx]["trajectory_tcp"] = p_rep.get("trajectory_tcp", [])
+                    data["paths"][idx]["total_interpolated"] = p_rep.get("total_interpolated", 0)
         return data, report

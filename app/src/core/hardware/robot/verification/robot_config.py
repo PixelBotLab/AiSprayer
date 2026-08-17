@@ -191,8 +191,8 @@ class RobotConfig:
 
     def _limits_rad_from_urdf(self) -> tuple[np.ndarray, np.ndarray]:
         """CR5 defaults, overwritten by URDF joint1..joint6 when present."""
-        joint_min = np.array([-math.pi, -math.pi, -2.86159, -math.pi, -math.pi, -2.0 * math.pi], dtype=np.float64)
-        joint_max = np.array([ math.pi,  math.pi,  2.86159,  math.pi,  math.pi,  2.0 * math.pi], dtype=np.float64)
+        joint_min = np.array([-2.0 * math.pi, -math.pi, -2.86159, -math.pi, -math.pi, -2.0 * math.pi], dtype=np.float64)
+        joint_max = np.array([ 2.0 * math.pi,  math.pi,  2.86159,  math.pi,  math.pi,  2.0 * math.pi], dtype=np.float64)
         limits = self.urdf_info.get("joint_limits_deg") or self.urdf_info.get("joint_limits") or {}
         for i in range(6):
             name = f"joint{i + 1}"

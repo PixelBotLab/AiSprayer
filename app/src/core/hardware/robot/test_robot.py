@@ -13,6 +13,8 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.
 from core.hardware.robot.factory import get_robot
 from core.hardware.robot.base_driver import RobotPose
 
+
+# 打包姿态[0,0,-156,0,0,0]
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
 

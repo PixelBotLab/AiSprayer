@@ -321,12 +321,12 @@ class CR5Kinematics:
         joint_max: list[float] = None,
         backend: str = "python",
     ):
-        # J1–J5: [-π, π], J3 slightly tighter from URDF, J6: [-2π, 2π] (multi-turn).
+        # J1 & J6: [-2π, 2π] (multi-turn), J2, J4, J5: [-π, π], J3: [-2.86, 2.86] from URDF.
         self.joint_min = np.array(joint_min if joint_min is not None else [
-            -PI, -PI, -2.86159, -PI, -PI, -2.0 * PI
+            -2.0 * PI, -PI, -2.86159, -PI, -PI, -2.0 * PI
         ], dtype=np.float64)
         self.joint_max = np.array(joint_max if joint_max is not None else [
-             PI,  PI,  2.86159,  PI,  PI,  2.0 * PI
+             2.0 * PI,  PI,  2.86159,  PI,  PI,  2.0 * PI
         ], dtype=np.float64)
 
         self.T_base = _T_BASE

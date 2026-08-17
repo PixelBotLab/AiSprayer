@@ -259,7 +259,18 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
             </button>
           </div>
           <button
-            onClick={() => setSelectedTab('poi_settings')}
+            onClick={() => {
+              setSelectedTab('poi_settings');
+              if (!poiConfig.anchor_source || poiConfig.anchor_source === 'home' || (poiConfig.ref_rpy_deg[0] === 0 && poiConfig.ref_rpy_deg[1] === 0 && poiConfig.ref_rpy_deg[2] === 0)) {
+                onFetchAnchorPose('home');
+                setPoiConfig((prev) => ({
+                  ...prev,
+                  anchor_source: 'home',
+                  ref_rpy_deg: [90.0, 0.0, 90.0],
+                  tolerance_rpy_deg: [20.0, 20.0, 180.0],
+                }));
+              }
+            }}
             className={`pb-1 flex items-center gap-1 transition-all ${
               selectedTab === 'poi_settings'
                 ? 'text-emerald-400 border-b-2 border-emerald-400 font-bold'
@@ -689,7 +700,13 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
                 <span className="text-[9px] text-slate-400">Anchor Source:</span>
                 <div className="flex bg-slate-900 border border-slate-800 rounded overflow-hidden">
                   <button
-                    className={`px-2 py-0.5 text-[9px] ${poiConfig.anchor_source === 'manual' || !poiConfig.anchor_source ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}
+                    className={`px-2 py-0.5 text-[9px] ${poiConfig.anchor_source === 'home' || !poiConfig.anchor_source ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}
+                    onClick={() => onFetchAnchorPose('home')}
+                  >
+                    Home
+                  </button>
+                  <button
+                    className={`px-2 py-0.5 text-[9px] ${poiConfig.anchor_source === 'manual' ? 'bg-indigo-600 text-white' : 'text-slate-400 hover:bg-slate-800'}`}
                     onClick={() => setPoiConfig((prev) => ({ ...prev, anchor_source: 'manual' }))}
                   >
                     Manual
@@ -718,7 +735,7 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
                 <input
                   type="range"
                   min={0.0}
-                  max={30.0}
+                  max={45.0}
                   step={0.5}
                   value={poiConfig.tolerance_rpy_deg[0]}
                   onChange={(e) =>
@@ -787,13 +804,14 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
                 <span>{isOptimizing ? 'Optimizing POI...' : 'Apply & Optimize'}</span>
               </button>
               <button
-                onClick={() =>
+                onClick={() => {
+                  onFetchAnchorPose('home');
                   setPoiConfig({
-                    ref_rpy_deg: [180.0, 0.0, 0.0],
-                    tolerance_rpy_deg: [3.0, 15.0, 180.0],
-                    anchor_source: 'raw'
-                  })
-                }
+                    ref_rpy_deg: [90.0, 0.0, 90.0],
+                    tolerance_rpy_deg: [20.0, 20.0, 180.0],
+                    anchor_source: 'home',
+                  });
+                }}
                 className="px-2.5 py-1.5 rounded-lg border border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] font-medium transition-colors"
                 title="Reset Defaults"
               >

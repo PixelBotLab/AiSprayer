@@ -22,14 +22,14 @@ class DobotDriver(BaseRobotDriver):
         self.move: Optional[DobotApiMove] = None
         self.feedback: Optional[DobotApiFeedBack] = None
         self._connected = False
-        self._global_speed = 50
+        self._global_speed = 10
         # 30004 real-time data cache
         self._cached_joint: Optional[List[float]] = None   # degrees
         self._cached_pose: Optional[List[float]] = None    # mm, degrees
-        self._cached_speed_l: float = 20.0
-        self._cached_acc_l: float = 20.0
-        self._cached_speed_j: float = 20.0
-        self._cached_acc_j: float = 20.0
+        self._cached_speed_l: float = 10.0
+        self._cached_acc_l: float = 10.0
+        self._cached_speed_j: float = 10.0
+        self._cached_acc_j: float = 10.0
         self._cached_running_status: int = 0
         self._feedback_thread: Optional[threading.Thread] = None
         self._stop_feedback = False
@@ -45,8 +45,17 @@ class DobotDriver(BaseRobotDriver):
             time.sleep(0.5)
             self.dashboard.EnableRobot()
             
-            # Set global speed and tool
-            self.set_global_speed(self._global_speed)
+            # Set global speed factor to 10% and explicit MoveL/MoveJ speeds to 10%
+            self.set_global_speed(10)
+            try:
+                self.dashboard.SpeedL(10)
+                self.dashboard.AccL(10)
+                self.dashboard.SpeedJ(10)
+                self.dashboard.AccJ(10)
+                logger.info("Dobot initialized with 10% global speed factor, SpeedL=10, SpeedJ=10, AccL=10, AccJ=10.")
+            except Exception as e:
+                logger.warning(f"Could not set initial SpeedL/SpeedJ on dashboard: {e}")
+
             if self.tool_num > 0:
                 self.set_tool_number(self.tool_num)
 
@@ -245,7 +254,7 @@ class DobotDriver(BaseRobotDriver):
             time.sleep(0.05)
         return False
 
-    def move_j(self, pose: PoseLike, velocity: float = 40.0, acc: float = 80.0, dec: float = 80.0, tool_num: int = 0, wait: bool = True) -> int:
+    def move_j(self, pose: PoseLike, velocity: float = 10.0, acc: float = 20.0, dec: float = 20.0, tool_num: int = 0, wait: bool = True) -> int:
         if not self._connected or not self.move:
             return -2
         lst = _to_list(pose)
@@ -265,7 +274,7 @@ class DobotDriver(BaseRobotDriver):
             self._wait_motion_done()
         return 0
 
-    def move_joint(self, joints: List[float], velocity: float = 40.0, acc: float = 80.0, dec: float = 80.0, tool_num: int = 0, wait: bool = True) -> int:
+    def move_joint(self, joints: List[float], velocity: float = 10.0, acc: float = 20.0, dec: float = 20.0, tool_num: int = 0, wait: bool = True) -> int:
         if not self._connected or not self.move:
             return -2
         if len(joints) < 6:
@@ -284,7 +293,7 @@ class DobotDriver(BaseRobotDriver):
             self._wait_motion_done()
         return 0
 
-    def move_l(self, pose: PoseLike, velocity: float = 100.0, acc: float = 80.0, dec: float = 80.0, tool_num: int = 0, wait: bool = True) -> int:
+    def move_l(self, pose: PoseLike, velocity: float = 10.0, acc: float = 20.0, dec: float = 20.0, tool_num: int = 0, wait: bool = True) -> int:
         if not self._connected or not self.move:
             return -2
         lst = _to_list(pose)
@@ -307,9 +316,9 @@ class DobotDriver(BaseRobotDriver):
     def move_j_queue(
         self, 
         poses: List[PoseLike], 
-        velocity: float = 40.0, 
-        acc: float = 80.0, 
-        dec: float = 80.0,
+        velocity: float = 10.0, 
+        acc: float = 20.0, 
+        dec: float = 20.0,
         tool_num: int = 0,
         wait: bool = True,
         cp_ratio: int = 50
@@ -340,9 +349,9 @@ class DobotDriver(BaseRobotDriver):
     def move_l_queue(
         self, 
         poses: List[PoseLike], 
-        velocity: float = 100.0, 
-        acc: float = 80.0, 
-        dec: float = 80.0,
+        velocity: float = 10.0, 
+        acc: float = 20.0, 
+        dec: float = 20.0,
         tool_num: int = 0,
         wait: bool = True,
         cp_ratio: int = 50

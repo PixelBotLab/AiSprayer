@@ -154,7 +154,7 @@ class CR5PathVerifier:
         tol_rpy_deg: list[float] = None,
         init_q: list[float] = None
     ):
-        """Optimizes a single path within a bounded 3D tolerance envelope around an anchor pose."""
+        """Optimizes a single path within a bounded 3D tolerance envelope using PoiConstraintOptimizer (Viterbi DP)."""
         return self.poi_optimizer.optimize_poi_single_path(
             path_item,
             ref_rpy_deg=ref_rpy_deg,
@@ -168,14 +168,16 @@ class CR5PathVerifier:
         paths_data: dict,
         ref_rpy_deg: list[float] = None,
         tolerance_rpy_deg: list[float] = None,
-        tol_rpy_deg: list[float] = None
+        tol_rpy_deg: list[float] = None,
+        init_q: list[float] = None,
     ):
-        """Optimizes all paths within a bounded 3D tolerance envelope around an anchor pose."""
+        """Optimizes all paths within a bounded 3D tolerance envelope using PoiConstraintOptimizer (Viterbi DP)."""
         return self.poi_optimizer.optimize_poi_all_paths(
             paths_data,
             ref_rpy_deg=ref_rpy_deg,
             tolerance_rpy_deg=tolerance_rpy_deg,
-            tol_rpy_deg=tol_rpy_deg
+            tol_rpy_deg=tol_rpy_deg,
+            init_q=init_q
         )
 
     # ─── Sparse Viterbi MoveL Optimizer ─────────────────────────────────────
