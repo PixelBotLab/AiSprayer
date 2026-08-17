@@ -104,7 +104,7 @@ def run_cli():
     parser.add_argument("--tol-x", type=str, default="-5,5,2", help="绕工具 X 轴倾角搜索 (min,max,step)°")
     parser.add_argument("--tol-y", type=str, default="-5,5,2", help="绕工具 Y 轴倾角搜索 (min,max,step)°")
     parser.add_argument("--tol-z", type=str, default="-180,180,10", help="绕工具 Z 轴自旋搜索 (min,max,step)°")
-    parser.add_argument("--anchor-tol", type=str, default="20,20,180", help="相对锚点硬容差包络 (tol_rx,tol_ry,tol_rz)°")
+    parser.add_argument("--anchor-tol", type=str, default="10,10,180", help="相对锚点硬容差包络 (tol_rx,tol_ry,tol_rz)°")
     parser.add_argument("--home-joints", type=str, default="0,0,-90,-90,-90,0", help="Home 关节角 (用于 FK 确定锚点)°")
     parser.add_argument("--beam-width", type=int, default=32, help="DP Beam 宽度 (保留最优节点数)")
     parser.add_argument("--max-candidates-per-branch", type=int, default=16, help="每个解析支保留的最优姿态候选数")

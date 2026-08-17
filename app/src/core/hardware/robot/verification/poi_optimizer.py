@@ -270,9 +270,9 @@ class PoiConstraintOptimizer:
         Optimizes a single path within a bounded 3D tolerance envelope around an anchor reference pose.
         Returns: (poi_optimized_path, was_modified)
         """
-        effective_tol = tolerance_rpy_deg or tol_rpy_deg or [20.0, 20.0, 180.0]
+        effective_tol = tolerance_rpy_deg or tol_rpy_deg or [10.0, 10.0, 180.0]
         if len(effective_tol) != 3:
-            effective_tol = [20.0, 20.0, 180.0]
+            effective_tol = [10.0, 10.0, 180.0]
         effective_tol = [float(v) for v in effective_tol]
 
         home_rad = init_q if init_q is not None else [0.0, 0.0, -math.pi / 2.0, -math.pi / 2.0, -math.pi / 2.0, 0.0]
@@ -327,9 +327,9 @@ class PoiConstraintOptimizer:
         Optimizes all manual paths in paths_data using POI constraint envelope search (Viterbi DP).
         Returns: (poi_paths_data, poi_verification_report)
         """
-        effective_tol = tolerance_rpy_deg or tol_rpy_deg or [20.0, 20.0, 180.0]
+        effective_tol = tolerance_rpy_deg or tol_rpy_deg or [10.0, 10.0, 180.0]
         if len(effective_tol) != 3:
-            effective_tol = [20.0, 20.0, 180.0]
+            effective_tol = [10.0, 10.0, 180.0]
         effective_tol = [float(v) for v in effective_tol]
 
         home_rad = init_q if init_q is not None else [0.0, 0.0, -math.pi / 2.0, -math.pi / 2.0, -math.pi / 2.0, 0.0]

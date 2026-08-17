@@ -371,7 +371,7 @@ def get_session_data(name: str):
 
 class PoiConstraintConfig(BaseModel):
     ref_rpy_deg: list[float] | None = None  # e.g. [0.0, 0.0, 0.0]
-    tolerance_rpy_deg: list[float] = [3.0, 15.0, 180.0]  # [tol_rx, tol_ry, tol_rz]
+    tolerance_rpy_deg: list[float] = [10.0, 10.0, 180.0]  # [tol_rx, tol_ry, tol_rz]
     anchor_source: str | None = None  # 'home' | 'live' | 'manual'
 
 

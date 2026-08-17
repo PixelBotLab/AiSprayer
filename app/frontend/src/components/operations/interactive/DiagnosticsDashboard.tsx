@@ -267,7 +267,7 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
                   ...prev,
                   anchor_source: 'home',
                   ref_rpy_deg: [90.0, 0.0, 90.0],
-                  tolerance_rpy_deg: [20.0, 20.0, 180.0],
+                  tolerance_rpy_deg: [10.0, 10.0, 180.0],
                 }));
               }
             }}
@@ -808,7 +808,7 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
                   onFetchAnchorPose('home');
                   setPoiConfig({
                     ref_rpy_deg: [90.0, 0.0, 90.0],
-                    tolerance_rpy_deg: [20.0, 20.0, 180.0],
+                    tolerance_rpy_deg: [10.0, 10.0, 180.0],
                     anchor_source: 'home',
                   });
                 }}

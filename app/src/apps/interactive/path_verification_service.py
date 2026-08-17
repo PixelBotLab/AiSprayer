@@ -15,7 +15,7 @@ from core.hardware.robot.cr5_path_verifier import CR5PathVerifier
 logger = logging.getLogger(__name__)
 
 VALID_PATH_STATES = {"raw", "opt", "poi"}
-DEFAULT_POI_TOLERANCE_RPY_DEG = [3.0, 15.0, 180.0]
+DEFAULT_POI_TOLERANCE_RPY_DEG = [10.0, 10.0, 180.0]
 
 
 def _ensure_state_type(state_type: str) -> str:
@@ -196,7 +196,7 @@ class PathVerificationService:
         tol_rpy = _validate_float_triplet(
             cfg.get("tolerance_rpy_deg"),
             "poi_config.tolerance_rpy_deg",
-            default=[20.0, 20.0, 180.0],
+            default=[10.0, 10.0, 180.0],
             min_value=0.0,
             max_value=180.0,
         )

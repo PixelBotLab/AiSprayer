@@ -127,7 +127,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const [poiConfig, setPoiConfig] = useState<PoiConfig>({
     anchor_source: 'home',
     ref_rpy_deg: [90.0, 0.0, 90.0],
-    tolerance_rpy_deg: [20.0, 20.0, 180.0],
+    tolerance_rpy_deg: [10.0, 10.0, 180.0],
   });
 
   // ─── 6. Action Execution State ──────────────────────────────────────────
