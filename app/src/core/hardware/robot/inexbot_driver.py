@@ -792,16 +792,20 @@ class InexbotDriver(BaseRobotDriver):
             logger.info(f"[move_l] movel command sent successfully, target pose: {pose}")
         return ret
     
-    def go_home(self, wait: bool = True, velocity: Optional[float] = None) -> int:
+    def go_home(self, wait: bool = True, velocity: Optional[float] = None, acc: Optional[float] = None) -> int:
         """
         返回原点运动(GO HOME)
         :param wait: 是否等待运动完成，True=阻塞直到运动完成，False=立即返回
         :param velocity: 速度百分比（兼容参数，若提供可临时调整速度）
+        :param acc: 加速度百分比
         :return: 接口返回码，（0=成功，负值=失败）
         """
         if velocity is not None:
             with self._sdk_lock:
                 nrc.set_speed(self.fd, int(velocity))
+        if acc is not None:
+            with self._sdk_lock:
+                nrc.set_acc(self.fd, int(acc))
         with self._sdk_lock:
             ret = nrc.robot_go_home(self.fd)
         if ret != nrc.SUCCESS:

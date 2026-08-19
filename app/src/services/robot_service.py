@@ -4,13 +4,14 @@ import time
 import threading
 import logging
 import math
-from typing import Optional, List, Callable
+from typing import Optional, List, Callable, Any, Union
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "app/src"))
 
 from core.hardware.robot.factory import get_robot
-from core.hardware.robot.base_driver import BaseRobotDriver
+from core.hardware.robot.base_driver import BaseRobotDriver, RobotPose, PoseLike
+from core.config import SprayerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -20,14 +21,59 @@ def _fmt(arr: Optional[List[float]]) -> str:
     return "[" + ", ".join(f"{x:.2f}" for x in arr) + "]"
 
 class RobotService:
-    def __init__(self):
+    def __init__(self, config: Optional[SprayerConfig] = None):
+        self._config = config or SprayerConfig()
         self._driver: Optional[BaseRobotDriver] = None
         self._is_connected = False
         self._polling_thread = None
         self._stop_polling = False
         self._ws_callbacks: List[Callable] = []
-        self._global_speed = 10.0
-        self._global_acc = 10.0
+
+        # 从统一配置文件读取速度与限位参数
+        self._global_speed_factor: int = self._config.global_speed_factor
+        self._max_tcp_speed_mm_s: float = self._config.max_tcp_speed_mm_s
+        self._max_joint_speed_deg_s: List[float] = self._config.max_joint_speed_deg_s
+
+        # 初始具体速度值 (mm/s, %, deg/s, %)
+        eff_max_tcp = self._max_tcp_speed_mm_s * (self._global_speed_factor / 100.0)
+        eff_max_jnt = (self._max_joint_speed_deg_s[0] if self._max_joint_speed_deg_s else 180.0) * (self._global_speed_factor / 100.0)
+        self._speed_l: float = min(eff_max_tcp, 100.0)
+        self._acc_l: float = 20.0
+        self._speed_j: float = min(eff_max_jnt, 20.0)
+        self._acc_j: float = 20.0
+        self._global_speed = self._speed_l
+        self._global_acc = self._acc_l
+
+    @property
+    def config(self) -> SprayerConfig:
+        return self._config
+
+    @property
+    def global_speed_factor(self) -> int:
+        return self._global_speed_factor
+
+    @property
+    def max_tcp_speed_mm_s(self) -> float:
+        return self._max_tcp_speed_mm_s
+
+    @property
+    def max_joint_speed_deg_s(self) -> List[float]:
+        return self._max_joint_speed_deg_s
+
+    def reload_config(self, config_path: str = "configs/aisprayer_config.yaml"):
+        """重新加载配置文件并更新速度与限位参数"""
+        self._config = SprayerConfig(config_path)
+        self._global_speed_factor = self._config.global_speed_factor
+        self._max_tcp_speed_mm_s = self._config.max_tcp_speed_mm_s
+        self._max_joint_speed_deg_s = self._config.max_joint_speed_deg_s
+        eff_max_tcp = self._max_tcp_speed_mm_s * (self._global_speed_factor / 100.0)
+        eff_max_jnt = (self._max_joint_speed_deg_s[0] if self._max_joint_speed_deg_s else 180.0) * (self._global_speed_factor / 100.0)
+        self._speed_l = min(eff_max_tcp, max(1.0, self._speed_l))
+        self._speed_j = min(eff_max_jnt, max(1.0, self._speed_j))
+        logger.info(
+            f"RobotService config reloaded: global_speed_factor={self._global_speed_factor}, "
+            f"max_tcp_speed_mm_s={self._max_tcp_speed_mm_s}, max_joint_speed_deg_s={self._max_joint_speed_deg_s}"
+        )
 
     def connect(self, robot_type: str, ip: str, port: str, **kwargs) -> tuple[bool, str]:
         if self._is_connected:
@@ -38,16 +84,19 @@ class RobotService:
             self._driver = get_robot(robot_type, ip, port, **kwargs)
             if self._driver and self._driver.startup():
                 self._is_connected = True
-                logger.info("Robot connected successfully. Setting initial speeds to 10% (SpeedFactor, MoveL, MoveJ)...")
-                # Enforce 10% speed on real robot upon connection
-                try:
-                    self.set_speed(speed_l=10.0, acc_l=10.0, speed_j=10.0, acc_j=10.0)
-                    if hasattr(self._driver, 'set_global_speed'):
-                        self._driver.set_global_speed(10)
-                except Exception as e:
-                    logger.warning(f"Failed to set initial 10% speed after connect: {e}")
+                time.sleep(1)
 
                 self.start_status_polling()
+
+                logger.info(f"Robot connected successfully. Setting initial speeds to {self._global_speed_factor}% (SpeedFactor, MoveL, MoveJ)...")
+                # Enforce global_speed_factor speed on real robot upon connection
+                try:
+                    if hasattr(self._driver, 'set_global_speed'):
+                        self._driver.set_global_speed(self._global_speed_factor)
+                        logger.info(f"robot {robot_type} set_global_speed to {self._global_speed_factor}")
+                except Exception as e:
+                    logger.warning(f"Failed to set initial {self._global_speed_factor}% speed after connect: {e}")
+
                 return True, ""
             else:
                 msg = f"Failed to initialize or start robot driver for {robot_type} at {ip}:{port}."
@@ -82,26 +131,27 @@ class RobotService:
         return self._is_connected
 
     def get_speed(self) -> tuple[float, float, float, float]:
-        if self._driver and self._is_connected and hasattr(self._driver, 'get_global_speed'):
-            spd_l, acc_l, spd_j, acc_j = self._driver.get_global_speed()
-            logger.info(f"get_speed: spd_l:{spd_l}, acc_l:{acc_l}, spd_j:{spd_j}, acc_j:{acc_j}")
-            # update internal cache to match real robot state
-            self._global_speed = spd_l
-            self._global_acc = acc_l
-            return spd_l, acc_l, spd_j, acc_j
-        return self._global_speed, self._global_acc, self._global_speed, self._global_acc
+        return self._speed_l, self._acc_l, self._speed_j, self._acc_j
 
     def set_speed(self, speed_l: float, acc_l: float, speed_j: float, acc_j: float) -> tuple[bool, str]:
-        self._global_speed = speed_l
-        self._global_acc = acc_l
+        self._speed_l = float(speed_l)
+        self._acc_l = float(acc_l)
+        self._speed_j = float(speed_j)
+        self._acc_j = float(acc_j)
+        self._global_speed = float(speed_l)
+        self._global_acc = float(acc_l)
         # Pass to driver if connected
         if self._driver and self._is_connected:
             if hasattr(self._driver, 'dashboard') and self._driver.dashboard:
                 try:
-                    logger.info(f"set_speed: speed_l:{speed_l}, acc_l:{acc_l}, speed_j:{speed_j}, acc_j:{acc_j}")
-                    self._driver.dashboard.SpeedL(int(speed_l))
+                    logger.info(f"set_speed: speed_l:{speed_l} mm/s, acc_l:{acc_l}%, speed_j:{speed_j} deg/s, acc_j:{acc_j}%")
+                    max_tcp = self.max_tcp_speed_mm_s or 2000.0
+                    max_jnt = self.max_joint_speed_deg_s[0] if self.max_joint_speed_deg_s else 180.0
+                    ratio_l = max(1, min(100, int((speed_l / max_tcp) * 100)))
+                    ratio_j = max(1, min(100, int((speed_j / max_jnt) * 100)))
+                    self._driver.dashboard.SpeedL(ratio_l)
                     self._driver.dashboard.AccL(int(acc_l))
-                    self._driver.dashboard.SpeedJ(int(speed_j))
+                    self._driver.dashboard.SpeedJ(ratio_j)
                     self._driver.dashboard.AccJ(int(acc_j))
                 except Exception as e:
                     msg = f"Failed to set speed on robot: {e}"
@@ -152,6 +202,93 @@ class RobotService:
             msg = f"move_to_pose: Error moving to pose: {e}"
             logger.error(msg)
             return False, msg
+
+    def move_to_pose_j(self, pose: List[float], speed: float = 10.0, acc: float = 10.0) -> tuple[bool, str]:
+        """使用 MovJ 关节插补运动到指定的直角坐标笛卡尔位姿。"""
+        if not self._driver or not self._is_connected:
+            msg = "move_to_pose_j: Robot is not connected"
+            logger.error(msg)
+            return False, msg
+
+        pose_val, _ = self.get_current_pose()
+        logger.info(f"move_to_pose_j (MovJ): from pose:{_fmt(pose_val)}, to pose:{_fmt(pose)}, speed:{speed:.2f}, acc:{acc:.2f}")
+        try:
+            res = self._driver.move_j(pose, velocity=speed, acc=acc)
+            if res == 0:
+                new_pose_val, _ = self.get_current_pose()
+                logger.info(f"move_to_pose_j: Success moving to pose via MovJ, actual pose:{_fmt(new_pose_val)}")
+                return True, ""
+            return False, f"move_j returned error code: {res}"
+        except Exception as e:
+            msg = f"move_to_pose_j: Error moving to pose via MovJ: {e}"
+            logger.error(msg)
+            return False, msg
+
+
+    def move_l_queue(
+        self,
+        poses: List[Any],
+        speed: Optional[float] = None,
+        acc: Optional[float] = None,
+        cp_ratio: int = 98,
+        wait: bool = True
+    ) -> tuple[bool, str]:
+        """
+        通过驱动层 move_l_queue 批量执行笛卡尔连续轨迹路点 (Waypoints)。
+        :param poses: 路点列表，支持 RobotPose, dict (含 x, y, z, rx, ry, rz), 或 list/tuple
+        :param speed: 笛卡尔线速度 (mm/s)，为空则使用当前设定值
+        :param acc: 加速度百分比 (1~100)
+        :param cp_ratio: 平滑过渡比例 (1~100)
+        :param wait: 是否等待整条队列执行完毕
+        """
+        if not self._driver or not self._is_connected:
+            msg = "move_l_queue: Robot is not connected"
+            logger.error(msg)
+            return False, msg
+
+        if not poses:
+            return True, ""
+
+        speed_val = float(speed) if speed is not None else float(self._speed_l)
+        acc_val = float(acc) if acc is not None else float(self._acc_l)
+
+        converted_poses: List[RobotPose] = []
+        for p in poses:
+            if isinstance(p, RobotPose):
+                converted_poses.append(p)
+            elif isinstance(p, dict):
+                x = float(p.get('x', 0.0))
+                y = float(p.get('y', 0.0))
+                z = float(p.get('z', 0.0))
+                rx = float(p.get('rx', p.get('a', 0.0)))
+                ry = float(p.get('ry', p.get('b', 0.0)))
+                rz = float(p.get('rz', p.get('c', 0.0)))
+                if not p.get('is_radians', False):
+                    rx = math.radians(rx)
+                    ry = math.radians(ry)
+                    rz = math.radians(rz)
+                converted_poses.append(RobotPose(x, y, z, rx, ry, rz))
+            elif isinstance(p, (list, tuple)) and len(p) >= 6:
+                converted_poses.append(RobotPose.from_list(list(p)))
+
+        logger.info(f"move_l_queue: executing {len(converted_poses)} waypoints, speed:{speed_val} mm/s, acc:{acc_val}%, cp_ratio:{cp_ratio}")
+        try:
+            res = self._driver.move_l_queue(
+                converted_poses,
+                velocity_mm=speed_val,
+                acc=acc_val,
+                wait=wait,
+                cp_ratio=cp_ratio
+            )
+            if res == 0:
+                logger.info(f"move_l_queue: Successfully executed {len(converted_poses)} waypoints.")
+                return True, ""
+            return False, f"move_l_queue returned error code: {res}"
+        except Exception as e:
+            msg = f"move_l_queue error: {e}"
+            logger.error(msg)
+            return False, msg
+
 
     def move_to_joint(self, joints: List[float], speed: float = 10.0, acc: float = 10.0) -> tuple[bool, str]:
         if not self._driver or not self._is_connected:
@@ -226,6 +363,20 @@ class RobotService:
             logger.error(msg)
             return False, msg
 
+    def go_fold(self, speed: float = 10.0, acc: float = 10.0) -> tuple[bool, str]:
+        logger.info(f"go_fold: speed:{speed}, acc:{acc}")
+        if not self._driver or not self._is_connected:
+            msg = "go_fold: Robot is not connected"
+            logger.error(msg)
+            return False, msg
+            
+        try:
+            return self.move_to_joint([0.0, 0.0, -156.0, 0.0, 0.0, 0.0], speed=speed, acc=acc)
+        except Exception as e:
+            msg = f"Error going fold: {e}"
+            logger.error(msg)
+            return False, msg
+
     def go_home(self, speed: float = 10.0, acc: float = 10.0) -> tuple[bool, str]:
         logger.info(f"go_home: speed:{speed}, acc:{acc}")
         if not self._driver or not self._is_connected:
@@ -234,7 +385,7 @@ class RobotService:
             return False, msg
             
         try:
-            res = self._driver.go_home(wait=True, velocity=speed)
+            res = self._driver.go_home(wait=True, velocity=speed, acc=acc)
             if res == 0:
                 return True, ""
             return False, f"go_home returned error code: {res}"
@@ -250,6 +401,24 @@ class RobotService:
     def unregister_ws_callback(self, callback: Callable):
         if callback in self._ws_callbacks:
             self._ws_callbacks.remove(callback)
+
+    def broadcast_exec_progress(self, current_waypoint: int, total_waypoints: int, path_idx: int, total_paths: int):
+        """向所有 WebSocket 客户端广播轨迹执行进度事件。"""
+        payload = {
+            "type": "exec_progress",
+            "data": {
+                "current_waypoint": current_waypoint,
+                "total_waypoints": total_waypoints,
+                "path_idx": path_idx,
+                "total_paths": total_paths,
+                "progress": current_waypoint / max(total_waypoints, 1),
+            }
+        }
+        for cb in self._ws_callbacks:
+            try:
+                cb(payload)
+            except:
+                pass
 
     def start_status_polling(self, interval: float = 0.02):
         if self._polling_thread and self._polling_thread.is_alive():
@@ -269,21 +438,48 @@ class RobotService:
             self._polling_thread = None
         logger.info("Status polling stopped.")
 
+    def get_feedback_diagnostics(self) -> dict:
+        """获取机械臂驱动层的实时动力学与诊断数据"""
+        if self._driver and hasattr(self._driver, 'get_feedback_diagnostics'):
+            try:
+                return self._driver.get_feedback_diagnostics()
+            except Exception as e:
+                logger.warning(f"Error getting feedback diagnostics: {e}")
+        return {
+            "tcp_speed_actual": [0.0]*6,
+            "qd_actual": [0.0]*6,
+            "load": 0.0,
+            "error_status": 0,
+            "tool_vector_actual": [0.0]*6,
+        }
+
     def _poll_loop(self, interval: float):
         last_status = None
         while not self._stop_polling and self._is_connected:
             pose, _ = self.get_current_pose()
             joints, _ = self.get_current_joint()
             status = self._driver.get_running_state() if self._driver else 0
+            diagnostics = self.get_feedback_diagnostics()
             
             if status != last_status:
                 logger.info(f"Robot status changed: {status}")
                 last_status = status
                 
             if pose and joints:
+                msg_payload = {
+                    "pose": pose,
+                    "joint": joints,
+                    "status": status,
+                    "tcp_speed_actual": diagnostics.get("tcp_speed_actual", [0.0]*6),
+                    "tcp_speed_mm_s": diagnostics.get("tcp_speed_mm_s", 0.0),
+                    "qd_actual": diagnostics.get("qd_actual", [0.0]*6),
+                    "load": diagnostics.get("load", 0.0),
+                    "error_status": diagnostics.get("error_status", 0),
+                    "tool_vector_actual": diagnostics.get("tool_vector_actual", pose),
+                }
                 for cb in self._ws_callbacks:
                     try:
-                        cb({"type": "robot_state", "data": {"pose": pose, "joint": joints, "status": status}})
+                        cb({"type": "robot_state", "data": msg_payload})
                     except:
                         pass
             time.sleep(interval)

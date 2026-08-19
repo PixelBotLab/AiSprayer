@@ -159,12 +159,112 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   // ─── 8. Modal Dialog Config ─────────────────────────────────────────────
   const [modalConfig, setModalConfig] = useState<ModalConfig | null>(null);
 
+  // ─── 9. Robot Real-Time State (via WebSocket) ──────────────────────────
+  const [robotConnected, setRobotConnected] = useState<boolean>(false);
+  const robotWsRef = useRef<WebSocket | null>(null);
+  // Ref for per-WS-message projection of real TCP → pixel (avoids stale closure)
+  const sessionDataRef = useRef<typeof sessionData>(null);
+  useEffect(() => { sessionDataRef.current = sessionData; }, [sessionData]);
+
   // Sync external active template
   useEffect(() => {
     if (externalActiveTemplate && externalActiveTemplate !== activeTemplate) {
       handleSelectTemplate(externalActiveTemplate);
     }
   }, [externalActiveTemplate]);
+
+  // WebSocket: monitor robot connection status + real execution progress
+  useEffect(() => {
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const connect = () => {
+      ws = new WebSocket('ws://localhost:8000/api/calib/robot/ws');
+      robotWsRef.current = ws;
+
+      ws.onopen = () => {};
+      ws.onmessage = (e) => {
+        try {
+          const msg = JSON.parse(e.data) as { type: string; data: any };
+
+          if (msg.type === 'robot_state') {
+            // Mark robot as connected any time we get a valid state push
+            setRobotConnected(true);
+
+            // In real-exec mode: drive currentPixel + currentJoints from real TCP
+            setSimulationState((prev) => {
+              if (!prev?.isRealExec) return prev;
+              const pose: number[] = msg.data.pose ?? [];
+              if (pose.length < 3) return prev;
+
+              // Project TCP XYZ to 2D pixel using calibration
+              let pixel: [number, number] | null = null;
+              const sd = sessionDataRef.current;
+              if (sd?.T && sd.T.length >= 16) {
+                pixel = projectBasePointToPixel(
+                  [pose[0], pose[1], pose[2]],
+                  sd.T,
+                  { fx: sd.fx, fy: sd.fy, cx: sd.cx, cy: sd.cy }
+                );
+              }
+
+              const joints: number[] = (msg.data.joint ?? []).map((v: number) =>
+                typeof v === 'number' ? v : 0
+              );
+              if (onSimulationJointsChange) onSimulationJointsChange(joints);
+
+              return {
+                ...prev,
+                currentPixel: pixel ?? prev.currentPixel,
+                currentJoints: joints.length > 0 ? joints : prev.currentJoints,
+                currentTcpPose: {
+                  x: pose[0] ?? prev.currentTcpPose.x,
+                  y: pose[1] ?? prev.currentTcpPose.y,
+                  z: pose[2] ?? prev.currentTcpPose.z,
+                  rx: pose[3] ?? prev.currentTcpPose.rx,
+                  ry: pose[4] ?? prev.currentTcpPose.ry,
+                  rz: pose[5] ?? prev.currentTcpPose.rz,
+                },
+              };
+            });
+          } else if (msg.type === 'exec_progress') {
+            // Update progress bar and path index from real waypoint events
+            const d = msg.data as {
+              current_waypoint: number;
+              total_waypoints: number;
+              path_idx: number;
+              total_paths: number;
+              progress: number;
+            };
+            setSimulationState((prev) => {
+              if (!prev?.isRealExec) return prev;
+              const isDone = d.current_waypoint >= d.total_waypoints;
+              return {
+                ...prev,
+                progress: d.progress,
+                currentPathIndex: d.path_idx,
+                currentStep: d.current_waypoint,
+                totalSteps: d.total_waypoints,
+                isPlaying: !isDone,
+              };
+            });
+          }
+        } catch {}
+      };
+      ws.onclose = () => {
+        // When WS closes, robot might be disconnected
+        setRobotConnected(false);
+        reconnectTimer = setTimeout(connect, 3000);
+      };
+    };
+
+    connect();
+    return () => {
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      ws?.close();
+    };
+  }, []);
+
 
   // Load template list on mount
   useEffect(() => {
@@ -395,8 +495,8 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          point_coords: pts.map((p) => [p.x, p.y]),
-          point_labels: pts.map((p) => p.label),
+          points: pts.map((p) => [p.x, p.y]),
+          labels: pts.map((p) => p.label),
         }),
       });
       if (!res.ok) throw new Error('Predict failed');
@@ -422,10 +522,10 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const handleSaveAllSegMasks = async () => {
     if (!activeTemplate) return;
     try {
-      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/masks`, {
+      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/sam/save`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ masks: committedMasks }),
+        body: JSON.stringify({ committed_masks: committedMasks }),
       });
       if (!res.ok) throw new Error('Failed to save masks');
       setSavedMasks(committedMasks);
@@ -685,7 +785,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   };
 
   // ─── 3D/2D Synchronized Simulation Engine (Feature 7) ────────────────────
-  const startSimulation = (stateType: PathStateType = activeState) => {
+  const startSimulation = (stateType: PathStateType = activeState, targetPathId?: number | null) => {
     stopSimulation();
     const rep = stateType === 'poi' ? poiReport : (stateType === 'opt' ? optReport : rawReport);
     if (!rep?.path_reports || rep.path_reports.length === 0) {
@@ -699,6 +799,11 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       return;
     }
 
+    // Filter target path reports if a specific path is requested
+    const targetReports = (targetPathId !== undefined && targetPathId !== null)
+      ? rep.path_reports.filter((pr: any, idx: number) => (pr.path_id === targetPathId || idx + 1 === targetPathId))
+      : rep.path_reports;
+
     // Build dense playback steps
     const simSteps: Array<{
       q_deg: number[];
@@ -707,7 +812,8 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       pathIdx: number;
     }> = [];
 
-    rep.path_reports.forEach((pr, pIdx) => {
+    targetReports.forEach((pr, pIdx) => {
+      const realPIdx = rep.path_reports ? rep.path_reports.indexOf(pr) : pIdx;
       const tq = pr.trajectory_q || [];
       const tt = pr.trajectory_tcp || [];
       const totalPSteps = Math.min(tq.length, tt.length);
@@ -739,7 +845,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
           q_deg,
           tcp: tcpPose,
           pixel: pixelProj,
-          pathIdx: pIdx,
+          pathIdx: realPIdx >= 0 ? realPIdx : pIdx,
         });
       }
     });
@@ -915,6 +1021,58 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     simDataRef.current.speedMultiplier = speed;
     setSimulationState((prev) => (prev ? { ...prev, speed } : null));
   };
+
+  // ─── Direct Robot Path Execution with 2D Live Progress ────────────────────
+  const handleDirectExecutePath = async (fileName: string, stateType?: PathStateType, pathId?: number | null) => {
+    if (!activeTemplate) return;
+    const targetState = stateType || activeState;
+    handleSelectActiveState(targetState);
+
+    // Count total waypoints in the target paths for progress state initialisation
+    const srcPaths = targetState === 'poi' ? poiPaths : (targetState === 'opt' ? optPaths : rawPaths);
+    const filteredPaths = (pathId !== null && pathId !== undefined)
+      ? srcPaths.filter((p) => p.path_id === pathId)
+      : srcPaths;
+    const totalWaypoints = filteredPaths.reduce((sum, p) => sum + (p.points?.length ?? 0), 0);
+
+    // 1. Enter real-exec mode: show trajectory overlay, drive dot from real WS TCP data
+    stopSimulation();
+    setSimulationState({
+      isPlaying: true,
+      isRealExec: true,
+      progress: 0,
+      speed: 1.0,
+      currentPathIndex: 0,
+      currentStep: 0,
+      totalSteps: Math.max(totalWaypoints, 1),
+      currentJoints: [0, 0, 0, 0, 0, 0],
+      currentTcpPose: { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 },
+      currentPixel: null,
+      activeState: targetState,
+    });
+
+    // 2. Dispatch real robot execution asynchronously
+    try {
+      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/execute_yaml_path`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          file_name: fileName,
+          path_id: pathId,
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        console.error('Robot path execution error:', err.detail || 'Execution failed');
+      }
+    } catch (err: any) {
+      console.error('Failed to execute path on robot:', err);
+    } finally {
+      // Mark done when HTTP completes (WS exec_progress should have already done this)
+      setSimulationState((prev) => prev?.isRealExec ? { ...prev, isPlaying: false } : prev);
+    }
+  };
+
 
   // ─── Actions: Capture & Reconstruct ─────────────────────────────────────
   const handleTriggerCapture = async () => {
@@ -1253,7 +1411,12 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                     },
                   });
                 }}
-                onSimulatePath={(st) => startSimulation(st)}
+                rawPaths={rawPaths}
+                optPaths={optPaths}
+                poiPaths={poiPaths}
+                robotConnected={robotConnected}
+                onSimulatePath={(st, pId) => startSimulation(st, pId)}
+                onExecutePath={(fileName, st, pId) => handleDirectExecutePath(fileName, st, pId)}
                 onOpenDiagnostics={(st) => {
                   handleSelectActiveState(st);
                   setShowDiagnostics(true);
@@ -1302,6 +1465,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
 
       {/* Global Dialog Modal */}
       {modalConfig && <CustomModal config={modalConfig} onClose={() => setModalConfig(null)} />}
+
     </div>
   );
 };

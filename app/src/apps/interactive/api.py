@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 from pydantic import BaseModel
+from typing import Optional, List
 import os
 import math
 import time
@@ -10,6 +11,7 @@ import numpy as np
 import yaml
 import open3d as o3d
 from services.camera_service import camera_service
+from services.robot_service import robot_service
 from core.vision.point_cloud_processor import depth_to_pcd
 from apps.interactive.sam_service import sam_service
 from apps.interactive.reconstruction_service import reconstruction_service
@@ -572,3 +574,200 @@ def get_template_summary(name: str):
         "poi_report": poi_report,
         "urdf_tcp": urdf_tcp
     }
+
+
+# ─── Real Robot Path Waypoint Execution (move_l_queue) ───────────────────────
+
+class ExecuteYamlPathRequest(BaseModel):
+    file_name: str
+    path_id: Optional[int] = None # None or 0 means all paths, 1-based index/ID
+    # Linear motion parameters (MoveL queue)
+    speed_l: Optional[float] = None # mm/s (笛卡尔线速度)
+    acc_l: Optional[float] = None   # % (笛卡尔加速度百分比)
+    # Joint motion parameters (Go Home & MovJ to start point)
+    speed_j: Optional[float] = None # % (关节速度百分比)
+    acc_j: Optional[float] = None   # % (关节加速度百分比)
+    cp_ratio: Optional[int] = 50
+    # Backward compatibility fields
+    speed: Optional[float] = None
+    acc: Optional[float] = None
+
+@router.get("/templates/{name}/yaml_paths_info")
+def get_yaml_paths_info(name: str, file_name: str):
+    """
+    读取并解析指定 YAML 轨迹文件，返回包含的全部子路径及其点数摘要，供前端交互选择。
+    """
+    template_path = os.path.join(TEMPLATE_GROUP_DIR, name)
+    file_path = os.path.join(template_path, file_name)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail=f"File '{file_name}' not found in template '{name}'")
+    
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = yaml.safe_load(f) or {}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to parse YAML file: {e}")
+
+    paths = data.get("paths", [])
+    path_infos = []
+    total_pts = 0
+    for idx, p in enumerate(paths):
+        pts = p.get("points", [])
+        pts_count = len(pts)
+        total_pts += pts_count
+        path_infos.append({
+            "path_id": p.get("path_id", idx + 1),
+            "name": p.get("name", f"Path {idx + 1}"),
+            "point_count": pts_count
+        })
+
+    return {
+        "template": name,
+        "file_name": file_name,
+        "total_paths": len(path_infos),
+        "total_points": total_pts,
+        "paths": path_infos
+    }
+
+@router.post("/templates/{name}/execute_yaml_path")
+def execute_yaml_path(name: str, req: ExecuteYamlPathRequest):
+    """
+    根据选择的路径 (单条或全部)，提取 Waypoints 位姿并通过 robot_service 发送到真实机械臂执行：
+    1. 执行前先回到 Home 姿态 (使用关节参数 speed_j, acc_j)
+    2. 第 1 条 path 的第 1 个 waypoint 使用 move_j 过去 (使用关节参数 speed_j, acc_j)
+    3. 然后通过 robot_service.move_l_queue 连续直线执行 (使用线速度参数 speed_l, acc_l, cp_ratio)
+    """
+    if not robot_service.is_connected:
+        raise HTTPException(status_code=400, detail="Robot is not connected. Please connect robot first in control panel.")
+
+    template_path = os.path.join(TEMPLATE_GROUP_DIR, name)
+    file_path = os.path.join(template_path, req.file_name)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail=f"Path file '{req.file_name}' not found in template '{name}'")
+
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            data = yaml.safe_load(f) or {}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read YAML file: {e}")
+
+    raw_paths = data.get("paths", [])
+    if not raw_paths:
+        raise HTTPException(status_code=400, detail=f"No paths found in {req.file_name}")
+
+    # 筛选待执行的路径
+    target_paths = []
+    if req.path_id is not None and req.path_id > 0:
+        target_paths = [p for p in raw_paths if p.get("path_id") == req.path_id]
+        if not target_paths and len(raw_paths) >= req.path_id:
+            target_paths = [raw_paths[req.path_id - 1]]
+    else:
+        target_paths = raw_paths
+
+    if not target_paths:
+        raise HTTPException(status_code=400, detail=f"Selected path #{req.path_id} not found in {req.file_name}")
+
+    # 解析 MoveL (笛卡尔线运动) 与 MoveJ (关节运动) 速度/加速度参数，优先沿用控制面板当前设定值
+    curr_speed_l, curr_acc_l, curr_speed_j, curr_acc_j = robot_service.get_speed()
+    speed_l = req.speed_l if req.speed_l is not None else (req.speed if req.speed is not None else curr_speed_l)
+    acc_l = req.acc_l if req.acc_l is not None else (req.acc if req.acc is not None else curr_acc_l)
+    speed_j = req.speed_j if req.speed_j is not None else curr_speed_j
+    acc_j = req.acc_j if req.acc_j is not None else curr_acc_j
+
+    # 1. 在执行 path 之前先回到 Home 姿态 (使用 MoveJ 关节运动参数)
+    logger.info(f"execute_yaml_path: Moving robot to Home position (speed_j={speed_j}%, acc_j={acc_j}%) before trajectory execution...")
+    home_ok, home_err = robot_service.go_home(speed=speed_j, acc=acc_j)
+    if not home_ok:
+        raise HTTPException(status_code=500, detail=f"Failed to go home before path execution: {home_err}")
+
+    total_executed_pts = 0
+    executed_names = []
+    has_moved_j_to_start = False
+
+    # Count total waypoints across all target paths for progress tracking
+    all_poses_flat = []
+    for p in target_paths:
+        for pt in p.get("points", []):
+            if pt.get("tcp_pose_base"):
+                all_poses_flat.append(pt)
+    total_waypoints_all = len(all_poses_flat)
+    waypoints_done = 0
+
+    for p_idx, path in enumerate(target_paths):
+        pts = path.get("points", [])
+        poses = []
+        for pt in pts:
+            tcp = pt.get("tcp_pose_base")
+            if tcp:
+                poses.append({
+                    "x": float(tcp.get("x", 0.0)),
+                    "y": float(tcp.get("y", 0.0)),
+                    "z": float(tcp.get("z", 0.0)),
+                    "rx": float(tcp.get("rx", 0.0)),
+                    "ry": float(tcp.get("ry", 0.0)),
+                    "rz": float(tcp.get("rz", 0.0)),
+                    "is_radians": False, # YAML 中姿态角度为 deg
+                })
+        if poses:
+            path_title = path.get("name", f"Path {p_idx + 1}")
+            executed_names.append(path_title)
+
+            # 2. 第 1 条有效 path 的第 1 个 waypoint，使用 move_j 快速安全过渡过去 (使用关节参数)
+            if not has_moved_j_to_start:
+                first_pt = poses[0]
+                first_pose = [
+                    first_pt["x"],
+                    first_pt["y"],
+                    first_pt["z"],
+                    math.radians(first_pt["rx"]),
+                    math.radians(first_pt["ry"]),
+                    math.radians(first_pt["rz"])
+                ]
+                logger.info(f"execute_yaml_path: MovJ to 1st waypoint of {path_title} -> {first_pt} (speed_j={speed_j}%, acc_j={acc_j}%)")
+                j_ok, j_err = robot_service.move_to_pose_j(first_pose, speed=speed_j, acc=acc_j)
+                if not j_ok:
+                    raise HTTPException(status_code=500, detail=f"Failed to MovJ to start waypoint of {path_title}: {j_err}")
+                has_moved_j_to_start = True
+
+            # 3. 批量发送 waypoints：第 1 条 path 的第 1 个 waypoint 已经通过 MovJ 到达，跳过
+            #    后续 path 从第 1 个 waypoint 开始（没有做 MovJ 过渡）
+            exec_poses = poses[1:] if p_idx == 0 else poses
+            logger.info(f"execute_yaml_path: Executing {len(exec_poses)}/{len(poses)} waypoints on {path_title} "
+                        f"(skip 1st: {p_idx == 0}, speed_l={speed_l} mm/s, acc_l={acc_l}%, cp={req.cp_ratio})")
+            
+            batch_ok, batch_err = True, ""
+            if exec_poses:
+                batch_ok, batch_err = robot_service.move_l_queue(
+                    exec_poses,
+                    speed=speed_l,
+                    acc=acc_l,
+                    cp_ratio=98, #req.cp_ratio if req.cp_ratio is not None else 98,
+                    wait=True
+                )
+            if not batch_ok:
+                raise HTTPException(status_code=500, detail=f"Execution error on {path_title}: {batch_err}")
+            waypoints_done += len(poses)
+            total_executed_pts += len(poses)
+            # 批量执行完成后广播一次路径进度
+            robot_service.broadcast_exec_progress(
+                current_waypoint=waypoints_done,
+                total_waypoints=total_waypoints_all,
+                path_idx=p_idx,
+                total_paths=len(target_paths)
+            )
+
+    logger.info(f"execute_yaml_path: Returning robot to Home position after trajectory (speed_j={speed_j}%, acc_j={acc_j}%)...")
+    home_ok, home_err = robot_service.go_home(speed=speed_j, acc=acc_j)
+    if not home_ok:
+        raise HTTPException(status_code=500, detail=f"Failed to go home after path execution: {home_err}")
+
+
+    return {
+        "status": "success",
+        "message": f"Successfully executed {len(target_paths)} path(s) ({total_executed_pts} points): {', '.join(executed_names)}",
+        "executed_paths": len(target_paths),
+        "total_points": total_executed_pts
+    }
+
+
+

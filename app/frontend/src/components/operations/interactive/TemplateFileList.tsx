@@ -11,21 +11,32 @@ import {
   Trash2,
   Play,
   Activity,
+  Zap,
 } from 'lucide-react';
-import type { FileItem, PathStateType } from './types';
+import type { FileItem, PathStateType, ManualPathItem } from './types';
 
 interface TemplateFileListProps {
   files: FileItem[];
+  rawPaths?: ManualPathItem[];
+  optPaths?: ManualPathItem[];
+  poiPaths?: ManualPathItem[];
+  robotConnected?: boolean;
   onOpenDeleteFileModal: (f: string) => void;
-  onSimulatePath?: (state: PathStateType) => void;
+  onSimulatePath?: (state: PathStateType, pathId?: number | null) => void;
+  onExecutePath?: (fileName: string, state?: PathStateType, pathId?: number | null) => void;
   onOpenDiagnostics?: (state: PathStateType) => void;
   onSelectFile?: (fileName: string) => void;
 }
 
 export const TemplateFileList: React.FC<TemplateFileListProps> = ({
   files,
+  rawPaths = [],
+  optPaths = [],
+  poiPaths = [],
+  robotConnected = false,
   onOpenDeleteFileModal,
   onSimulatePath,
+  onExecutePath,
   onOpenDiagnostics,
   onSelectFile,
 }) => {
@@ -40,12 +51,20 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
     return () => window.removeEventListener('click', handleOutside);
   }, []);
 
+  const getPathsForFile = (fileName: string) => {
+    if (fileName.includes('poi.path') || fileName.includes('poi.report')) return poiPaths || [];
+    if (fileName.includes('opt.path') || fileName.includes('opt.report') || fileName.includes('opt_paths')) return optPaths || [];
+    if (fileName.includes('raw.path') || fileName.includes('raw.report') || fileName.includes('manual_paths')) return rawPaths || [];
+    return [];
+  };
+
   const getFileState = (fileName: string): PathStateType | null => {
     if (fileName.includes('poi.path') || fileName.includes('poi.report')) return 'poi';
     if (fileName.includes('opt.path') || fileName.includes('opt.report') || fileName.includes('opt_paths')) return 'opt';
     if (fileName.includes('raw.path') || fileName.includes('raw.report') || fileName.includes('manual_paths')) return 'raw';
     return null;
   };
+
 
   const getFileIcon = (fileName: string) => {
     if (fileName.endsWith('.jpg') || fileName.endsWith('.png'))
@@ -210,18 +229,121 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
                           <div className="flex items-center gap-1 shrink-0">
                             {/* Hover Quick Action Buttons (Feature 5 & 7) */}
                             {isPathYaml && (
-                              <div className="opacity-0 group-hover:opacity-100 flex items-center gap-0.5 transition-opacity">
-                                <button
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    if (onSimulatePath && stateType) onSimulatePath(stateType);
-                                  }}
-                                  className="px-1.5 py-0.5 rounded bg-sky-600 hover:bg-sky-500 text-white text-[9px] font-bold flex items-center gap-0.5 shadow transition-all"
-                                  title="Quick Simulation"
-                                >
-                                  <Play size={8} className="fill-white" />
-                                  <span>Sim</span>
-                                </button>
+                              <div className="opacity-0 group-hover:opacity-100 flex items-center gap-1 transition-opacity">
+                                {/* Sim Button with Hover Popover */}
+                                <div className="relative group/sim">
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (onSimulatePath && stateType) onSimulatePath(stateType, null);
+                                    }}
+                                    className="px-1.5 py-0.5 rounded bg-sky-600 hover:bg-sky-500 text-white text-[9px] font-bold flex items-center gap-0.5 shadow transition-all"
+                                    title="3D/2D Simulation"
+                                  >
+                                    <Play size={8} className="fill-white" />
+                                    <span>Sim</span>
+                                  </button>
+
+                                  {/* Sim Floating Path Selector Popover */}
+                                  {(() => {
+                                    const pList = getPathsForFile(file.name);
+                                    if (pList.length <= 1) return null;
+                                    return (
+                                      <div className="absolute right-0 top-full mt-1 z-50 hidden group-hover/sim:flex flex-col bg-slate-900/95 border border-slate-700 rounded-lg shadow-2xl p-1 text-[9.5px] w-40 backdrop-blur-md animate-fadeIn pointer-events-auto">
+                                        <div className="px-2 py-0.5 text-[8.5px] font-semibold text-slate-400 border-b border-slate-800 uppercase tracking-wider flex items-center gap-1">
+                                          <Play size={8} className="text-sky-400" />
+                                          <span>Simulate Path</span>
+                                        </div>
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            if (onSimulatePath && stateType) onSimulatePath(stateType, null);
+                                          }}
+                                          className="px-2 py-1 rounded text-left hover:bg-sky-600 text-slate-200 flex items-center justify-between transition-colors font-medium"
+                                        >
+                                          <span>All Paths (全部路径)</span>
+                                          <span className="text-[8.5px] font-mono text-sky-400">{pList.length}P</span>
+                                        </button>
+                                        {pList.map((p, idx) => {
+                                          const pId = p.path_id ?? (idx + 1);
+                                          return (
+                                            <button
+                                              key={pId}
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                if (onSimulatePath && stateType) onSimulatePath(stateType, pId);
+                                              }}
+                                              className="px-2 py-1 rounded text-left hover:bg-sky-600 text-slate-200 flex items-center justify-between transition-colors"
+                                            >
+                                              <span className="truncate">{p.name || `Path ${pId}`}</span>
+                                              <span className="text-[8.5px] font-mono text-slate-400">{p.points?.length || 0} pts</span>
+                                            </button>
+                                          );
+                                        })}
+                                      </div>
+                                    );
+                                  })()}
+                                </div>
+
+                                {/* Exec Button with Hover Popover — disabled when robot offline */}
+                                <div className="relative group/exec">
+                                  <button
+                                    disabled={!robotConnected}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (robotConnected && onExecutePath) onExecutePath(file.name, stateType || undefined, null);
+                                    }}
+                                    className={`px-1.5 py-0.5 rounded text-white text-[9px] font-bold flex items-center gap-0.5 shadow transition-all ${
+                                      robotConnected
+                                        ? 'bg-emerald-600 hover:bg-emerald-500 cursor-pointer'
+                                        : 'bg-slate-700 text-slate-500 cursor-not-allowed opacity-60'
+                                    }`}
+                                    title={robotConnected ? 'Execute on Real Robot' : 'Robot offline — connect first'}
+                                  >
+                                    <Zap size={8} className={robotConnected ? 'text-white' : 'text-slate-500'} />
+                                    <span>Exec</span>
+                                  </button>
+
+                                  {/* Exec Floating Path Selector Popover — only when connected */}
+                                  {robotConnected && (() => {
+                                    const pList = getPathsForFile(file.name);
+                                    if (pList.length <= 1) return null;
+                                    return (
+                                      <div className="absolute right-0 top-full mt-1 z-50 hidden group-hover/exec:flex flex-col bg-slate-900/95 border border-slate-700 rounded-lg shadow-2xl p-1 text-[9.5px] w-40 backdrop-blur-md animate-fadeIn pointer-events-auto">
+                                        <div className="px-2 py-0.5 text-[8.5px] font-semibold text-slate-400 border-b border-slate-800 uppercase tracking-wider flex items-center gap-1">
+                                          <Zap size={8} className="text-emerald-400" />
+                                          <span>Execute on Robot</span>
+                                        </div>
+                                        <button
+                                          onClick={(e) => {
+                                            e.stopPropagation();
+                                            if (onExecutePath) onExecutePath(file.name, stateType || undefined, null);
+                                          }}
+                                          className="px-2 py-1 rounded text-left hover:bg-emerald-600 text-slate-200 flex items-center justify-between transition-colors font-medium"
+                                        >
+                                          <span>All Paths (全部路径)</span>
+                                          <span className="text-[8.5px] font-mono text-emerald-400">{pList.length}P</span>
+                                        </button>
+                                        {pList.map((p, idx) => {
+                                          const pId = p.path_id ?? (idx + 1);
+                                          return (
+                                            <button
+                                              key={pId}
+                                              onClick={(e) => {
+                                                e.stopPropagation();
+                                                if (onExecutePath) onExecutePath(file.name, stateType || undefined, pId);
+                                              }}
+                                              className="px-2 py-1 rounded text-left hover:bg-emerald-600 text-slate-200 flex items-center justify-between transition-colors"
+                                            >
+                                              <span className="truncate">{p.name || `Path ${pId}`}</span>
+                                              <span className="text-[8.5px] font-mono text-slate-400">{p.points?.length || 0} pts</span>
+                                            </button>
+                                          );
+                                        })}
+                                      </div>
+                                    );
+                                  })()}
+                                </div>
                               </div>
                             )}
 
@@ -330,8 +452,20 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
               }}
               className="px-2 py-1 rounded text-left hover:bg-sky-600 text-slate-200 flex items-center gap-1.5"
             >
-              <Play size={11} />
+              <Play size={11} className="text-sky-400" />
               <span>Simulate ({contextMenu.state.toUpperCase()})</span>
+            </button>
+          )}
+          {(contextMenu.fileName.endsWith('.path.yaml') || contextMenu.fileName.includes('paths.yaml')) && (
+            <button
+              onClick={() => {
+                if (onExecutePath) onExecutePath(contextMenu.fileName, contextMenu.state);
+                setContextMenu(null);
+              }}
+              className="px-2 py-1 rounded text-left hover:bg-emerald-600 text-slate-200 flex items-center gap-1.5"
+            >
+              <Play size={11} className="text-emerald-400 fill-emerald-400" />
+              <span>Execute on Robot</span>
             </button>
           )}
           {contextMenu.fileName.includes('report') && contextMenu.state && (

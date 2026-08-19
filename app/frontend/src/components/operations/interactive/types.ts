@@ -88,7 +88,9 @@ export interface SimulationState {
   currentTcpPose: { x: number; y: number; z: number; rx: number; ry: number; rz: number };
   currentPixel: [number, number] | null; // projected [u, v]
   activeState: PathStateType;
+  isRealExec?: boolean; // true = driven by real robot WS events, no fake animation loop
 }
+
 
 export interface PathReportItem {
   path_id: number;

@@ -8,7 +8,9 @@ hardware:
     type: "dobot"               # 可选: inexbot, dobot
     ip: "192.168.5.1"           # 机械臂控制器 IP
     port: 29999                 # 机械臂控制端口 (dobot 默认 29999, inexbot 默认 6001)
-    global_speed_percent: 50    # 示教/远程/运行全局速度百分比 (startup 时 set_speed)
+    global_speed_factor: 50    # 示教/远程/运行全局速度百分比 (startup 时 set_speed)
+    max_tcp_speed_mm_s: 2000          # robot cr5最大线速度为2000mm/s, 在控制软件中设置
+    max_joint_speed_deg_s: [180, 180, 180, 180, 180, 180]  # robot cr5最大关节速度为180度/s, 在控制软件中设置
     robot_urdf: "app/urdf/cr5_robot.urdf" # cr5_robot.urdf/cr5_robot_with_gun.urdf
     robot_tcp: "spray_nozzle_link"
 

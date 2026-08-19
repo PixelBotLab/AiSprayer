@@ -95,3 +95,27 @@ class SprayerConfig:
     def camera_model(self):
         return self.config_data.get("hardware", {}).get("camera", {}).get("model", "orbbec")
 
+    @property
+    def global_speed_factor(self) -> int:
+        """示教/远程/运行全局速度百分比 (startup 时 set_speed, 默认 50)"""
+        robot_cfg = self.config_data.get("hardware", {}).get("robot", {})
+        return int(robot_cfg.get("global_speed_factor", robot_cfg.get("global_speed_percent", 50)))
+
+    @property
+    def global_speed_percent(self) -> int:
+        """全局速度百分比（兼容别名）"""
+        return self.global_speed_factor
+
+    @property
+    def max_tcp_speed_mm_s(self) -> float:
+        """机器人最大末端 TCP 线速度 (mm/s, 默认 2000.0)"""
+        robot_cfg = self.config_data.get("hardware", {}).get("robot", {})
+        return float(robot_cfg.get("max_tcp_speed_mm_s", 2000.0))
+
+    @property
+    def max_joint_speed_deg_s(self) -> list[float]:
+        """机器人最大关节速度 (度/s, 6轴列表, 默认 [180, 180, 180, 180, 180, 180])"""
+        robot_cfg = self.config_data.get("hardware", {}).get("robot", {})
+        speeds = robot_cfg.get("max_joint_speed_deg_s", [180.0, 180.0, 180.0, 180.0, 180.0, 180.0])
+        return [float(x) for x in speeds]
+

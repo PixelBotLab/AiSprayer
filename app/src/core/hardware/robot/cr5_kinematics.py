@@ -532,6 +532,10 @@ class CR5Kinematics:
             return PI
         return math.acos(ratio)
 
+    def shoulder_q1_half_separation_rad(self, T_urdf: np.ndarray) -> float:
+        """URDF 4×4 下两 q1 解析支半角（弧度），与 check_singularity_risk 肩门一致。"""
+        return self._shoulder_q1_half_separation_rad(T_urdf)
+
     def check_singularity_risk(self, q_urdf: list[float] | np.ndarray, T: np.ndarray = None) -> dict:
         """
         Wrist:  sin(q5)≈0 → J4 ∥ J6 (flip-wrist pair collapses). Works for q5≈0°/±180°/360°.

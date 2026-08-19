@@ -25,7 +25,11 @@ class DobotDriver(BaseRobotDriver):
         self._global_speed = 10
         # 30004 real-time data cache
         self._cached_joint: Optional[List[float]] = None   # degrees
-        self._cached_pose: Optional[List[float]] = None    # mm, degrees
+        self._cached_pose: Optional[List[float]] = None    # mm, degrees (tool_vector_actual)
+        self._cached_tcp_speed_actual: Optional[List[float]] = None # mm/s, deg/s (TCP_speed_actual)
+        self._cached_qd_actual: Optional[List[float]] = None        # deg/s (qd_actual)
+        self._cached_load: float = 0.0                             # kg (load)
+        self._cached_error_status: int = 0                         # int (error_status)
         self._cached_speed_l: float = 10.0
         self._cached_acc_l: float = 10.0
         self._cached_speed_j: float = 10.0
@@ -45,19 +49,9 @@ class DobotDriver(BaseRobotDriver):
             time.sleep(0.5)
             self.dashboard.EnableRobot()
             
-            # Set global speed factor to 10% and explicit MoveL/MoveJ speeds to 10%
-            self.set_global_speed(10)
-            try:
-                self.dashboard.SpeedL(10)
-                self.dashboard.AccL(10)
-                self.dashboard.SpeedJ(10)
-                self.dashboard.AccJ(10)
-                logger.info("Dobot initialized with 10% global speed factor, SpeedL=10, SpeedJ=10, AccL=10, AccJ=10.")
-            except Exception as e:
-                logger.warning(f"Could not set initial SpeedL/SpeedJ on dashboard: {e}")
-
             if self.tool_num > 0:
                 self.set_tool_number(self.tool_num)
+                logger.info(f"Dobot tool number set to {self.tool_num}")
 
             # Start 30004 real-time feedback thread
             self._start_feedback_thread()
@@ -110,8 +104,7 @@ class DobotDriver(BaseRobotDriver):
             self.feedback = None
 
     def _feedback_loop(self):
-        """Continuously read from 30004 at ~200Hz and cache joint/pose data."""
-        timeouts = 0
+        """Continuously read from 30004 at ~200Hz and cache joint/pose/dynamics data."""
         while not self._stop_feedback and self._connected:
             try:
                 data = self.feedback.feedBackData()
@@ -119,12 +112,24 @@ class DobotDriver(BaseRobotDriver):
                 if data is not None and len(data) > 0:
                     d = data[0]
                     # q_actual: joint angles in degrees
-                    q = d['q_actual'].tolist()
-                    self._cached_joint = q
+                    self._cached_joint = d['q_actual'].tolist()
                     # tool_vector_actual: [X(mm), Y(mm), Z(mm), Rx(deg), Ry(deg), Rz(deg)]
-                    tcp = d['tool_vector_actual'].tolist()
-                    self._cached_pose = tcp
+                    self._cached_pose = d['tool_vector_actual'].tolist()
                     
+                    if 'TCP_speed_actual' in d.dtype.names:
+                        tcp_spd = d['TCP_speed_actual']
+                        raw_spd = tcp_spd.tolist() if hasattr(tcp_spd, 'tolist') else [float(x) for x in tcp_spd]
+                        self._cached_tcp_speed_actual = [0.0 if abs(x) < 1e-3 else float(x) for x in raw_spd]
+                    if 'qd_actual' in d.dtype.names:
+                        qd = d['qd_actual']
+                        raw_qd = qd.tolist() if hasattr(qd, 'tolist') else [float(x) for x in qd]
+                        self._cached_qd_actual = [0.0 if abs(x) < 1e-3 else float(x) for x in raw_qd]
+                    if 'load' in d.dtype.names:
+                        load_val = float(d['load'].item())
+                        self._cached_load = 0.0 if abs(load_val) < 1e-3 else load_val
+                    if 'error_status' in d.dtype.names:
+                        self._cached_error_status = int(d['error_status'].item())
+
                     if 'xyz_velocity_ratio' in d.dtype.names:
                         self._cached_speed_l = float(d['xyz_velocity_ratio'].item())
                     if 'xyz_acceleration_ratio' in d.dtype.names:
@@ -137,16 +142,27 @@ class DobotDriver(BaseRobotDriver):
                         self._cached_running_status = int(d['running_status'].item())
             except DobotTimeoutError as e:
                 # 反馈端口每 8ms 推一包，偶发超时视为可恢复，连续失败才退出
-                timeouts += 1
                 if self._stop_feedback:
                     break
-                logger.warning(f"30004 feedback timeout ({timeouts}/5): {e}")
-                if timeouts >= 5:
-                    break
+                logger.warning(f"30004 feedback timeout: {e}")
             except Exception as e:
                 if not self._stop_feedback:
-                    logger.debug(f"Feedback read error: {e}")
-                break
+                    logger.error(f"Feedback read error: {e}")
+
+    def get_feedback_diagnostics(self) -> dict:
+        """获取实时动力学与诊断反馈数据 (TCP 笛卡尔实际速度, 实际关节速度, 负载重量, 报警状态等)"""
+        tcp_spd = self._cached_tcp_speed_actual or [0.0]*6
+        # 计算 TCP 线速度合量 (mm/s)，取 Vx/Vy/Vz 欧几里得范数
+        import math as _math
+        tcp_speed_mm_s = _math.sqrt(sum(v**2 for v in tcp_spd[:3]))
+        return {
+            "tcp_speed_actual": tcp_spd,
+            "tcp_speed_mm_s": tcp_speed_mm_s,  # 预计算标量，单位 mm/s
+            "qd_actual": self._cached_qd_actual or [0.0]*6,
+            "load": self._cached_load,
+            "error_status": self._cached_error_status,
+            "tool_vector_actual": self._cached_pose or [0.0]*6,
+        }
 
     def get_running_state(self) -> int:
         if not self._connected:
@@ -293,7 +309,7 @@ class DobotDriver(BaseRobotDriver):
             self._wait_motion_done()
         return 0
 
-    def move_l(self, pose: PoseLike, velocity: float = 10.0, acc: float = 20.0, dec: float = 20.0, tool_num: int = 0, wait: bool = True) -> int:
+    def move_l(self, pose: PoseLike, velocity_mm: float = 10.0, acc: float = 20.0, dec: float = 20.0, tool_num: int = 0, wait: bool = True) -> int:
         if not self._connected or not self.move:
             return -2
         lst = _to_list(pose)
@@ -302,7 +318,8 @@ class DobotDriver(BaseRobotDriver):
         
         try:
             if self.dashboard:
-                self.dashboard.SpeedL(int(velocity))
+                #self.dashboard.SpeedL(int(velocity))
+                self.dashboard.TCPSpeed(velocity_mm)
                 self.dashboard.AccL(int(acc))
             self.move.MovL(x, y, z, rx_deg, ry_deg, rz_deg)
         except DobotApiError as e:
@@ -311,6 +328,7 @@ class DobotDriver(BaseRobotDriver):
         
         if wait:
             self._wait_motion_done()
+            self.dashboard.TCPSpeedEnd()
         return 0
 
     def move_j_queue(
@@ -349,7 +367,7 @@ class DobotDriver(BaseRobotDriver):
     def move_l_queue(
         self, 
         poses: List[PoseLike], 
-        velocity: float = 10.0, 
+        velocity_mm: float = 10.0, 
         acc: float = 20.0, 
         dec: float = 20.0,
         tool_num: int = 0,
@@ -362,7 +380,8 @@ class DobotDriver(BaseRobotDriver):
         try:
             if self.dashboard:
                 self.dashboard.CP(cp_ratio)
-                self.dashboard.SpeedL(int(velocity))
+                self.dashboard.TCPSpeed(velocity_mm)
+                #self.dashboard.SpeedL(int(velocity))
                 self.dashboard.AccL(int(acc))
 
             for pose in poses:
@@ -371,11 +390,13 @@ class DobotDriver(BaseRobotDriver):
                 rx_deg, ry_deg, rz_deg = math.degrees(lst[3]), math.degrees(lst[4]), math.degrees(lst[5])
                 self.move.MovL(x, y, z, rx_deg, ry_deg, rz_deg)
         except DobotApiError as e:
+            self.dashboard.TCPSpeedEnd()
             logger.error(f"MovL queue failed: {e}")
             return -1
             
         if wait:
             self._wait_motion_done()
+            self.dashboard.TCPSpeedEnd()
             
         return 0
 
@@ -407,11 +428,11 @@ class DobotDriver(BaseRobotDriver):
             return 20.0, 20.0, 20.0, 20.0
         return self._cached_speed_l, self._cached_acc_l, self._cached_speed_j, self._cached_acc_j
 
-    def go_home(self, wait: bool = True, velocity: Optional[float] = None) -> int:
-        if velocity is not None:
-            self.set_global_speed(int(velocity))
+    def go_home(self, wait: bool = True, velocity: Optional[float] = None, acc: Optional[float] = None) -> int:
+        vel = velocity if velocity is not None else 20.0
+        acc_val = acc if acc is not None else 20.0
         # Default home position for Dobot
-        return self.move_joint([0, 0, -90, -90, -90, 0], wait=wait)
+        return self.move_joint([0, 0, -90, -90, -90, 0], velocity=vel, acc=acc_val, wait=wait)
 
     def pause(self) -> bool:
         if not self._connected:

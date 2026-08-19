@@ -81,6 +81,13 @@ def robot_zero(req: HomeReq):
         raise HTTPException(status_code=400, detail=msg)
     return {"status": "ok"}
 
+@calib_router.post("/robot/fold")
+def robot_fold(req: HomeReq):
+    success, msg = robot_service.go_fold(speed=req.speed, acc=req.acc)
+    if not success:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"status": "ok"}
+
 @calib_router.post("/robot/home")
 def robot_home(req: HomeReq):
     success, msg = robot_service.go_home(speed=req.speed, acc=req.acc)
@@ -91,7 +98,20 @@ def robot_home(req: HomeReq):
 @calib_router.get("/robot/speed")
 def get_robot_speed():
     speed_l, acc_l, speed_j, acc_j = robot_service.get_speed()
-    return {"speed_l": speed_l, "acc_l": acc_l, "speed_j": speed_j, "acc_j": acc_j}
+    diag = robot_service.get_feedback_diagnostics()
+    return {
+        "speed_l": speed_l,
+        "acc_l": acc_l,
+        "speed_j": speed_j,
+        "acc_j": acc_j,
+        "global_speed_factor": robot_service.global_speed_factor,
+        "max_tcp_speed_mm_s": robot_service.max_tcp_speed_mm_s,
+        "max_joint_speed_deg_s": robot_service.max_joint_speed_deg_s,
+        "tcp_speed_actual": diag.get("tcp_speed_actual", [0.0]*6),
+        "qd_actual": diag.get("qd_actual", [0.0]*6),
+        "load": diag.get("load", 0.0),
+        "error_status": diag.get("error_status", 0),
+    }
 
 @calib_router.post("/robot/speed")
 def set_robot_speed(req: SpeedReq):

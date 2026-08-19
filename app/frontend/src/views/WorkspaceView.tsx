@@ -9,6 +9,11 @@ interface RobotState {
   pose: number[];
   joint: number[];
   status?: number;
+  tcp_speed_actual?: number[];
+  qd_actual?: number[];
+  load?: number;
+  error_status?: number;
+  tool_vector_actual?: number[];
 }
 
 interface WorkspaceViewProps {
