@@ -35,6 +35,10 @@ class DobotDriver(BaseRobotDriver):
         self._cached_speed_j: float = 10.0
         self._cached_acc_j: float = 10.0
         self._cached_running_status: int = 0
+        self._cached_hand_type: List[int] = [0, 0, 0, 0]   # 1008~1011 手系 (int8 x4)
+        self._cached_tool_index: int = 0                    # 1013 当前工具坐标系索引
+        self._cached_run_queued_cmd: int = 0                # 1014 算法队列运行标志 / 当前执行段序号
+        self._cached_velocity_ratio: int = 0                # 1016 关节速度比例 (%)
         self._feedback_thread: Optional[threading.Thread] = None
         self._stop_feedback = False
 
@@ -45,9 +49,11 @@ class DobotDriver(BaseRobotDriver):
             self._connected = True
             
             # Enable robot
-            self.dashboard.ClearError()
+            r = self.dashboard.ClearError()
+            logger.info(f"ClearError: {r}")
             time.sleep(0.5)
-            self.dashboard.EnableRobot()
+            r = self.dashboard.EnableRobot()
+            logger.info(f"EnableRobot: {r}")
             
             if self.tool_num > 0:
                 self.set_tool_number(self.tool_num)
@@ -66,7 +72,8 @@ class DobotDriver(BaseRobotDriver):
         self._stop_feedback_thread()
         if self._connected and self.dashboard:
             try:
-                self.dashboard.DisableRobot()
+                r = self.dashboard.DisableRobot()
+                logger.info(f"DisableRobot: {r}")
                 self.dashboard.close()
             except Exception:
                 pass
@@ -140,6 +147,15 @@ class DobotDriver(BaseRobotDriver):
                         self._cached_acc_j = float(d['r_acceleration_ratio'].item())
                     if 'running_status' in d.dtype.names:
                         self._cached_running_status = int(d['running_status'].item())
+                    if 'hand_type' in d.dtype.names:
+                        ht = d['hand_type']
+                        self._cached_hand_type = [int(x) for x in (ht.tolist() if hasattr(ht, 'tolist') else list(ht))]
+                    if 'tool_index' in d.dtype.names:
+                        self._cached_tool_index = int(d['tool_index'].item())
+                    if 'run_queued_cmd' in d.dtype.names:
+                        self._cached_run_queued_cmd = int(d['run_queued_cmd'].item())
+                    if 'velocity_ratio' in d.dtype.names:
+                        self._cached_velocity_ratio = int(d['velocity_ratio'].item())
             except DobotTimeoutError as e:
                 # 反馈端口每 8ms 推一包，偶发超时视为可恢复，连续失败才退出
                 if self._stop_feedback:
@@ -154,7 +170,7 @@ class DobotDriver(BaseRobotDriver):
         tcp_spd = self._cached_tcp_speed_actual or [0.0]*6
         # 计算 TCP 线速度合量 (mm/s)，取 Vx/Vy/Vz 欧几里得范数
         import math as _math
-        tcp_speed_mm_s = _math.sqrt(sum(v**2 for v in tcp_spd[:3]))
+        tcp_speed_mm_s = _math.sqrt(sum(v**2 for v in tcp_spd[:3])) * 1000
         return {
             "tcp_speed_actual": tcp_spd,
             "tcp_speed_mm_s": tcp_speed_mm_s,  # 预计算标量，单位 mm/s
@@ -162,6 +178,12 @@ class DobotDriver(BaseRobotDriver):
             "load": self._cached_load,
             "error_status": self._cached_error_status,
             "tool_vector_actual": self._cached_pose or [0.0]*6,
+            "hand_type": self._cached_hand_type,         # int8 x4，手系配置
+            "tool_index": self._cached_tool_index,       # 当前工具坐标系索引
+            "run_queued_cmd": self._cached_run_queued_cmd,  # 算法队列当前执行段序号
+            "velocity_ratio": self._cached_velocity_ratio,      # 1016 关节速度比例 (%)
+            "xyz_velocity_ratio": int(self._cached_speed_l),    # 1019 笛卡尔位置速度比例 (%)
+            "r_velocity_ratio": int(self._cached_speed_j),      # 1020 笛卡尔姿态速度比例 (%)
         }
 
     def get_running_state(self) -> int:
@@ -278,10 +300,13 @@ class DobotDriver(BaseRobotDriver):
         rx_deg, ry_deg, rz_deg = math.degrees(lst[3]), math.degrees(lst[4]), math.degrees(lst[5])
         
         try:
-            if self.dashboard:
-                self.dashboard.SpeedJ(int(velocity))
-                self.dashboard.AccJ(int(acc))
-            self.move.MovJ(x, y, z, rx_deg, ry_deg, rz_deg)
+            #if self.dashboard:
+            #    r = self.dashboard.SpeedJ(int(velocity))
+            #    logger.debug(f"SpeedJ({int(velocity)}): {r}")
+            #    r = self.dashboard.AccJ(int(acc))
+            #    logger.debug(f"AccJ({int(acc)}): {r}")
+            r = self.move.MovJ(x, y, z, rx_deg, ry_deg, rz_deg, tool=tool_num, speedJ=velocity, accJ=acc)
+            logger.info(f"MovJ({x:.2f},{y:.2f},{z:.2f},{rx_deg:.2f},{ry_deg:.2f},{rz_deg:.2f},tool={tool_num},speedJ={velocity},accJ={acc}): {r}")
         except DobotApiError as e:
             logger.error(f"MovJ failed: {e}")
             return -1
@@ -297,10 +322,13 @@ class DobotDriver(BaseRobotDriver):
             joints.extend([0.0]*(6-len(joints)))
             
         try:
-            if self.dashboard:
-                self.dashboard.SpeedJ(int(velocity))
-                self.dashboard.AccJ(int(acc))
-            self.move.JointMovJ(joints[0], joints[1], joints[2], joints[3], joints[4], joints[5])
+            #if self.dashboard:
+                #r = self.dashboard.SpeedJ(int(velocity))
+                #logger.debug(f"SpeedJ({int(velocity)}): {r}")
+                #r = self.dashboard.AccJ(int(acc))
+                #logger.debug(f"AccJ({int(acc)}): {r}")
+            r = self.move.JointMovJ(joints[0], joints[1], joints[2], joints[3], joints[4], joints[5], speedJ=velocity, accJ=acc)
+            logger.info(f"JointMovJ({[round(j,2) for j in joints]},speed={velocity},acc={acc}): {r}")
         except DobotApiError as e:
             logger.error(f"JointMovJ failed: {e}")
             return -1
@@ -318,17 +346,20 @@ class DobotDriver(BaseRobotDriver):
         
         try:
             if self.dashboard:
-                #self.dashboard.SpeedL(int(velocity))
-                self.dashboard.TCPSpeed(velocity_mm)
-                self.dashboard.AccL(int(acc))
-            self.move.MovL(x, y, z, rx_deg, ry_deg, rz_deg)
+                r = self.dashboard.TCPSpeed(velocity_mm)
+                logger.debug(f"TCPSpeed({velocity_mm}): {r}")
+                #r = self.dashboard.AccL(int(acc))
+                #logger.debug(f"AccL({int(acc)}): {r}")
+            r = self.move.MovL(x, y, z, rx_deg, ry_deg, rz_deg, tool=tool_num, accL=acc)
+            logger.info(f"MovL({x:.2f},{y:.2f},{z:.2f},{rx_deg:.2f},{ry_deg:.2f},{rz_deg:.2f},{tool_num},{velocity_mm},{acc}): {r}")
         except DobotApiError as e:
             logger.error(f"MovL failed: {e}")
             return -1
         
         if wait:
             self._wait_motion_done()
-            self.dashboard.TCPSpeedEnd()
+            r = self.dashboard.TCPSpeedEnd()
+            logger.debug(f"TCPSpeedEnd: {r}")
         return 0
 
     def move_j_queue(
@@ -346,15 +377,19 @@ class DobotDriver(BaseRobotDriver):
             
         try:
             if self.dashboard:
-                self.dashboard.CP(cp_ratio)
-                self.dashboard.SpeedJ(int(velocity))
-                self.dashboard.AccJ(int(acc))
+                r = self.dashboard.CP(cp_ratio)
+                logger.debug(f"CP({cp_ratio}): {r}")
+                #r = self.dashboard.SpeedJ(int(velocity))
+                #logger.debug(f"SpeedJ({int(velocity)}): {r}")
+                #r = self.dashboard.AccJ(int(acc))
+                #logger.debug(f"AccJ({int(acc)}): {r}")
 
-            for pose in poses:
+            for i, pose in enumerate(poses):
                 lst = _to_list(pose)
                 x, y, z = lst[0], lst[1], lst[2]
                 rx_deg, ry_deg, rz_deg = math.degrees(lst[3]), math.degrees(lst[4]), math.degrees(lst[5])
-                self.move.MovJ(x, y, z, rx_deg, ry_deg, rz_deg)
+                r = self.move.MovJ(x, y, z, rx_deg, ry_deg, rz_deg, tool=tool_num, speedJ=velocity, accJ=acc)
+                logger.info(f"MovJ[{i}]({x:.2f},{y:.2f},{z:.2f},tool={tool_num},speedJ={velocity},accJ={acc}): {r}")
         except DobotApiError as e:
             logger.error(f"MovJ queue failed: {e}")
             return -1
@@ -379,24 +414,29 @@ class DobotDriver(BaseRobotDriver):
             
         try:
             if self.dashboard:
-                self.dashboard.CP(cp_ratio)
-                self.dashboard.TCPSpeed(velocity_mm)
-                #self.dashboard.SpeedL(int(velocity))
-                self.dashboard.AccL(int(acc))
+                r = self.dashboard.CP(cp_ratio)
+                logger.debug(f"CP({cp_ratio}): {r}")
+                r = self.dashboard.TCPSpeed(velocity_mm)
+                logger.debug(f"TCPSpeed({velocity_mm}): {r}")
+                #r = self.dashboard.AccL(int(acc))
+                #logger.debug(f"AccL({int(acc)}): {r}")
 
-            for pose in poses:
+            for i, pose in enumerate(poses):
                 lst = _to_list(pose)
                 x, y, z = lst[0], lst[1], lst[2]
                 rx_deg, ry_deg, rz_deg = math.degrees(lst[3]), math.degrees(lst[4]), math.degrees(lst[5])
-                self.move.MovL(x, y, z, rx_deg, ry_deg, rz_deg)
+                r = self.move.MovL(x, y, z, rx_deg, ry_deg, rz_deg, tool=tool_num, accL=acc)
+                logger.info(f"MovL[{i}]({x:.2f},{y:.2f},{z:.2f},tool={tool_num},speedL={velocity_mm},accL={acc}): {r}")
         except DobotApiError as e:
-            self.dashboard.TCPSpeedEnd()
+            r = self.dashboard.TCPSpeedEnd()
+            logger.debug(f"TCPSpeedEnd (on error): {r}")
             logger.error(f"MovL queue failed: {e}")
             return -1
             
         if wait:
             self._wait_motion_done()
-            self.dashboard.TCPSpeedEnd()
+            r = self.dashboard.TCPSpeedEnd()
+            logger.debug(f"TCPSpeedEnd: {r}")
             
         return 0
 
@@ -416,7 +456,8 @@ class DobotDriver(BaseRobotDriver):
         if not self._connected or not self.dashboard:
             return False
         try:
-            self.dashboard.SpeedFactor(int(speed))
+            r = self.dashboard.SpeedFactor(int(speed))
+            logger.info(f"SpeedFactor({int(speed)}): {r}")
         except DobotApiError as e:
             logger.error(f"Error setting global speed: {e}")
             return False
@@ -438,9 +479,10 @@ class DobotDriver(BaseRobotDriver):
         if not self._connected:
             return False
         try:
-            self.dashboard.pause()
+            resp = self.dashboard.pause()
+            logger.info(f"Dobot pause response: {resp}")
             return True
-        except Exception as e:
+        except DobotApiError as e:
             logger.error(f"Error pausing robot: {e}")
             return False
 
@@ -448,9 +490,10 @@ class DobotDriver(BaseRobotDriver):
         if not self._connected:
             return False
         try:
-            self.dashboard.Continue()
+            resp = self.dashboard.Continue()
+            logger.info(f"Dobot resume response: {resp}")
             return True
-        except Exception as e:
+        except DobotApiError as e:
             logger.error(f"Error resuming robot: {e}")
             return False
 
@@ -458,7 +501,8 @@ class DobotDriver(BaseRobotDriver):
         if not self._connected:
             return False
         try:
-            self.dashboard.EmergencyStop()
+            r = self.dashboard.EmergencyStop()
+            logger.info(f"EmergencyStop: {r}")
             return True
         except Exception as e:
             logger.error(f"Error emergency stopping robot: {e}")

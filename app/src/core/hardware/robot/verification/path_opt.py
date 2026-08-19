@@ -14,15 +14,15 @@ MoveL（笛卡尔直线 + 过渡圆角），不下发带时间戳的稠密关节
 搜索流程
 --------
 1. 三轴独立容差离散化：在局部工具坐标系内旋复合 R_nom * R_xyz(dx, dy, dz)
+   （R_xyz 与 scipy Euler 'xyz' 相同，即 Rz @ Ry @ Rx）
 2. 锚点姿态硬包络：超出则按相对 Euler-xyz 裁剪回边界；同一姿态只保留
    与原始目标测地夹角最小的那个
 3. 零偏代价：能垂直喷则垂直喷（wx/wy 大、wz 很小），只有边不可行时 DP 才会动用倾角
 4. 节点硬过滤：关节超限或肩/肘/腕奇异的 IK 解直接丢弃
-5. 10 cm MoveL 抽检：位置线性插值 + 四元数 Slerp；
-        用 get_best_ik_controller 连续跟分支，拦截无解 / 奇异 / 超限 / 翻腕跳变
-        （点数由 movel_check_spacing_mm 与 num/max_movel_checks 决定）
-6. Viterbi DP 全局回溯 + beam，秒级给出一条无奇异、无跳变的稀疏序列
-7. 若挂了 KinematicChainVerifier，再用 1.5 mm 密采样做硬门
+5. 相邻 waypoint 之间的 MoveL 抽检：O(1) 预筛（肘腕家族 + 按实际段长缩放的整段行程）
+        后按间距采样；45° 只约束相邻抽检点。上游稀疏点典型间距约 10 cm，不是固定段长
+6. Viterbi DP 全局回溯 + beam；本层断连时回退该层全量候选
+7. dense_verify=True 且挂了 KinematicChainVerifier 时，optimize() 用 1.5 mm 密采样做硬门
 
 坐标系与单位
 ------------
@@ -41,14 +41,21 @@ from typing import Any, Callable, Optional
 import numpy as np
 from scipy.spatial.transform import Rotation as R_scipy
 
-from ..cr5_kinematics import CR5Kinematics
+from ..cr5_kinematics import CR5Kinematics, _SHOULDER_HALF_RAD, _SING_SIN
 from .path_interpolator import matrix_to_pose_dict, pose_dict_to_matrix
 
 logger = logging.getLogger(__name__)
 
 PI = math.pi
-# 与 KinematicChainVerifier.BRANCH_JUMP_DEG 对齐：单步超过该值视为换支 / 翻腕
+# 与 KinematicChainVerifier.BRANCH_JUMP_DEG 对齐：相邻抽检点超过该值视为换支 / 翻腕
 _BRANCH_JUMP_DEG = 45.0
+# 跟支到达终点后，与节点解析解的最大允许偏差（同支数值误差，远小于 180° 换支）
+_BRANCH_MATCH_DEG = 5.0
+# 整段起终点允许的单轴行程默认上限（度）。按段长放大，且远宽于相邻 45°，
+# 避免把平滑走出 50–90° 的合法边误杀，同时把明显换支的边挡在 IK 循环外。
+_SEGMENT_TRAVEL_DEG = 120.0
+_SEGMENT_TRAVEL_CAP_DEG = 170.0
+_SEGMENT_TRAVEL_DEG_PER_MM = 0.9
 # 无 init_q 时的默认种子构型 (Dobot CR5 Home 姿态 [0, 0, -90, -90, -90, 0]°)
 _DEFAULT_SEED_Q = np.array([0.0, 0.0, -PI / 2.0, -PI / 2.0, -PI / 2.0, 0.0], dtype=np.float64)
 
@@ -71,32 +78,175 @@ def _axis_grid(spec: tuple[float, float, float]) -> np.ndarray:
 
 
 def _geodesic_deg(rot_a: R_scipy, rot_b: R_scipy) -> float:
-    """两姿态在 SO(3) 上的测地角（度），即相对旋转向量的模。"""
+    """两姿态在 SO(3) 上的测地角（度）。保留供单测与外部兼容。"""
     return float(np.degrees((rot_a.inv() * rot_b).magnitude()))
 
 
-def _quat_key(rot: R_scipy) -> tuple:
-    """
-    四元数去重键。q 与 -q 是同一旋转（双覆盖），统一把 q.w>=0；
-    再量化到 5 位小数，使锚点投影后塌缩的网格点能合并。
-    """
-    q = rot.as_quat()
+def _geodesic_R_deg(Ra: np.ndarray, Rb: np.ndarray) -> float:
+    """两 3×3 旋转矩阵的测地角（度）。"""
+    c = 0.5 * (float(np.trace(Ra.T @ Rb)) - 1.0)
+    return float(np.degrees(math.acos(min(1.0, max(-1.0, c)))))
+
+
+def _R_from_euler_xyz_deg(rx: float, ry: float, rz: float) -> np.ndarray:
+    """与 scipy Rotation.from_euler('xyz') 一致：R = Rz @ Ry @ Rx。"""
+    ax, ay, az = math.radians(rx), math.radians(ry), math.radians(rz)
+    cx, sx = math.cos(ax), math.sin(ax)
+    cy, sy = math.cos(ay), math.sin(ay)
+    cz, sz = math.cos(az), math.sin(az)
+    Rx = np.array([[1.0, 0.0, 0.0], [0.0, cx, -sx], [0.0, sx, cx]], dtype=np.float64)
+    Ry = np.array([[cy, 0.0, sy], [0.0, 1.0, 0.0], [-sy, 0.0, cy]], dtype=np.float64)
+    Rz = np.array([[cz, -sz, 0.0], [sz, cz, 0.0], [0.0, 0.0, 1.0]], dtype=np.float64)
+    return Rz @ Ry @ Rx
+
+
+def _euler_xyz_deg_from_R(Rm: np.ndarray) -> np.ndarray:
+    """3×3 → scipy as_euler('xyz')（度）。对应 R = Rz @ Ry @ Rx。"""
+    sy = min(1.0, max(-1.0, -float(Rm[2, 0])))
+    y = math.asin(sy)
+    if abs(sy) < 0.999999:
+        x = math.atan2(float(Rm[2, 1]), float(Rm[2, 2]))
+        z = math.atan2(float(Rm[1, 0]), float(Rm[0, 0]))
+    else:
+        x = math.atan2(math.copysign(1.0, sy) * float(Rm[0, 1]), float(Rm[1, 1]))
+        z = 0.0
+    return np.array([math.degrees(x), math.degrees(y), math.degrees(z)], dtype=np.float64)
+
+
+def _quat_from_R(Rm: np.ndarray) -> np.ndarray:
+    """3×3 → 四元数 [x, y, z, w]，w>=0，对应 scipy as_quat 双覆盖约定。"""
+    m00, m01, m02 = float(Rm[0, 0]), float(Rm[0, 1]), float(Rm[0, 2])
+    m10, m11, m12 = float(Rm[1, 0]), float(Rm[1, 1]), float(Rm[1, 2])
+    m20, m21, m22 = float(Rm[2, 0]), float(Rm[2, 1]), float(Rm[2, 2])
+    tr = m00 + m11 + m22
+    if tr > 0.0:
+        s = 0.5 / math.sqrt(tr + 1.0)
+        w = 0.25 / s
+        x = (m21 - m12) * s
+        y = (m02 - m20) * s
+        z = (m10 - m01) * s
+    elif m00 > m11 and m00 > m22:
+        s = 2.0 * math.sqrt(1.0 + m00 - m11 - m22)
+        w = (m21 - m12) / s
+        x = 0.25 * s
+        y = (m01 + m10) / s
+        z = (m02 + m20) / s
+    elif m11 > m22:
+        s = 2.0 * math.sqrt(1.0 + m11 - m00 - m22)
+        w = (m02 - m20) / s
+        x = (m01 + m10) / s
+        y = 0.25 * s
+        z = (m12 + m21) / s
+    else:
+        s = 2.0 * math.sqrt(1.0 + m22 - m00 - m11)
+        w = (m10 - m01) / s
+        x = (m02 + m20) / s
+        y = (m12 + m21) / s
+        z = 0.25 * s
+    if w < 0.0:
+        x, y, z, w = -x, -y, -z, -w
+    return np.array([x, y, z, w], dtype=np.float64)
+
+
+def _quat_key_arr(q: np.ndarray) -> tuple:
+    """四元数去重键。q 与 -q 同一旋转，统一 w>=0 后量化到 5 位小数。"""
     if q[3] < 0.0:
         q = -q
     return tuple(np.round(q, 5).tolist())
 
 
-def _fast_quat_slerp_matrix(q1: np.ndarray, q2: np.ndarray, alpha: float) -> np.ndarray:
+def _axis_rot_mats(angles_deg: np.ndarray, axis: int) -> np.ndarray:
+    """预计算一轴旋转矩阵堆叠，shape (N, 3, 3)。axis: 0=X, 1=Y, 2=Z。"""
+    n = int(angles_deg.size)
+    mats = np.zeros((n, 3, 3), dtype=np.float64)
+    for i, d in enumerate(angles_deg):
+        a = math.radians(float(d))
+        c, s = math.cos(a), math.sin(a)
+        if axis == 0:
+            mats[i, 0, 0] = 1.0
+            mats[i, 1, 1] = c
+            mats[i, 1, 2] = -s
+            mats[i, 2, 1] = s
+            mats[i, 2, 2] = c
+        elif axis == 1:
+            mats[i, 0, 0] = c
+            mats[i, 0, 2] = s
+            mats[i, 1, 1] = 1.0
+            mats[i, 2, 0] = -s
+            mats[i, 2, 2] = c
+        else:
+            mats[i, 0, 0] = c
+            mats[i, 0, 1] = -s
+            mats[i, 1, 0] = s
+            mats[i, 1, 1] = c
+            mats[i, 2, 2] = 1.0
+    return mats
+
+
+def _project_R_to_anchor(
+    R_cand: np.ndarray,
+    R_anchor: np.ndarray,
+    anchor_tol_deg: tuple[float, float, float],
+) -> np.ndarray:
+    """相对 Euler-xyz 盒投影，矩阵版（与 _project_to_anchor_envelope 同语义）。"""
+    rel = _euler_xyz_deg_from_R(R_anchor.T @ R_cand)
+    rel = (rel + 180.0) % 360.0 - 180.0
+    tol = np.abs(np.asarray(anchor_tol_deg, dtype=np.float64))
+    clipped = np.clip(rel, -tol, tol)
+    if np.allclose(clipped, rel, atol=1e-12):
+        return R_cand
+    return R_anchor @ _R_from_euler_xyz_deg(float(clipped[0]), float(clipped[1]), float(clipped[2]))
+
+
+def _branch_key(q: np.ndarray) -> int:
     """
-    轻量级无对象分配的单位四元数 Slerp -> 3×3 旋转矩阵。
-    数学上与 scipy.spatial.transform.Slerp 100% 等价（误差 < 1e-15），
-    但在每秒几十万次插值循环中比 SciPy 类构造快 17+ 倍。
+    与 inverse() 返回列表下标无关的 8 路构型键：肩 × 肘 × 腕。
+
+    肘/腕解析对是 arccos 与 2π-arccos，折到 [0, 2π) 后落在 [0, π] 或 (π, 2π]。
+    肩用 wrap(q1) 的符号作半平面划分（两肩不一定分居 [0,π]/[π,2π]）。
     """
+    qw = _wrap_pi(np.asarray(q, dtype=np.float64).reshape(-1)[:6])
+    q02 = np.mod(qw, 2.0 * PI)
+    shoulder = 0 if qw[0] >= 0.0 else 1
+    elbow = 0 if q02[2] <= PI else 1
+    wrist = 0 if q02[4] <= PI else 1
+    return (shoulder << 2) | (elbow << 1) | wrist
+
+
+def _ew_family(q: np.ndarray) -> int:
+    """肘/腕 2bit 家族。不含肩：连续段上 q1 过 0° 不应被当成换支。"""
+    return _branch_key(q) & 3
+
+
+def _ctrl_to_urdf_into(T_ctrl: np.ndarray, out: np.ndarray) -> np.ndarray:
+    """controller_matrix_to_urdf 的就地版本，避免边循环里反复分配 4×4。"""
+    R = T_ctrl[:3, :3]
+    p = T_ctrl[:3, 3]
+    out[0, 0] = -R[0, 2]
+    out[0, 1] = R[0, 0]
+    out[0, 2] = R[0, 1]
+    out[0, 3] = -p[0]
+    out[1, 0] = -R[1, 2]
+    out[1, 1] = R[1, 0]
+    out[1, 2] = R[1, 1]
+    out[1, 3] = -p[1]
+    out[2, 0] = R[2, 2]
+    out[2, 1] = -R[2, 0]
+    out[2, 2] = -R[2, 1]
+    out[2, 3] = p[2]
+    out[3, 0] = 0.0
+    out[3, 1] = 0.0
+    out[3, 2] = 0.0
+    out[3, 3] = 1.0
+    return out
+
+
+def _fast_quat_slerp_into(q1: np.ndarray, q2: np.ndarray, alpha: float, out_R: np.ndarray) -> None:
+    """单位四元数 Slerp 写入已有 3×3，不分配新矩阵。"""
     dot = float(q1[0] * q2[0] + q1[1] * q2[1] + q1[2] * q2[2] + q1[3] * q2[3])
     q2_mod = q2 if dot >= 0.0 else -q2
     dot_abs = abs(dot)
     if dot_abs > 0.9995:
-        # 夹角极小，退化为线性插值 Lerp 并归一化
         q = (1.0 - alpha) * q1 + alpha * q2_mod
         norm = math.sqrt(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3])
         q = q / norm
@@ -104,13 +254,16 @@ def _fast_quat_slerp_matrix(q1: np.ndarray, q2: np.ndarray, alpha: float) -> np.
         theta = math.acos(min(max(dot_abs, -1.0), 1.0))
         sin_theta = math.sin(theta)
         q = (math.sin((1.0 - alpha) * theta) * q1 + math.sin(alpha * theta) * q2_mod) / sin_theta
-    # 四元数 [x, y, z, w] 转 3×3 旋转矩阵
     x, y, z, w = q[0], q[1], q[2], q[3]
-    return np.array([
-        [1.0 - 2.0 * (y * y + z * z), 2.0 * (x * y - z * w),       2.0 * (x * z + y * w)],
-        [2.0 * (x * y + z * w),       1.0 - 2.0 * (x * x + z * z), 2.0 * (y * z - x * w)],
-        [2.0 * (x * z - y * w),       2.0 * (y * z + x * w),       1.0 - 2.0 * (x * x + y * y)]
-    ], dtype=np.float64)
+    out_R[0, 0] = 1.0 - 2.0 * (y * y + z * z)
+    out_R[0, 1] = 2.0 * (x * y - z * w)
+    out_R[0, 2] = 2.0 * (x * z + y * w)
+    out_R[1, 0] = 2.0 * (x * y + z * w)
+    out_R[1, 1] = 1.0 - 2.0 * (x * x + z * z)
+    out_R[1, 2] = 2.0 * (y * z - x * w)
+    out_R[2, 0] = 2.0 * (x * z - y * w)
+    out_R[2, 1] = 2.0 * (y * z + x * w)
+    out_R[2, 2] = 1.0 - 2.0 * (x * x + y * y)
 
 
 def _waypoint_to_T(wp) -> np.ndarray:
@@ -142,17 +295,14 @@ def _project_to_anchor_envelope(
     anchor_tol_deg: tuple[float, float, float],
 ) -> R_scipy:
     """
-    锚点硬包络投影（相对 Euler-xyz 盒）。
+    锚点硬包络投影（相对 Euler-xyz 盒）。保留供单测与外部兼容。
 
     相对姿态 R_rel = R_anchor^{-1} * R_cand，拆成 xyz 欧拉角后逐轴 clip 到
     ±(tol_x, tol_y, tol_z)。已在盒内则不变；越界则落到边界。
     这是工艺容差的硬约束，不是测地球面投影；同姿态去重在网格层用测地角完成。
     """
-    rel = (rot_anchor.inv() * rot_cand).as_euler("xyz", degrees=True)
-    rel = (rel + 180.0) % 360.0 - 180.0  # wrap 到 [-180, 180]，避免 179/-179 裁剪错误
-    tol = np.array(anchor_tol_deg, dtype=np.float64)
-    clipped = np.clip(rel, -np.abs(tol), np.abs(tol))
-    return rot_anchor * R_scipy.from_euler("xyz", clipped, degrees=True)
+    R = _project_R_to_anchor(rot_cand.as_matrix(), rot_anchor.as_matrix(), anchor_tol_deg)
+    return R_scipy.from_matrix(R)
 
 
 class SprayWaypointOptimizer:
@@ -161,6 +311,9 @@ class SprayWaypointOptimizer:
 
     在容差内为每个点选出姿态与关节构型，使相邻点之间的控制器 MoveL 直线
     不经过奇异、不翻腕、不超关节硬限位。内部关节用弧度；对外 6D 位姿用度。
+
+    线程安全：实例复用 _T_work / _T_urdf_work 与 _last_dense_report，且底层
+    CR5Kinematics（尤其 C++ 后端）亦不可跨线程共享；请每线程独立实例。
     """
 
     def __init__(
@@ -181,6 +334,7 @@ class SprayWaypointOptimizer:
         max_candidates_per_branch: int = 16,
         dense_verify: bool = True,
         ik_returns_degrees: bool = False,
+        max_segment_travel_deg: float = _SEGMENT_TRAVEL_DEG,
     ):
         """
         :param solver: CR5 解析 IK。省略时按 backend='auto' 创建（有 libur_kin 则走 C++）。
@@ -195,14 +349,18 @@ class SprayWaypointOptimizer:
         :param max_movel_checks: 每段 MoveL 最多中间抽检点数
         :param movel_check_spacing_mm: 按段长估算抽检密度：n ≈ round(段长_mm / 本值)，
             再夹到 [num_movel_checks, max_movel_checks]
-        :param max_joint_jump_deg: 抽检相邻样本允许的最大单轴跳变（度），超过判为翻腕/换支
+        :param max_joint_jump_deg: 抽检相邻样本允许的最大单轴跳变（度），超过判为翻腕/换支。
+            只约束相邻抽检点，不约束整段起终点行程。
+        :param max_segment_travel_deg: 整段起终点单轴行程的 O(1) 预筛下限（度）。
+            实际阈值 = min(170, max(本值, 0.9°/mm × 段长))，用于挡住明显换支，
+            不替代相邻 45° 跳变检查。
         :param weight_zero_dev: 零偏惩罚 (wx, wy, wz)，按「相对名义姿态的工具系欧拉角」每度平方计。
             默认倾角很贵、自旋几乎免费 → 能垂直喷则垂直喷。
         :param joint_weights: 6 轴边代价权重，抽检 Δq 的加权平方和
         :param beam_width: 每层 DP 只保留代价最低的这么多节点，控制 10 cm 段的边数
-        :param max_candidates_per_branch: 8 大解析支中每个构型保留的最优姿态候选上限（如 16，则每层 ~128 节点），
-            配合自适应全量回退机制，兼具 0.5s 极速与 100% 不漏解保底。
-        :param dense_verify: 是否在写出路径后跑密采样校验器（需传入 verifier）
+        :param max_candidates_per_branch: 按肩/肘/腕签名分的 8 桶中，每桶保留的最优姿态上限
+            （如 16，则每层最多约 128 节点）。本层断连时回退该层全量候选。
+        :param dense_verify: 是否在 optimize() 选出路径后跑密采样校验器（需传入 verifier）
         :param ik_returns_degrees: 仅当使用 ik_solver 且其返回值为度时置 True
         """
         self.solver = solver if solver is not None else CR5Kinematics(backend="auto")
@@ -216,6 +374,10 @@ class SprayWaypointOptimizer:
         self.max_movel_checks = max(self.num_movel_checks, int(max_movel_checks))
         self.movel_check_spacing_mm = max(1e-3, float(movel_check_spacing_mm))
         self.max_jump_deg = float(max_joint_jump_deg)
+        self.max_segment_travel_deg = float(max_segment_travel_deg)
+        self._max_jump_rad = math.radians(self.max_jump_deg)
+        self._match_rad = math.radians(_BRANCH_MATCH_DEG)
+        self._deg2_from_rad2 = (180.0 / PI) ** 2
         self.w_zero_dev = np.array(weight_zero_dev, dtype=np.float64)
         # J2 略加重（大臂）、腕部略轻：边代价偏向少甩大关节
         self.joint_weights = np.array(
@@ -225,6 +387,9 @@ class SprayWaypointOptimizer:
         self.beam_width = max(8, int(beam_width))
         self.max_candidates_per_branch = max(1, int(max_candidates_per_branch))
         self.dense_verify = bool(dense_verify)
+        self._T_work = np.eye(4, dtype=np.float64)
+        self._T_urdf_work = np.eye(4, dtype=np.float64)
+        self._last_dense_report: dict[str, Any] | None = None
 
     def _ik_gun(self, T_gun: np.ndarray) -> list[np.ndarray]:
         """枪尖控制器系 4×4 → 最多 8 组 URDF 关节（弧度）。"""
@@ -237,12 +402,56 @@ class SprayWaypointOptimizer:
             return [np.asarray(q, dtype=np.float64) for q in sols]
         return list(self.solver.inverse_controller_matrix(T_gun))
 
-    def _is_safe_q(self, q: np.ndarray, T_gun: np.ndarray) -> bool:
+    def _is_safe_q(
+        self,
+        q: np.ndarray,
+        T_gun: np.ndarray,
+        T_urdf: Optional[np.ndarray] = None,
+    ) -> bool:
         """硬门：URDF 关节限位 + 肩/肘/腕奇异（与校验器同一套 check_singularity_risk）。"""
         if not self.solver.is_joint_valid(q):
             return False
-        T_urdf = self.solver.controller_matrix_to_urdf(T_gun)
+        if T_urdf is None:
+            T_urdf = self.solver.controller_matrix_to_urdf(T_gun)
         return not self.solver.check_singularity_risk(q, T=T_urdf)["is_singular"]
+
+    def _track_ik_step(self, T_ctrl: np.ndarray, prev_q: np.ndarray) -> np.ndarray | None:
+        """一次 URDF 转换 + 跟最近支 + 限位/奇异。失败返回 None。"""
+        T_urdf = _ctrl_to_urdf_into(T_ctrl, self._T_urdf_work)
+        nxt = self.solver.get_best_ik(T_urdf, prev_q)
+        if nxt is None or not self.solver.is_joint_valid(nxt):
+            return None
+        if abs(math.sin(float(nxt[4]))) < _SING_SIN or abs(math.sin(float(nxt[2]))) < _SING_SIN:
+            return None
+        if self.solver.shoulder_q1_half_separation_rad(T_urdf) < _SHOULDER_HALF_RAD:
+            return None
+        return nxt
+
+    def _dense_verify_or_raise(
+        self,
+        transforms: list[np.ndarray],
+        init_q: np.ndarray,
+        path_id: int,
+        path_name: str,
+    ) -> dict[str, Any]:
+        """对 DP 选出的稀疏位姿做 1.5 mm 密采样硬门。"""
+        path_item = {
+            "path_id": path_id,
+            "name": path_name,
+            "points": [{"tcp_pose_base": matrix_to_pose_dict(T)} for T in transforms],
+        }
+        report = self.verifier.verify_single_path(path_item, init_q=init_q)
+        hard = [
+            iss for iss in report.get("issues", [])
+            if iss.get("severity") == "ERROR" or "SINGULARITY" in str(iss.get("type", ""))
+        ]
+        if hard or report.get("status") == "FAILED":
+            types = sorted({iss.get("type", "?") for iss in hard}) or ["FAILED"]
+            raise RuntimeError(
+                f"Dense MoveL verifier rejected the DP path: {types}. "
+                "Widen tilt/spin tolerance or split the segment."
+            )
+        return report
 
     def _unwrap_onto(self, q_sol: np.ndarray, q_ref: np.ndarray) -> np.ndarray | None:
         """
@@ -256,18 +465,6 @@ class SprayWaypointOptimizer:
             return np.array(q_sol, dtype=np.float64, copy=True)
         return None
 
-    def _apply_anchor_constraint(
-        self,
-        target_rot: R_scipy,
-        anchor_rot: R_scipy,
-        anchor_tol_deg: tuple[float, float, float],
-    ) -> R_scipy:
-        """
-        基于锚点姿态的容差包络约束（全角度制）。
-        若超出容差范围则裁剪到边界。
-        """
-        return _project_to_anchor_envelope(target_rot, anchor_rot, anchor_tol_deg)
-
     def _generate_stage_candidates(
         self,
         T_nominal: np.ndarray,
@@ -279,39 +476,46 @@ class SprayWaypointOptimizer:
         (姿态网格 × 锚点投影去重) → IK 全解 → 丢掉奇异/超限。
 
         :return: (fast_candidates, full_candidates)
-        fast_candidates 为 8 大解析支中各自按 zero_dev_cost 最优保留 top-K 的精简候选；
-        full_candidates 为全量有效候选（用于自适应回退重试保底）。
+        fast_candidates 按肩/肘/腕签名分 8 桶，各留 zero_dev 最优的 top-K；
+        full_candidates 为全量有效候选（本层断连时回退）。
         """
         base_pos = T_nominal[:3, 3]
-        rot_nominal = R_scipy.from_matrix(T_nominal[:3, :3])
+        R_nom = np.array(T_nominal[:3, :3], dtype=np.float64, copy=True)
+        R_anc = None
+        if anchor_rot is not None and anchor_tol_deg is not None:
+            R_anc = np.array(anchor_rot.as_matrix(), dtype=np.float64, copy=True)
         xs = _axis_grid(self.tol_x_deg)
         ys = _axis_grid(self.tol_y_deg)
         zs = _axis_grid(self.tol_z_deg)
+        Rx_mats = _axis_rot_mats(xs, 0)
+        Ry_mats = _axis_rot_mats(ys, 1)
+        Rz_mats = _axis_rot_mats(zs, 2)
 
         # key=量化四元数 → 投影后重复姿态只留「离名义喷姿测地角最小」的一个
         unique: dict[tuple, dict[str, Any]] = {}
-        for dx in xs:
-            for dy in ys:
-                for dz in zs:
-                    # 1. 局部工具系内旋：R_new = R_nom * Rx(dx)Ry(dy)Rz(dz)
-                    rot_offset = R_scipy.from_euler("xyz", [dx, dy, dz], degrees=True)
-                    rot_cand = rot_nominal * rot_offset
+        for iz in range(zs.size):
+            Rz = Rz_mats[iz]
+            for iy in range(ys.size):
+                Rzy = Rz @ Ry_mats[iy]
+                for ix in range(xs.size):
+                    # 1. 与 scipy from_euler('xyz') 一致：R_off = Rz @ Ry @ Rx
+                    R_cand = R_nom @ (Rzy @ Rx_mats[ix])
                     # 2. 锚点硬约束：越界则投影回 Euler 盒边界
-                    if anchor_rot is not None and anchor_tol_deg is not None:
-                        rot_cand = self._apply_anchor_constraint(
-                            rot_cand, anchor_rot, anchor_tol_deg
-                        )
-                    geo = _geodesic_deg(rot_nominal, rot_cand)
-                    key = _quat_key(rot_cand)
+                    if R_anc is not None:
+                        R_cand = _project_R_to_anchor(R_cand, R_anc, anchor_tol_deg)
+                    geo = _geodesic_R_deg(R_nom, R_cand)
+                    q_arr = _quat_from_R(R_cand)
+                    key = _quat_key_arr(q_arr)
                     prev = unique.get(key)
                     if prev is not None and geo >= prev["geo_deg"]:
                         continue
                     # 3. 零偏代价用投影后的真实工具系偏差，不用裁剪前的 (dx,dy,dz)
-                    e_tool = (rot_nominal.inv() * rot_cand).as_euler("xyz", degrees=True)
+                    e_tool = _euler_xyz_deg_from_R(R_nom.T @ R_cand)
                     e_tool = (e_tool + 180.0) % 360.0 - 180.0
                     zero_dev = float(np.dot(self.w_zero_dev, e_tool ** 2))
                     unique[key] = {
-                        "rot": rot_cand,
+                        "R": np.array(R_cand, dtype=np.float64, copy=True),
+                        "quat": q_arr,
                         "geo_deg": geo,
                         "zero_dev_cost": zero_dev,
                     }
@@ -321,27 +525,29 @@ class SprayWaypointOptimizer:
 
         for item in unique.values():
             T = np.eye(4, dtype=np.float64)
-            T[:3, :3] = item["rot"].as_matrix()
+            T[:3, :3] = item["R"]
             T[:3, 3] = base_pos
-            q_arr = np.asarray(item["rot"].as_quat(), dtype=np.float64)
+            T_urdf = self.solver.controller_matrix_to_urdf(T)
             sols = self._ik_gun(T)
-            for branch_idx, q_sol in enumerate(sols):
-                if not self._is_safe_q(q_sol, T):
+            for q_sol in sols:
+                if not self._is_safe_q(q_sol, T, T_urdf=T_urdf):
                     continue
+                q_sol = np.array(q_sol, dtype=np.float64)
+                b_id = _branch_key(q_sol)
                 node = {
                     "T": T,
-                    "quat": q_arr,
-                    "q": np.array(q_sol, dtype=np.float64),
-                    "q_branch": np.array(q_sol, dtype=np.float64),  # 解析支标识（[-π,π]）
+                    "quat": item["quat"],
+                    "q": q_sol,
+                    "q_branch": q_sol,  # 解析支标识（[-π,π] 代表）
                     "zero_dev_cost": item["zero_dev_cost"],
                     "geo_deg": item["geo_deg"],
-                    "branch_id": branch_idx,
+                    "branch_id": b_id,
+                    "ew_family": b_id & 3,
                 }
                 full_candidates.append(node)
-                b_id = branch_idx % 8
                 branch_buckets[b_id].append(node)
 
-        # 8 大解析支中每个构型各自保留零偏最小的 top-K 个优质姿态
+        # 8 构型桶中各自保留零偏最小的 top-K 个优质姿态
         fast_candidates: list[dict[str, Any]] = []
         for b_id, nodes in branch_buckets.items():
             if not nodes:
@@ -354,6 +560,48 @@ class SprayWaypointOptimizer:
 
         return fast_candidates, full_candidates
 
+    def _walk_alphas(
+        self,
+        p_start: np.ndarray,
+        p_end: np.ndarray,
+        q1: np.ndarray,
+        q2: np.ndarray,
+        q_start: np.ndarray,
+        alphas: np.ndarray,
+        node_end: dict[str, Any],
+        check_end_branch: bool,
+    ) -> tuple[bool, float, np.ndarray | None]:
+        """按 α 序列跟支。check_end_branch 时要求终点落到 node_end 解析支。"""
+        T = self._T_work
+        prev_q = q_start
+        acc = 0.0
+        nxt = prev_q
+        jump = self._max_jump_rad
+        w = self.joint_weights
+        deg2 = self._deg2_from_rad2
+        for alpha in alphas:
+            a = float(alpha)
+            om = 1.0 - a
+            T[0, 3] = om * p_start[0] + a * p_end[0]
+            T[1, 3] = om * p_start[1] + a * p_end[1]
+            T[2, 3] = om * p_start[2] + a * p_end[2]
+            _fast_quat_slerp_into(q1, q2, a, T[:3, :3])
+            nxt = self._track_ik_step(T, prev_q)
+            if nxt is None:
+                return False, np.inf, None
+            dq = _wrap_pi(nxt - prev_q)
+            if float(np.max(np.abs(dq))) > jump:
+                return False, np.inf, None
+            acc += float(np.sum(w * (dq * dq))) * deg2
+            prev_q = nxt
+        if check_end_branch:
+            q_target = self._unwrap_onto(node_end["q_branch"], nxt)
+            if q_target is None:
+                return False, np.inf, None
+            if float(np.max(np.abs(_wrap_pi(nxt - q_target)))) > self._match_rad:
+                return False, np.inf, None
+        return True, acc, nxt
+
     def _check_movel_segment(
         self,
         node_start: dict[str, Any],
@@ -361,56 +609,51 @@ class SprayWaypointOptimizer:
         q_start: np.ndarray,
     ) -> tuple[bool, float, np.ndarray | None]:
         """
-        模拟两点间控制器 MoveL：位置线性插值 + 姿态 Slerp，多点抽检。
+        模拟两点间控制器 MoveL：位置线性插值 + 姿态 Slerp，多点抽检（含终点）。
 
-        从 q_start（已按入边展开的绕组）出发，每步 get_best_ik_controller 跟最近支。
-        任一点无解 / 奇异 / 超限 / 单轴跳变过大 → 边不可行。
-        终点必须落到 node_end 的同一解析支（q_branch），否则视为换了肩/肘/腕。
+        从 q_start（已按入边展开的绕组）出发，每步跟最近支。
+        任一点无解 / 奇异 / 超限 / 相邻单轴跳变过大 → 边不可行。
+        终点必须落到 node_end 的同一解析支（与 q_branch 偏差 < 5°），否则视为换了肩/肘/腕。
+
+        O(1) 预筛：绕组可展开、肘/腕家族相同、整段行程不超过按段长缩放的上限
+        （默认 ≥120°，不是相邻 45°）。多数换支边在此被挡掉，避免走进完整 IK。
 
         :return: (是否可行, 加权关节路程代价, 走到终点时的关节 q)
         """
-        # 1. 快速 O(1) 连通性预筛：终点目标分支直接对 q_start 进行解析解包
-        q_end = self._unwrap_onto(node_end["q_branch"], q_start)
-        if q_end is None or not self.solver.is_joint_valid(q_end):
+        q_end_hint = self._unwrap_onto(node_end["q_branch"], q_start)
+        if q_end_hint is None:
             return False, np.inf, None
 
-        branch_diff = q_end - q_start
-        if float(np.max(np.abs(np.degrees(branch_diff)))) > self.max_jump_deg:
+        ew_s = node_start.get("ew_family")
+        if ew_s is None:
+            ew_s = _ew_family(q_start)
+        ew_e = node_end.get("ew_family")
+        if ew_e is None:
+            ew_e = _ew_family(node_end["q_branch"])
+        if ew_s != ew_e:
             return False, np.inf, None
 
         T_start, T_end = node_start["T"], node_end["T"]
         p_start, p_end = T_start[:3, 3], T_end[:3, 3]
         dist_mm = float(np.linalg.norm(p_end - p_start) * 1000.0)
+        travel = float(np.max(np.abs(np.degrees(_wrap_pi(q_end_hint - q_start)))))
+        travel_lim = min(
+            _SEGMENT_TRAVEL_CAP_DEG,
+            max(self.max_segment_travel_deg, _SEGMENT_TRAVEL_DEG_PER_MM * dist_mm),
+        )
+        if travel > travel_lim:
+            return False, np.inf, None
+
         n_est = round(dist_mm / self.movel_check_spacing_mm)
         n_mid = int(np.clip(n_est, self.num_movel_checks, self.max_movel_checks))
-        # 中间采样点 α ∈ (0, 1)
-        alphas = np.linspace(0.0, 1.0, n_mid + 2)[1:-1]
+        alphas_full = np.linspace(0.0, 1.0, n_mid + 2)[1:]
 
         q1 = node_start["quat"]
         q2 = node_end["quat"]
 
-        prev_q = np.array(q_start, dtype=np.float64)
-        acc = 0.0
-        for alpha in alphas:
-            T = np.eye(4, dtype=np.float64)
-            T[:3, 3] = (1.0 - alpha) * p_start + alpha * p_end
-            T[:3, :3] = _fast_quat_slerp_matrix(q1, q2, alpha)
-            nxt = self.solver.get_best_ik_controller(T, prev_q)
-            if nxt is None or not self._is_safe_q(nxt, T):
-                return False, np.inf, None
-            dq = _wrap_pi(nxt - prev_q)
-            if float(np.max(np.abs(np.degrees(dq)))) > self.max_jump_deg:
-                return False, np.inf, None
-            acc += float(np.sum(self.joint_weights * (np.degrees(dq) ** 2)))
-            prev_q = nxt
-
-        # 加上终点段的代价与终点关节
-        dq_final = _wrap_pi(q_end - prev_q)
-        if float(np.max(np.abs(np.degrees(dq_final)))) > self.max_jump_deg:
-            return False, np.inf, None
-        acc += float(np.sum(self.joint_weights * (np.degrees(dq_final) ** 2)))
-
-        return True, acc, q_end
+        return self._walk_alphas(
+            p_start, p_end, q1, q2, q_start, alphas_full, node_end, check_end_branch=True,
+        )
 
     def optimize(
         self,
@@ -418,6 +661,8 @@ class SprayWaypointOptimizer:
         anchor_poses: Optional[list] = None,
         anchor_tolerances_deg: Optional[tuple[float, float, float]] = (15.0, 15.0, 180.0),
         init_q: Optional[list[float] | np.ndarray] = None,
+        path_id: Optional[int] = None,
+        path_name: Optional[str] = None,
     ) -> tuple[list[np.ndarray], list[np.ndarray], list[np.ndarray]]:
         """
         执行全局 Viterbi（动态规划）选优。
@@ -429,12 +674,15 @@ class SprayWaypointOptimizer:
         :param anchor_tolerances_deg: 锚点允许的 (tol_rx, tol_ry, tol_rz)（度）。
             传 None 则不做锚点硬裁剪，只受工具系网格约束。
         :param init_q: 起始关节（弧度），用于第一点展开绕组；省略则用 ready 种子。
+        :param path_id: 密采样校验报告 path_id；optimize_path_item 传入真实值。
+        :param path_name: 密采样校验报告 name；optimize_path_item 传入真实值。
         :return: (optimal_poses_6d_deg, optimal_joints_deg, optimal_transforms_4x4)
         """
         n = len(waypoints)
         if n < 1:
             raise ValueError("at least one waypoint is required")
 
+        self._last_dense_report = None
         q_seed = np.array(init_q, dtype=np.float64) if init_q is not None else _DEFAULT_SEED_Q.copy()
         T_list = [_waypoint_to_T(wp) for wp in waypoints]
 
@@ -579,6 +827,13 @@ class SprayWaypointOptimizer:
         best_q = [dp_q[i][chain_idx[i]] for i in range(n)]
         best_poses = [_T_to_pose6(T) for T in best_T]
         best_q_deg = [np.degrees(q) for q in best_q]
+        if self.verifier is not None and self.dense_verify and n >= 2:
+            self._last_dense_report = self._dense_verify_or_raise(
+                best_T,
+                q_seed,
+                path_id=int(path_id if path_id is not None else 0),
+                path_name=str(path_name if path_name is not None else "spray_opt"),
+            )
         return best_poses, best_q_deg, best_T
 
     def optimize_path_item(
@@ -618,6 +873,8 @@ class SprayWaypointOptimizer:
             anchor_poses=anchor_poses,
             anchor_tolerances_deg=anchor_tolerances_deg,
             init_q=init_q,
+            path_id=path_item.get("path_id"),
+            path_name=path_item.get("name"),
         )
 
         out = copy.deepcopy(path_item)
@@ -639,19 +896,21 @@ class SprayWaypointOptimizer:
             for a, b in zip(points, new_points)
         )
 
-        # 密采样校验与轨迹插值挂载：生成 60 FPS 连续仿真与执行所需的 dense 轨迹点
+        # 密采样校验与轨迹插值挂载：dense_verify 时 optimize() 已验过，这里复用报告
         if self.verifier is not None and len(new_points) >= 2:
-            rep = self.verifier.verify_single_path(out, init_q=init_q)
-            hard = [
-                iss for iss in rep.get("issues", [])
-                if iss.get("severity") == "ERROR" or "SINGULARITY" in str(iss.get("type", ""))
-            ]
-            if self.dense_verify and (hard or rep.get("status") == "FAILED"):
-                types = sorted({iss.get("type", "?") for iss in hard}) or ["FAILED"]
-                raise RuntimeError(
-                    f"Dense MoveL verifier rejected the DP path: {types}. "
-                    "Widen tilt/spin tolerance or split the segment."
-                )
+            rep = self._last_dense_report
+            if rep is None:
+                rep = self.verifier.verify_single_path(out, init_q=init_q)
+                hard = [
+                    iss for iss in rep.get("issues", [])
+                    if iss.get("severity") == "ERROR" or "SINGULARITY" in str(iss.get("type", ""))
+                ]
+                if self.dense_verify and (hard or rep.get("status") == "FAILED"):
+                    types = sorted({iss.get("type", "?") for iss in hard}) or ["FAILED"]
+                    raise RuntimeError(
+                        f"Dense MoveL verifier rejected the DP path: {types}. "
+                        "Widen tilt/spin tolerance or split the segment."
+                    )
             if rep.get("recommended_safe_speed_mm_s"):
                 out["recommended_speed_mm_s"] = rep["recommended_safe_speed_mm_s"]
 

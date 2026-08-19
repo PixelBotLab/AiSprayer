@@ -10,10 +10,17 @@ interface RobotState {
   joint: number[];
   status?: number;
   tcp_speed_actual?: number[];
+  tcp_speed_mm_s?: number;
   qd_actual?: number[];
   load?: number;
   error_status?: number;
   tool_vector_actual?: number[];
+  hand_type?: number[];
+  tool_index?: number;
+  run_queued_cmd?: number;
+  velocity_ratio?: number;
+  xyz_velocity_ratio?: number;
+  r_velocity_ratio?: number;
 }
 
 interface WorkspaceViewProps {

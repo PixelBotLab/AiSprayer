@@ -20,8 +20,8 @@ Spray Waypoint Optimizer CLI (基于 Viterbi 动态规划的喷涂位姿全局�
     # 指定自定义 YAML 文件并另存优化后结果
     python path_opt_cli.py -f data/template_group/2026-08-14_154353/scan.raw.path.yaml -o scan.opt.path.yaml
 
-    # 自定义容差搜索步长与锚点包络
-    python path_opt_cli.py -f scan.raw.path.yaml --tol-x -5,5,2 --tol-y -5,5,2 --tol-z -180,180,10 --anchor-tol 20,20,180
+    # 自定义容差搜索步长、锚点包络与密插值校验参数
+    python path_opt_cli.py -f scan.raw.path.yaml --tol-x -5,5,2 --tol-y -5,5,2 --tol-z -180,180,10 --anchor-tol 20,20,180 --verify-step 1.5 --verify-speed 120
 """
 
 import argparse
@@ -109,7 +109,19 @@ def run_cli():
     parser.add_argument("--beam-width", type=int, default=32, help="DP Beam 宽度 (保留最优节点数)")
     parser.add_argument("--max-candidates-per-branch", type=int, default=16, help="每个解析支保留的最优姿态候选数")
     parser.add_argument("--movel-checks", type=str, default="10,100", help="MoveL 抽检点数范围 (min,max)")
-    parser.add_argument("--movel-spacing", type=float, default=5.0, help="MoveL 抽检估算间距 (mm)")
+    parser.add_argument("--movel-spacing", type=float, default=5.0, help="DP 边评估 MoveL 抽检估算间距 (mm)")
+    parser.add_argument(
+        "--verify-step",
+        type=float,
+        default=1.5,
+        help="KinematicChainVerifier 密插值步长 (mm)，用于 dense_verify 与校验报告",
+    )
+    parser.add_argument(
+        "--verify-speed",
+        type=float,
+        default=120.0,
+        help="KinematicChainVerifier 假定笛卡尔线速度 (mm/s)，用于关节超速估算",
+    )
 
     args = parser.parse_args()
 
@@ -138,13 +150,20 @@ def run_cli():
     print(f"   轨迹名称: {path_dict.get('name', 'N/A')} (ID: {path_dict.get('path_id', 'N/A')}), 包含航点数: {len(raw_points)}")
 
     # 3. 初始化运动学求解器与验证器
-    pv = CR5PathVerifier(kinematics_backend="auto")
+    verify_step_mm = max(1e-3, float(args.verify_step))
+    verify_speed_mm_s = max(1e-3, float(args.verify_speed))
+    pv = CR5PathVerifier(
+        kinematics_backend="auto",
+        step_size_mm=verify_step_mm,
+        linear_velocity_mm_s=verify_speed_mm_s,
+    )
     solver: CR5Kinematics = pv.solver
     verifier = pv.verifier
 
     print(f"\n⚡ 2. 运动学引擎状态:")
     print(f"   当前解算后端: {solver.backend.upper()}")
     print(f"   C++ 加速动态库 (libur_kin): {'已加载 (高吞吐模式 ~2.3 MHz)' if solver.backend == 'cpp' else '未加载 (Python 模式)'}")
+    print(f"   密插值校验: 步长 {verify_step_mm} mm, 假定线速度 {verify_speed_mm_s} mm/s")
 
     # 4. 从 Home 关节角正解计算锚点参考位姿
     t_fk_start = time.time()
@@ -176,7 +195,9 @@ def run_cli():
     print(f"\n⚙️  4. 优化参数设置:")
     print(f"   搜索网格: Tol_X={optimizer.tol_x_deg}, Tol_Y={optimizer.tol_y_deg}, Tol_Z={optimizer.tol_z_deg}")
     print(f"   锚点硬包络: (Tol_Rx=±{anchor_tol[0]}°, Tol_Ry=±{anchor_tol[1]}°, Tol_Rz=±{anchor_tol[2]}°)")
-    print(f"   Beam Width: {optimizer.beam_width}, 8支单桶容量: {optimizer.max_candidates_per_branch}, MoveL 抽检: [{optimizer.num_movel_checks}, {optimizer.max_movel_checks}] 点 (间距 {optimizer.movel_check_spacing_mm} mm)")
+    print(f"   Beam Width: {optimizer.beam_width}, 8支单桶容量: {optimizer.max_candidates_per_branch}")
+    print(f"   DP MoveL 抽检: [{optimizer.num_movel_checks}, {optimizer.max_movel_checks}] 点 (间距 {optimizer.movel_check_spacing_mm} mm)")
+    print(f"   Verifier 密插值: 步长 {verify_step_mm} mm, 线速度 {verify_speed_mm_s} mm/s")
 
     # 6. 执行优化
     print(f"\n🔄 5. 正在执行 Viterbi DP 全局连续性优化 (Waypoints 数量: {len(raw_points)})...")
@@ -209,7 +230,7 @@ def run_cli():
             curr_q_raw = q_sol
             raw_joints_list.append(np.degrees(q_sol))
         else:
-            raw_joints_list.append(np.zeros(6))
+            raw_joints_list.append(None)
 
     opt_points = opt_path_item.get("points", [])
     opt_joints_list = opt_path_item.get("spray_opt_joints_deg", [])
@@ -269,7 +290,10 @@ def run_cli():
 
         pt_raw = float(np.degrees(np.arccos(np.clip(np.dot(z_raw, z_anchor), -1.0, 1.0))))
         q_raw = raw_joints_list[i]
-        q_raw_str = f"[{q_raw[0]:5.1f}, {q_raw[1]:5.1f}, {q_raw[2]:5.1f}, {q_raw[3]:5.1f}, {q_raw[4]:5.1f}, {q_raw[5]:5.1f}]"
+        if q_raw is None:
+            q_raw_str = "IK 无解"
+        else:
+            q_raw_str = f"[{q_raw[0]:5.1f}, {q_raw[1]:5.1f}, {q_raw[2]:5.1f}, {q_raw[3]:5.1f}, {q_raw[4]:5.1f}, {q_raw[5]:5.1f}]"
         pos_str = f"{raw_p['x']:5.1f}, {raw_p['y']:5.1f}, {raw_p['z']:5.1f}"
         raw_rpy_str = f"{raw_p['rx']:6.2f}, {raw_p['ry']:6.2f}, {raw_p['rz']:6.2f}"
 
@@ -320,32 +344,49 @@ def run_cli():
 
         rel_change = f"[{rel_raw[0]:+4.0f},{rel_raw[1]:+4.0f},{rel_raw[2]:+4.0f}] -> [{rel_opt[0]:+4.0f},{rel_opt[1]:+4.0f},{rel_opt[2]:+4.0f}]"
 
-        q_raw = np.array(raw_joints_list[i])
-        q_opt = np.array(opt_joints_list[i])
-        dq_max = float(np.max(np.abs((q_opt - q_raw + 180.0) % 360.0 - 180.0)))
+        q_raw = raw_joints_list[i]
+        q_opt = np.array(opt_joints_list[i]) if i < len(opt_joints_list) else None
+        if q_raw is None or q_opt is None:
+            dq_max_str = "N/A"
+        else:
+            dq_max = float(np.max(np.abs((np.array(q_opt) - np.array(q_raw) + 180.0) % 360.0 - 180.0)))
+            dq_max_str = f"{dq_max:5.2f}°"
 
         raw_rpy_str = f"{raw_p['rx']:5.1f}, {raw_p['ry']:5.1f}, {raw_p['rz']:5.1f}"
         opt_rpy_str = f"{opt_p['rx']:5.1f}, {opt_p['ry']:5.1f}, {opt_p['rz']:5.1f}"
 
-        r3.append([f"#{i+1}", raw_rpy_str, opt_rpy_str, f"{pointing_diff:6.2f}°", rel_change, f"{dq_max:5.2f}°"])
+        r3.append([f"#{i+1}", raw_rpy_str, opt_rpy_str, f"{pointing_diff:6.2f}°", rel_change, dq_max_str])
 
     print("\n" + _format_table(h3, w3, r3, "6.3 优化前后综合指标对比总表 (Raw vs Opt)"))
 
     print("\n💡 注解说明:")
-    print("   1. [相对锚点偏角]: 表示当前姿态相对 Home 锚点 [90, 0, 90] 的旋转量，严格受控在容差包络 (Rx:±20°, Ry:±20°, Rz:±180°) 之内。")
+    print(
+        f"   1. [相对锚点偏角]: 表示当前姿态相对 Home 锚点 "
+        f"[{anchor_rpy[0]:.0f}, {anchor_rpy[1]:.0f}, {anchor_rpy[2]:.0f}] 的旋转量，"
+        f"严格受控在容差包络 (Rx:±{anchor_tol[0]:.0f}°, Ry:±{anchor_tol[1]:.0f}°, Rz:±{anchor_tol[2]:.0f}°) 之内。"
+    )
     print("   2. [相对锚点指向角]: 表示喷枪中心法向与 Home 锚点喷枪法向在 3D 空间中的夹角。")
     print("   3. [枪尖指向偏量(3D)]: 表示优化前后喷枪法向的实际偏转角度（排除了 Euler 欧拉角在 Ry≈-90° 时的万向节死锁双重表示现象）。")
 
-    # 9. 全路径运动学密插值校验 (Dense MoveL Kinematic Verification)
+    # 9. 全路径运动学密插值校验：复用 optimize_path_item 已写入的报告，避免再跑一遍 1.5 mm
     print("\n🔍 7. 全路径运动学链校验结果 (Kinematic Chain Verification):")
-    rep = verifier.verify_single_path(opt_path_item, init_q=home_rad)
+    rep = opt_path_item.get("verification_report")
+    if not rep:
+        rep = verifier.verify_single_path(opt_path_item, init_q=home_rad)
     status = rep.get("status", "UNKNOWN")
     issues = rep.get("issues", [])
     total_steps = rep.get("total_interpolated", 0)
     max_speeds = rep.get("peak_joint_speeds_deg_s", [0.0] * 6)
 
-    print(f"   校验状态: {status} (总插值步数: {total_steps}, 发现问题数: {len(issues)})")
+    rep_step = rep.get("step_size_mm", verify_step_mm)
+    rep_speed = rep.get("speed_mm_s", verify_speed_mm_s)
+    print(
+        f"   校验状态: {status} (步长 {rep_step} mm, 假定 {rep_speed} mm/s, "
+        f"总插值步数: {total_steps}, 发现问题数: {len(issues)})"
+    )
     print(f"   各轴峰值速度: {[round(s, 1) for s in max_speeds]} deg/s")
+    if rep.get("recommended_safe_speed_mm_s") is not None:
+        print(f"   推荐安全线速度: {rep['recommended_safe_speed_mm_s']} mm/s")
 
     if issues:
         print("   ⚠️ 校验问题详情:")

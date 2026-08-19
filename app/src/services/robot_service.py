@@ -141,6 +141,7 @@ class RobotService:
         self._global_speed = float(speed_l)
         self._global_acc = float(acc_l)
         # Pass to driver if connected
+        return True, ""
         if self._driver and self._is_connected:
             if hasattr(self._driver, 'dashboard') and self._driver.dashboard:
                 try:
@@ -194,7 +195,7 @@ class RobotService:
         pose_val, _ = self.get_current_pose()
         logger.info(f"move_to_pose: from pose:{_fmt(pose_val)}, to pose:{_fmt(pose)}, speed:{speed:.2f}, acc:{acc:.2f}")
         try:
-            self._driver.move_l(pose, velocity=speed, acc=acc)
+            self._driver.move_l(pose, velocity_mm=speed, acc=acc)
             new_pose_val, _ = self.get_current_pose()
             logger.info(f"move_to_pose: Success moving to pose, actual pose:{_fmt(new_pose_val)}")
             return True, ""
@@ -210,10 +211,14 @@ class RobotService:
             logger.error(msg)
             return False, msg
 
+        # SpeedJ 接收 0-100 的百分比，需要把 deg/s 转换
+        max_jnt = self.max_joint_speed_deg_s[0] if self.max_joint_speed_deg_s else 180.0
+        ratio_j = max(1, min(100, int((speed / max_jnt) * 100)))
+
         pose_val, _ = self.get_current_pose()
         logger.info(f"move_to_pose_j (MovJ): from pose:{_fmt(pose_val)}, to pose:{_fmt(pose)}, speed:{speed:.2f}, acc:{acc:.2f}")
         try:
-            res = self._driver.move_j(pose, velocity=speed, acc=acc)
+            res = self._driver.move_j(pose, velocity=ratio_j, acc=acc)
             if res == 0:
                 new_pose_val, _ = self.get_current_pose()
                 logger.info(f"move_to_pose_j: Success moving to pose via MovJ, actual pose:{_fmt(new_pose_val)}")
@@ -296,10 +301,14 @@ class RobotService:
             logger.error(msg)
             return False, msg
 
+        # SpeedJ 接收 0-100 的百分比，需要把 deg/s 转换
+        max_jnt = self.max_joint_speed_deg_s[0] if self.max_joint_speed_deg_s else 180.0
+        ratio_j = max(1, min(100, int((speed / max_jnt) * 100)))
+
         joint_val, _ = self.get_current_joint()
         logger.info(f"move_to_joint: from joints:{_fmt(joint_val)}, to joints:{_fmt(joints)}, speed:{speed:.2f}, acc:{acc:.2f}")
         try:
-            self._driver.move_joint(joints, velocity=speed, acc=acc)
+            self._driver.move_joint(joints, velocity=ratio_j, acc=acc)
             new_joint_val, _ = self.get_current_joint()
             logger.info(f"move_to_joint: Success moving to joint, actual joints:{_fmt(new_joint_val)}")
             return True, ""
@@ -371,7 +380,8 @@ class RobotService:
             return False, msg
             
         try:
-            return self.move_to_joint([0.0, 0.0, -156.0, 0.0, 0.0, 0.0], speed=speed, acc=acc)
+            return self.move_to_joint([0.0, 0.0, -156.0, 0.0, -170.0, 0.0], speed=speed, acc=acc)
+            #return self.move_to_joint([0.0, 0.0, -156.0, 0.0, 0.0, 0.0], speed=speed, acc=acc)
         except Exception as e:
             msg = f"Error going fold: {e}"
             logger.error(msg)
@@ -451,6 +461,12 @@ class RobotService:
             "load": 0.0,
             "error_status": 0,
             "tool_vector_actual": [0.0]*6,
+            "hand_type": [0, 0, 0, 0],
+            "tool_index": 0,
+            "run_queued_cmd": 0,
+            "velocity_ratio": 0,
+            "xyz_velocity_ratio": 0,
+            "r_velocity_ratio": 0,
         }
 
     def _poll_loop(self, interval: float):
@@ -476,6 +492,12 @@ class RobotService:
                     "load": diagnostics.get("load", 0.0),
                     "error_status": diagnostics.get("error_status", 0),
                     "tool_vector_actual": diagnostics.get("tool_vector_actual", pose),
+                    "hand_type": diagnostics.get("hand_type", [0, 0, 0, 0]),
+                    "tool_index": diagnostics.get("tool_index", 0),
+                    "run_queued_cmd": diagnostics.get("run_queued_cmd", 0),
+                    "velocity_ratio": diagnostics.get("velocity_ratio", 0),
+                    "xyz_velocity_ratio": diagnostics.get("xyz_velocity_ratio", 0),
+                    "r_velocity_ratio": diagnostics.get("r_velocity_ratio", 0),
                 }
                 for cb in self._ws_callbacks:
                     try:
@@ -488,18 +510,23 @@ class RobotService:
     def pause(self) -> tuple[bool, str]:
         if not self._driver or not self._is_connected:
             return False, "Robot is not connected"
+        logger.info("pausing robot...")
         success = self._driver.pause()
+        logger.info(f"robot paused. Success: {success}")
         return success, "" if success else "Failed to pause robot"
 
     def resume(self) -> tuple[bool, str]:
         if not self._driver or not self._is_connected:
             return False, "Robot is not connected"
+        logger.info("resuming robot...")
         success = self._driver.resume()
+        logger.info(f"robot resumed. Success: {success}")
         return success, "" if success else "Failed to resume robot"
 
     def estop(self) -> tuple[bool, str]:
         if not self._driver or not self._is_connected:
             return False, "Robot is not connected"
+        logger.info("estoping robot...")
         success = self._driver.estop()
         return success, "" if success else "Failed to estop robot"
 
