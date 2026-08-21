@@ -470,6 +470,7 @@ class DobotApi:
         sock: Optional[socket.socket] = None
         try:
             sock = socket.create_connection((ip, port), timeout=connect_timeout)
+            sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             sock.settimeout(reply_timeout)
         except OSError as exc:
             if sock is not None:
@@ -584,6 +585,13 @@ class DobotApi:
     def sendCmd(self, string: str) -> None:
         """下发协议中明确“返回：无”的指令（ServoJ / ServoP），不等待应答。"""
         with self._globalLock:
+            self._discard_pending()
+            self.send_data(string)
+
+    def sendWithoutReply(self, string: str) -> None:
+        """下发协议中明确“返回：无”的指令，不等待应答。"""
+        with self._globalLock:
+            self._discard_pending()
             self.send_data(string)
 
     # -- 生命周期 -----------------------------------------------------------
@@ -1410,15 +1418,46 @@ class DobotApiMove(DobotApi):
                   axisID 为笛卡尔坐标轴时只能取 0 或 2。
         user/tool 可选，已标定的坐标系索引，取值范围 [0,9]，默认 0
         """
-        parts = _optional_parts(
-            ("CoordType", "User", "Tool"), dynParams,
-            {"CoordType": coordType, "User": user, "Tool": tool})
-        if not axisID:
-            if parts:
-                raise DobotParamError("停止点动时不应携带可选参数")
+        axis = str(axisID).strip()
+        valid_axes = {
+            'J1+', 'J1-', 'J2+', 'J2-', 'J3+', 'J3-', 'J4+', 'J4-', 'J5+', 'J5-', 'J6+', 'J6-',
+            'X+', 'X-', 'Y+', 'Y-', 'Z+', 'Z-', 'Rx+', 'Rx-', 'Ry+', 'Ry-', 'Rz+', 'Rz-'
+        }
+
+        # 1. 未携带或携带无效轴名称时，按协议下发 MoveJog() 停止点动
+        if not axis or axis not in valid_axes:
             return self.sendRecvMsg("MoveJog()")
-        args = [str(axisID).strip()] + parts
-        return self.sendRecvMsg("MoveJog(" + ",".join(args) + ")")
+
+        # 2. 区分关节点动与笛卡尔点动
+        is_joint = axis.startswith('J')
+        explicit = {}
+
+        if is_joint:
+            # 关节点动时 CoordType 默认为 1，可缺省；若显式指定则只允许为 1
+            if coordType is not None and coordType != 1:
+                raise DobotParamError(f"关节轴 {axis} 点动时 CoordType 只能为 1（关节点动），收到 {coordType}")
+        else:
+            # 笛卡尔点动时 CoordType 只能为 0（用户坐标系）或 2（工具坐标系）
+            c_type = 2 if coordType is None else coordType
+            if c_type not in (0, 2):
+                raise DobotParamError(f"笛卡尔轴 {axis} 点动时 CoordType 只能为 0（用户坐标系）或 2（工具坐标系），收到 {coordType}")
+            explicit["CoordType"] = c_type
+
+        if user is not None:
+            if not (0 <= user <= 9):
+                raise DobotParamError(f"User 索引范围必须在 [0, 9]，收到 {user}")
+            explicit["User"] = user
+
+        if tool is not None:
+            if not (0 <= tool <= 9):
+                raise DobotParamError(f"Tool 索引范围必须在 [0, 9]，收到 {tool}")
+            explicit["Tool"] = tool
+
+        parts = _optional_parts(("CoordType", "User", "Tool"), dynParams, explicit)
+        args = [axis] + parts
+        cmd = "MoveJog(" + ",".join(args) + ")"
+        self.log(f"MoveJog: {cmd}")
+        return self.sendRecvMsg(cmd)
 
     def StartTrace(self, traceName):
         """轨迹拟合：用轨迹文件中的记录点位拟合运动路径（控制器 3.5.2 及以上）。

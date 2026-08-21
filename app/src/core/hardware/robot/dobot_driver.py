@@ -8,6 +8,7 @@ from .base_driver import BaseRobotDriver, RobotPose, PoseLike, _to_list
 from .dobot_api import (
     DobotApiDashboard, DobotApiMove, DobotApiFeedBack,
     DobotApiError, DobotTimeoutError, parse_response,
+    parse_error_id, alarmAlarmJsonFile, _alarm_index, _describe_alarm
 )
 
 logger = logging.getLogger(__name__)
@@ -18,6 +19,7 @@ class DobotDriver(BaseRobotDriver):
         self.dashboard_port = dashboard_port
         self.move_port = move_port
         self.tool_num = toolnum
+        self.user = 0
         self.dashboard: Optional[DobotApiDashboard] = None
         self.move: Optional[DobotApiMove] = None
         self.feedback: Optional[DobotApiFeedBack] = None
@@ -191,13 +193,33 @@ class DobotDriver(BaseRobotDriver):
             return 0
         try:
             mode = self._cached_running_status
-            # logger.info(f"DEBUG: _cached_running_status = {mode}")
-            # 5: Running, 7: Normal idle (Common for Dobot)
-            # Actually, let's just return the raw mode for now so the frontend can see it
             return mode
         except Exception as e:
-            logger.warning(f"Error getting Dobot state: {e}")
-        return 0
+            return 0
+
+    def get_error_details(self) -> List[str]:
+        if not self._connected or not self.dashboard:
+            return []
+        try:
+            reply = self.dashboard.GetErrorID()
+            controller, servos = parse_error_id(reply)
+            
+            controller_table, servo_table = alarmAlarmJsonFile()
+            controller_index = _alarm_index(controller_table)
+            servo_index = _alarm_index(servo_table)
+            
+            msgs = []
+            for err_id in controller:
+                msgs.append(f"Controller[{err_id}]: {_describe_alarm(err_id, controller_index, 'zh_CN')}")
+                
+            for idx, s_list in enumerate(servos):
+                for err_id in s_list:
+                    msgs.append(f"Servo{idx+1}[{err_id}]: {_describe_alarm(err_id, servo_index, 'zh_CN')}")
+                    
+            return msgs
+        except Exception as e:
+            logger.error(f"Failed to get error details: {e}")
+            return []
 
     def is_robot_idle(self) -> bool:
         return self.get_running_state() == 0
@@ -300,13 +322,14 @@ class DobotDriver(BaseRobotDriver):
         rx_deg, ry_deg, rz_deg = math.degrees(lst[3]), math.degrees(lst[4]), math.degrees(lst[5])
         
         try:
-            #if self.dashboard:
-            #    r = self.dashboard.SpeedJ(int(velocity))
-            #    logger.debug(f"SpeedJ({int(velocity)}): {r}")
-            #    r = self.dashboard.AccJ(int(acc))
-            #    logger.debug(f"AccJ({int(acc)}): {r}")
+            # Fix Dobot firmware parsing bug where "-0.000000" causes -30004 error
+            # Adding 0.0 converts -0.0 to 0.0 in Python.
+            rx_deg, ry_deg, rz_deg = rx_deg + 0.0, ry_deg + 0.0, rz_deg + 0.0
             r = self.move.MovJ(x, y, z, rx_deg, ry_deg, rz_deg, tool=tool_num, speedJ=velocity, accJ=acc)
             logger.info(f"MovJ({x:.2f},{y:.2f},{z:.2f},{rx_deg:.2f},{ry_deg:.2f},{rz_deg:.2f},tool={tool_num},speedJ={velocity},accJ={acc}): {r}")
+            resp = parse_response(r)
+            if not resp.ok:
+                return resp.id
         except DobotApiError as e:
             logger.error(f"MovJ failed: {e}")
             return -1
@@ -322,13 +345,12 @@ class DobotDriver(BaseRobotDriver):
             joints.extend([0.0]*(6-len(joints)))
             
         try:
-            #if self.dashboard:
-                #r = self.dashboard.SpeedJ(int(velocity))
-                #logger.debug(f"SpeedJ({int(velocity)}): {r}")
-                #r = self.dashboard.AccJ(int(acc))
-                #logger.debug(f"AccJ({int(acc)}): {r}")
-            r = self.move.JointMovJ(joints[0], joints[1], joints[2], joints[3], joints[4], joints[5], speedJ=velocity, accJ=acc)
-            logger.info(f"JointMovJ({[round(j,2) for j in joints]},speed={velocity},acc={acc}): {r}")
+            j = [val + 0.0 for val in joints]
+            r = self.move.JointMovJ(j[0], j[1], j[2], j[3], j[4], j[5], speedJ=velocity, accJ=acc)
+            logger.info(f"JointMovJ({[round(v,2) for v in j]},speed={velocity},acc={acc}): {r}")
+            resp = parse_response(r)
+            if not resp.ok:
+                return resp.id
         except DobotApiError as e:
             logger.error(f"JointMovJ failed: {e}")
             return -1
@@ -350,8 +372,14 @@ class DobotDriver(BaseRobotDriver):
                 logger.debug(f"TCPSpeed({velocity_mm}): {r}")
                 #r = self.dashboard.AccL(int(acc))
                 #logger.debug(f"AccL({int(acc)}): {r}")
-            r = self.move.MovL(x, y, z, rx_deg, ry_deg, rz_deg, tool=tool_num, accL=acc)
-            logger.info(f"MovL({x:.2f},{y:.2f},{z:.2f},{rx_deg:.2f},{ry_deg:.2f},{rz_deg:.2f},{tool_num},{velocity_mm},{acc}): {r}")
+            # Fix -0.0 bug
+            x, y, z = x + 0.0, y + 0.0, z + 0.0
+            rx_deg, ry_deg, rz_deg = rx_deg + 0.0, ry_deg + 0.0, rz_deg + 0.0
+            r = self.move.MovL(x, y, z, rx_deg, ry_deg, rz_deg, tool=tool_num, speedL=velocity_mm, accL=acc)
+            logger.info(f"MovL({x:.2f},{y:.2f},{z:.2f},{rx_deg:.2f},{ry_deg:.2f},{rz_deg:.2f},tool={tool_num},speedL={velocity_mm},accL={acc}): {r}")
+            resp = parse_response(r)
+            if not resp.ok:
+                return resp.id
         except DobotApiError as e:
             logger.error(f"MovL failed: {e}")
             return -1
@@ -379,17 +407,20 @@ class DobotDriver(BaseRobotDriver):
             if self.dashboard:
                 r = self.dashboard.CP(cp_ratio)
                 logger.debug(f"CP({cp_ratio}): {r}")
-                #r = self.dashboard.SpeedJ(int(velocity))
-                #logger.debug(f"SpeedJ({int(velocity)}): {r}")
-                #r = self.dashboard.AccJ(int(acc))
-                #logger.debug(f"AccJ({int(acc)}): {r}")
-
-            for i, pose in enumerate(poses):
+            for pose in poses:
                 lst = _to_list(pose)
-                x, y, z = lst[0], lst[1], lst[2]
-                rx_deg, ry_deg, rz_deg = math.degrees(lst[3]), math.degrees(lst[4]), math.degrees(lst[5])
+                x, y, z = lst[0] + 0.0, lst[1] + 0.0, lst[2] + 0.0
+                rx_deg, ry_deg, rz_deg = math.degrees(lst[3]) + 0.0, math.degrees(lst[4]) + 0.0, math.degrees(lst[5]) + 0.0
+                
                 r = self.move.MovJ(x, y, z, rx_deg, ry_deg, rz_deg, tool=tool_num, speedJ=velocity, accJ=acc)
-                logger.info(f"MovJ[{i}]({x:.2f},{y:.2f},{z:.2f},tool={tool_num},speedJ={velocity},accJ={acc}): {r}")
+                # Parse response to ensure it was accepted
+                resp = parse_response(r)
+                if not resp.ok:
+                    logger.error(f"MovJ queue rejected: {r}")
+                    return resp.id
+                
+            logger.info(f"Sent {len(poses)} MovJ commands sequentially via move.MovJ")
+                
         except DobotApiError as e:
             logger.error(f"MovJ queue failed: {e}")
             return -1
@@ -418,23 +449,34 @@ class DobotDriver(BaseRobotDriver):
                 logger.debug(f"CP({cp_ratio}): {r}")
                 r = self.dashboard.TCPSpeed(velocity_mm)
                 logger.debug(f"TCPSpeed({velocity_mm}): {r}")
-                #r = self.dashboard.AccL(int(acc))
-                #logger.debug(f"AccL({int(acc)}): {r}")
-
-            for i, pose in enumerate(poses):
+            for pose in poses:
                 lst = _to_list(pose)
-                x, y, z = lst[0], lst[1], lst[2]
-                rx_deg, ry_deg, rz_deg = math.degrees(lst[3]), math.degrees(lst[4]), math.degrees(lst[5])
+                x, y, z = lst[0] + 0.0, lst[1] + 0.0, lst[2] + 0.0
+                rx_deg, ry_deg, rz_deg = math.degrees(lst[3]) + 0.0, math.degrees(lst[4]) + 0.0, math.degrees(lst[5]) + 0.0
+                
                 r = self.move.MovL(x, y, z, rx_deg, ry_deg, rz_deg, tool=tool_num, accL=acc)
-                logger.info(f"MovL[{i}]({x:.2f},{y:.2f},{z:.2f},tool={tool_num},speedL={velocity_mm},accL={acc}): {r}")
+                resp = parse_response(r)
+                if not resp.ok:
+                    logger.error(f"MovL queue rejected: {r}")
+                    return resp.error_id
+                logger.info(f"MovL sent: {x,y,z,rx_deg,ry_deg,rz_deg}, response {r}")
+                
+            logger.info(f"Sent {len(poses)} MovL commands sequentially via move.MovL")
+                
         except DobotApiError as e:
-            r = self.dashboard.TCPSpeedEnd()
-            logger.debug(f"TCPSpeedEnd (on error): {r}")
+            if self.dashboard:
+                r = self.dashboard.TCPSpeedEnd()
+                logger.debug(f"TCPSpeedEnd (on error): {r}")
             logger.error(f"MovL queue failed: {e}")
             return -1
             
         if wait:
-            self._wait_motion_done()
+            time.sleep(0.001)
+            logger.info("waiting for dobot motion done ... ")
+            if not self._wait_motion_done():
+                logger.warning("dobot motion time out.")
+            else:
+                logger.info("dobot motion done.")
             r = self.dashboard.TCPSpeedEnd()
             logger.debug(f"TCPSpeedEnd: {r}")
             
@@ -472,6 +514,15 @@ class DobotDriver(BaseRobotDriver):
     def go_home(self, wait: bool = True, velocity: Optional[float] = None, acc: Optional[float] = None) -> int:
         vel = velocity if velocity is not None else 20.0
         acc_val = acc if acc is not None else 20.0
+        # Force-discard any stale data that may have accumulated on the 30003 move port
+        # after MoveJog. Even though MoveJog() stop was sent, the firmware may have pushed
+        # extra data into the TCP stream. Discarding here prevents protocol desync on JointMovJ.
+        if self.move:
+            try:
+                self.move._discard_pending()
+                logger.info("go_home: Cleared move port (30003) receive buffer")
+            except Exception as e:
+                logger.warning(f"go_home: Failed to clear move port buffer: {e}")
         # Default home position for Dobot
         return self.move_joint([0, 0, -90, -90, -90, 0], velocity=vel, acc=acc_val, wait=wait)
 
@@ -506,4 +557,90 @@ class DobotDriver(BaseRobotDriver):
             return True
         except Exception as e:
             logger.error(f"Error emergency stopping robot: {e}")
+            return False
+
+    def move_jog_joint(self, axis_id: str = "") -> bool:
+        """
+        关节点动 (J1+ ~ J6+, J1- ~ J6-) 或停止点动 ("")。
+        """
+        if not self._connected or not self.move:
+            return False
+        try:
+            if not axis_id:
+                r = self.move.MoveJog("")
+                logger.info(f"MoveJog(Joint Stop): {r}")
+                if self.dashboard:
+                    try:
+                        time.sleep(0.1)
+                        r2 = self.dashboard.ResetRobot()
+                        logger.info(f"MoveJog stop: ResetRobot: {r2}")
+                        time.sleep(0.1)
+                        r3 = self.dashboard.EnableRobot()
+                        logger.info(f"MoveJog stop: EnableRobot: {r3}")
+                        time.sleep(0.1)
+                    except Exception as e:
+                        logger.warning(f"MoveJog stop: ResetRobot/EnableRobot failed: {e}")
+            else:
+                r = self.move.MoveJog(axis_id)
+                logger.info(f"MoveJog({axis_id}): {r}")
+            return True
+        except DobotApiError as e:
+            logger.error(f"move_jog_joint failed: {e}")
+            return False
+
+    def move_jog_cartesian(self, axis_id: str = "", coord_type: int = 2, user: Optional[int] = None, tool_num: Optional[int] = None) -> bool:
+        """
+        笛卡尔坐标点动 (X+, Y+, Z+, Rx+, Ry+, Rz+ 等) 或停止点动 ("")。
+        coord_type: 0 (用户/基坐标系), 2 (工具坐标系), 默认 2。
+        tool_num: 工具坐标系编号，默认使用 self.tool_num。
+        """
+        if not self._connected or not self.move:
+            return False
+        tool = self.tool_num if tool_num is None else tool_num
+        user = self.user if user is None else user
+        try:
+            if not axis_id:
+                r = self.move.MoveJog("")
+                logger.info(f"MoveJog(Cartesian Stop): {r}")
+                if self.dashboard:
+                    try:
+                        time.sleep(0.1)
+                        r2 = self.dashboard.ResetRobot()
+                        logger.info(f"MoveJog stop: ResetRobot: {r2}")
+                        time.sleep(0.1)
+                        r3 = self.dashboard.EnableRobot()
+                        logger.info(f"MoveJog stop: EnableRobot: {r3}")
+                        time.sleep(0.1)
+                    except Exception as e:
+                        logger.warning(f"MoveJog stop: ResetRobot/EnableRobot failed: {e}")
+            else:
+                r = self.move.MoveJog(axis_id, coordType=coord_type, user=user, tool=tool)
+                logger.info(f"MoveJog({axis_id}, coordType={coord_type}, user={user}, tool={tool}): {r}")
+            return True
+        except DobotApiError as e:
+            logger.error(f"move_jog_cartesian failed: {e}")
+            return False
+
+    def move_jog(self, axis_id: str = "", coord_type: int = 1) -> bool:
+        """
+        统一点动入口（兼容性包装）。根据 axis_id 自动分发到 move_jog_joint 或 move_jog_cartesian。
+        """
+        if axis_id.startswith('J'):
+            return self.move_jog_joint(axis_id)
+        else:
+            c_type = 2 if coord_type == 1 else coord_type
+            return self.move_jog_cartesian(axis_id, coord_type=c_type)
+    
+    def sync(self) -> bool:
+        """
+        同步
+        """
+        if not self._connected:
+            return False
+        try:
+            r = self.move.Sync()
+            logger.info(f"Sync: {r}")
+            return True
+        except DobotApiError as e:
+            logger.error(f"Sync failed: {e}")
             return False

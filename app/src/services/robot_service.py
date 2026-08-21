@@ -51,6 +51,31 @@ class RobotService:
     @property
     def global_speed_factor(self) -> int:
         return self._global_speed_factor
+        
+    def set_global_speed_factor(self, factor: int) -> tuple[bool, str]:
+        if not (1 <= factor <= 100):
+            return False, "Global speed factor must be between 1 and 100"
+            
+        self._global_speed_factor = factor
+        
+        # Apply to connected robot if available
+        if self._is_connected and self._driver and hasattr(self._driver, 'set_global_speed'):
+            try:
+                self._driver.set_global_speed(factor)
+                logger.info(f"Dynamically updated robot set_global_speed to {factor}")
+            except Exception as e:
+                logger.warning(f"Failed to dynamically set global speed: {e}")
+                
+        # Re-calculate effective max speeds based on the new global_speed_factor
+        
+        eff_max_tcp = self._max_tcp_speed_mm_s * (self._global_speed_factor / 100.0)
+        eff_max_jnt = (self._max_joint_speed_deg_s[0] if self._max_joint_speed_deg_s else 180.0) * (self._global_speed_factor / 100.0)
+        if self._speed_l > eff_max_tcp:
+            self._speed_l = eff_max_tcp
+        if self._speed_j > eff_max_jnt:
+            self._speed_j = eff_max_jnt
+            
+        return True, "Success"
 
     @property
     def max_tcp_speed_mm_s(self) -> float:
@@ -286,6 +311,7 @@ class RobotService:
                 cp_ratio=cp_ratio
             )
             if res == 0:
+                #self._driver.sync()
                 logger.info(f"move_l_queue: Successfully executed {len(converted_poses)} waypoints.")
                 return True, ""
             return False, f"move_l_queue returned error code: {res}"
@@ -357,6 +383,46 @@ class RobotService:
             return self.move_to_joint(joints, speed=speed, acc=acc)
             
         return False, f"jog_step: Invalid axis {axis}"
+
+    def jog_continuous(self, axis: str, direction: int) -> tuple[bool, str]:
+        if not self._driver or not self._is_connected:
+            msg = "jog_continuous: Robot is not connected"
+            logger.error(msg)
+            return False, msg
+
+        if direction == 0:
+            logger.info("jog_continuous: Stop jogging")
+            if hasattr(self._driver, 'move_jog'):
+                self._driver.move_jog("")
+            return True, ""
+
+        cartesian_axes = ['X', 'Y', 'Z', 'Rx', 'Ry', 'Rz']
+        joint_axes = ['J1', 'J2', 'J3', 'J4', 'J5', 'J6']
+        dir_str = "+" if direction > 0 else "-"
+
+        if axis in cartesian_axes:
+            axis_id = axis + dir_str
+            logger.info(f"jog_continuous: Start cartesian jog {axis_id} (Tool CoordType 0)")
+            if hasattr(self._driver, 'move_jog_cartesian'):
+                success = self._driver.move_jog_cartesian(axis_id, coord_type=0)
+            else:
+                success = self._driver.move_jog(axis_id, coord_type=0)
+        elif axis in joint_axes:
+            axis_id = axis + dir_str
+            logger.info(f"jog_continuous: Start joint jog {axis_id}")
+            if hasattr(self._driver, 'move_jog_joint'):
+                success = self._driver.move_jog_joint(axis_id)
+            else:
+                success = self._driver.move_jog(axis_id, coord_type=1)
+        else:
+            return False, f"jog_continuous: Invalid axis {axis}"
+
+        if not success:
+            msg = f"jog_continuous: Failed to execute MoveJog({axis_id})"
+            logger.error(msg)
+            return False, msg
+            
+        return True, ""
 
     def go_zero(self, speed: float = 10.0, acc: float = 10.0) -> tuple[bool, str]:
         logger.info(f"go_zero: speed:{speed}, acc:{acc}")
@@ -471,6 +537,8 @@ class RobotService:
 
     def _poll_loop(self, interval: float):
         last_status = None
+        last_error_status = 0
+        cached_error_details = []
         while not self._stop_polling and self._is_connected:
             pose, _ = self.get_current_pose()
             joints, _ = self.get_current_joint()
@@ -482,6 +550,13 @@ class RobotService:
                 last_status = status
                 
             if pose and joints:
+                current_error = diagnostics.get("error_status", 0)
+                if current_error != 0 and last_error_status == 0:
+                    cached_error_details = self._driver.get_error_details() if self._driver else []
+                elif current_error == 0:
+                    cached_error_details = []
+                last_error_status = current_error
+
                 msg_payload = {
                     "pose": pose,
                     "joint": joints,
@@ -490,7 +565,8 @@ class RobotService:
                     "tcp_speed_mm_s": diagnostics.get("tcp_speed_mm_s", 0.0),
                     "qd_actual": diagnostics.get("qd_actual", [0.0]*6),
                     "load": diagnostics.get("load", 0.0),
-                    "error_status": diagnostics.get("error_status", 0),
+                    "error_status": current_error,
+                    "error_details": cached_error_details,
                     "tool_vector_actual": diagnostics.get("tool_vector_actual", pose),
                     "hand_type": diagnostics.get("hand_type", [0, 0, 0, 0]),
                     "tool_index": diagnostics.get("tool_index", 0),
@@ -522,6 +598,20 @@ class RobotService:
         success = self._driver.resume()
         logger.info(f"robot resumed. Success: {success}")
         return success, "" if success else "Failed to resume robot"
+
+    def clear_error(self) -> tuple[bool, str]:
+        if not self._is_connected or not self._driver:
+            return False, "Not connected"
+        try:
+            r = self._driver.dashboard.ClearError()
+            logger.info(f"ClearError: {r}")
+            # Dobot V3 protocol requires calling EnableRobot again to reopen the motion queue after an alarm is cleared.
+            time.sleep(0.5) # small delay before enabling
+            r2 = self._driver.dashboard.EnableRobot()
+            logger.info(f"EnableRobot after clear: {r2}")
+            return True, r
+        except Exception as e:
+            return False, str(e)
 
     def estop(self) -> tuple[bool, str]:
         if not self._driver or not self._is_connected:

@@ -587,7 +587,7 @@ class ExecuteYamlPathRequest(BaseModel):
     # Joint motion parameters (Go Home & MovJ to start point)
     speed_j: Optional[float] = None # % (关节速度百分比)
     acc_j: Optional[float] = None   # % (关节加速度百分比)
-    cp_ratio: Optional[int] = 50
+    cp_ratio: Optional[int] = 100
     # Backward compatibility fields
     speed: Optional[float] = None
     acc: Optional[float] = None
@@ -680,6 +680,8 @@ def execute_yaml_path(name: str, req: ExecuteYamlPathRequest):
     if not home_ok:
         raise HTTPException(status_code=500, detail=f"Failed to go home before path execution: {home_err}")
 
+    logger.info(f"execute_yaml_path: Robot has moved to Home position.")
+
     total_executed_pts = 0
     executed_names = []
     has_moved_j_to_start = False
@@ -728,6 +730,7 @@ def execute_yaml_path(name: str, req: ExecuteYamlPathRequest):
                 if not j_ok:
                     raise HTTPException(status_code=500, detail=f"Failed to MovJ to start waypoint of {path_title}: {j_err}")
                 has_moved_j_to_start = True
+                logger.info(f"execute_yaml_path: Robot has moved to 1st waypoint of {path_title}.")
 
             # 3. 批量发送 waypoints：第 1 条 path 的第 1 个 waypoint 已经通过 MovJ 到达，跳过
             #    后续 path 从第 1 个 waypoint 开始（没有做 MovJ 过渡）
@@ -741,7 +744,7 @@ def execute_yaml_path(name: str, req: ExecuteYamlPathRequest):
                     exec_poses,
                     speed=speed_l,
                     acc=acc_l,
-                    cp_ratio=98, #req.cp_ratio if req.cp_ratio is not None else 98,
+                    cp_ratio=req.cp_ratio if req.cp_ratio is not None else 100,
                     wait=True
                 )
             if not batch_ok:

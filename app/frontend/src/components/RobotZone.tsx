@@ -12,6 +12,7 @@ interface RobotState {
   qd_actual?: number[];
   load?: number;
   error_status?: number;
+  error_details?: string[];
   tool_vector_actual?: number[];
   hand_type?: number[];    // int8 x4: 手系配置
   tool_index?: number;     // 当前工具坐标系索引
@@ -68,6 +69,19 @@ const RobotZone: React.FC<RobotZoneProps> = ({
   pathsVersion = 0,
   pathState = 'raw',
 }) => {
+  const handleClearError = async () => {
+    try {
+      const res = await fetch('http://localhost:8000/api/calib/robot/clear_error', { method: 'POST' });
+      if (!res.ok) {
+        const error = await res.json();
+        alert(`Clear Error failed: ${error.detail || 'Unknown error'}`);
+      }
+    } catch (err: any) {
+      alert(`Clear Error error: ${err.message}`);
+      console.error('Failed to clear error:', err);
+    }
+  };
+
   return (
     <div className="w-full h-full flex flex-col gap-3">
       {/* Robot 3D Viewer with Surface Mesh Overlay & 3D TCP Trajectories */}
@@ -79,6 +93,46 @@ const RobotZone: React.FC<RobotZoneProps> = ({
           pathsVersion={pathsVersion}
           pathState={pathState}
         />
+
+        {/* Centered Error Overlay */}
+        {!!robotState.error_status && (
+          <div className="absolute inset-0 flex items-center justify-center z-50 pointer-events-none">
+            <div className="bg-red-950/80 backdrop-blur-md border border-red-500/50 p-2.5 rounded-lg flex items-center gap-4 shadow-[0_0_20px_rgba(239,68,68,0.3)] pointer-events-auto transition-all transform animate-in fade-in zoom-in-95 duration-200 min-w-[450px] max-w-[90%]">
+              
+              {/* Left side: Icon & Code */}
+              <div className="flex flex-col items-center gap-1 border-r border-red-500/30 pr-4 shrink-0">
+                <div className="w-8 h-8 bg-red-500/20 rounded-full flex items-center justify-center">
+                  <span className="text-red-500 text-lg animate-pulse">⚠️</span>
+                </div>
+                <div className="flex flex-col items-center text-center">
+                  <h3 className="text-red-400 font-bold text-[11px] tracking-wide uppercase">Robot Alarm</h3>
+                  <p className="text-red-300/80 text-[10px] font-mono leading-none">Code: <strong className="text-white">{robotState.error_status}</strong></p>
+                </div>
+              </div>
+
+              {/* Middle side: Error Details */}
+              <div className="flex-1 flex flex-col gap-1 max-h-[80px] overflow-y-auto hide-scrollbar">
+                {robotState.error_details && robotState.error_details.length > 0 ? (
+                  robotState.error_details.map((msg, idx) => (
+                    <div key={idx} className="text-red-200 text-[11px] font-medium bg-red-900/40 px-2 py-1 rounded-sm border border-red-500/20 break-words leading-tight">
+                      {msg}
+                    </div>
+                  ))
+                ) : (
+                  <div className="text-red-300/60 text-[11px] italic">Unknown error details (Check logs)</div>
+                )}
+              </div>
+
+              {/* Right side: Button */}
+              <button
+                onClick={handleClearError}
+                className="shrink-0 px-3 py-1.5 bg-red-600 hover:bg-red-500 active:scale-95 text-white rounded-md text-[11px] font-bold shadow-[0_0_10px_rgba(239,68,68,0.4)] transition-all cursor-pointer whitespace-nowrap"
+              >
+                CLEAR ERROR
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Live Robot Speed HUD (Bottom-Left Ultra-Transparent HUD Overlay) */}
         <div className="absolute bottom-2.5 left-2.5 z-10 pointer-events-none flex flex-col gap-0.5 px-2 py-1 font-mono text-[10px] select-none drop-shadow-[0_1px_3px_rgba(0,0,0,0.95)]">

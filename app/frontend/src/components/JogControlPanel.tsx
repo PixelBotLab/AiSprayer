@@ -17,9 +17,6 @@ interface JogControlPanelProps {
 }
 
 const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
-  const [mode, setMode] = useState<'cartesian' | 'joint'>('cartesian');
-  const [xyzStep, setXyzStep] = useState<number>(5.0);
-  const [angStep, setAngStep] = useState<number>(1.0);
   const [speedL, setSpeedL] = useState<number>(100);
   const [accL, setAccL] = useState<number>(20);
   const [speedJ, setSpeedJ] = useState<number>(20);
@@ -38,6 +35,10 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
   const [robotConnected, setRobotConnected] = useState<boolean>(false);
   const [connecting, setConnecting] = useState<boolean>(false);
   const [activeAction, setActiveAction] = useState<'home' | 'zero' | 'fold' | null>(null);
+  
+  // Track active jog button
+  const [activeJog, setActiveJog] = useState<{axis: string, dir: number} | null>(null);
+  
   const wsRef = useRef<WebSocket | null>(null);
 
   const isMoving = displayState.status === 1;
@@ -134,11 +135,10 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
           // Fetch current global speed
           fetchSpeed();
         } else {
-          alert('Failed to connect to robot.');
+          console.error('Failed to connect to robot.');
         }
       } catch (err: any) {
-        alert(`Connection error: ${err.message}`);
-        console.error('Failed to connect:', err);
+        console.error('Connect error:', err);
       }
     }
     setConnecting(false);
@@ -156,22 +156,39 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
     }
   };
 
-  const handleJog = async (axis: string, direction: number) => {
-    const isXyz = ['X', 'Y', 'Z'].includes(axis);
-    const stepSize = isXyz ? xyzStep : angStep;
+  const syncGlobalSpeed = async (newFactor: number) => {
     try {
-      const res = await fetch('http://localhost:8000/api/calib/robot/jog', {
+      await fetch('http://localhost:8000/api/calib/robot/global_speed', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ axis, direction, step: stepSize, speed_l: speedL, acc_l: accL, speed_j: speedJ, acc_j: accJ })
+        body: JSON.stringify({ factor: newFactor })
+      });
+      fetchSpeed(); // Re-fetch to update effective caps
+    } catch (err) {
+      console.error('Failed to sync global speed factor:', err);
+    }
+  };
+
+  const handleJogContinuous = async (axis: string, direction: number) => {
+    if (direction !== 0) {
+      setActiveJog({ axis, dir: direction });
+    } else {
+      setActiveJog(null);
+    }
+    try {
+      const res = await fetch('http://localhost:8000/api/calib/robot/jog_continuous', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ axis, direction })
       });
       if (!res.ok) {
         const error = await res.json();
-        alert(`Jog failed: ${error.detail || 'Unknown error'}`);
+        console.error(`Jog failed: ${error.detail || 'Unknown error'}`);
+        setActiveJog(null);
       }
     } catch (err: any) {
-      alert(`Jog error: ${err.message}`);
-      console.error(err);
+      console.error(`Jog error: ${err.message}`);
+      setActiveJog(null);
     }
   };
 
@@ -185,11 +202,12 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
       });
       if (!res.ok) {
         const error = await res.json();
-        alert(`Zero failed: ${error.detail || 'Unknown error'}`);
+        console.error(`Zero failed: ${error.detail || 'Unknown error'}`);
       }
     } catch (err: any) {
-      alert(`Zero error: ${err.message}`);
       console.error('Failed to go zero:', err);
+    } finally {
+      setActiveAction(null);
     }
   };
 
@@ -203,11 +221,12 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
       });
       if (!res.ok) {
         const error = await res.json();
-        alert(`Home failed: ${error.detail || 'Unknown error'}`);
+        console.error(`Home failed: ${error.detail || 'Unknown error'}`);
       }
     } catch (err: any) {
-      alert(`Home error: ${err.message}`);
       console.error('Failed to go home:', err);
+    } finally {
+      setActiveAction(null);
     }
   };
 
@@ -221,11 +240,12 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
       });
       if (!res.ok) {
         const error = await res.json();
-        alert(`Fold failed: ${error.detail || 'Unknown error'}`);
+        console.error(`Fold failed: ${error.detail || 'Unknown error'}`);
       }
     } catch (err: any) {
-      alert(`Fold error: ${err.message}`);
       console.error('Failed to fold robot:', err);
+    } finally {
+      setActiveAction(null);
     }
   };
 
@@ -239,6 +259,19 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
     try {
       await fetch('http://localhost:8000/api/calib/robot/resume', { method: 'POST' });
     } catch (err: any) { console.error('Resume error:', err); }
+  };
+
+  const handleClearError = async () => {
+    try {
+      const res = await fetch('http://localhost:8000/api/calib/robot/clear_error', { method: 'POST' });
+      if (!res.ok) {
+        const error = await res.json();
+        alert(`Clear Error failed: ${error.detail || 'Unknown error'}`);
+      }
+    } catch (err: any) {
+      alert(`Clear Error error: ${err.message}`);
+      console.error('Failed to clear error:', err);
+    }
   };
 
   const handleEstop = async () => {
@@ -260,31 +293,102 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
     { name: 'J4', unit: '°' }, { name: 'J5', unit: '°' }, { name: 'J6', unit: '°' }
   ];
 
-  const currentAxes = mode === 'cartesian' ? cartesianAxes : jointAxes;
-  const currentValues = mode === 'cartesian' ? displayState.pose : displayState.joint;
+  const renderAxisRow = (axis: {name: string, unit: string}, idx: number, isJoint: boolean) => {
+    const currentValues = isJoint ? displayState.joint : displayState.pose;
+    
+    const formatValue = (idx: number, isJoint: boolean) => {
+      let val = currentValues[idx];
+      if (val === undefined || val === null) return '0.00';
+      if (!isJoint && idx >= 3) {
+         val = val * (180 / Math.PI);
+      }
+      if (Math.abs(val) < 0.005) return '0.00';
+      const formatted = val.toFixed(2);
+      return formatted === '-0.00' || (formatted.startsWith('-0.0') && parseFloat(formatted) === 0) ? '0.00' : formatted;
+    };
 
-  const formatValue = (idx: number) => {
-    let val = currentValues[idx];
-    if (val === undefined || val === null) return '0.00';
-    if (mode === 'cartesian' && idx >= 3) {
-       // Backend sends Rx/Ry/Rz in radians, convert to degrees for display
-       val = val * (180 / Math.PI);
+    let pulseDuration = '0s';
+    const isJoggingNeg = activeJog?.axis === axis.name && activeJog?.dir === -1;
+    const isJoggingPos = activeJog?.axis === axis.name && activeJog?.dir === 1;
+
+    if (activeJog && (isJoggingNeg || isJoggingPos)) {
+      let speed = 10;
+      if (isJoint) {
+        let v = (displayState.qd_actual && displayState.qd_actual[idx]) || 0;
+        speed = Math.abs(v);
+      } else {
+        if (displayState.tcp_speed_actual && displayState.tcp_speed_actual.length > idx) {
+          let v = displayState.tcp_speed_actual[idx];
+          if (idx < 3) {
+            // backend tcp_speed_actual is m/s, convert to mm/s
+            speed = Math.abs(v) * 1000;
+          } else {
+            // rad/s to deg/s
+            speed = Math.abs(v) * (180 / Math.PI);
+          }
+        } else {
+          speed = speedL;
+        }
+      }
+      
+      // Calculate duration inversely proportional to speed
+      // Map 10mm/s -> 1s, 50mm/s -> 0.2s
+      speed = Math.max(0.1, speed);
+      let d = 10 / speed;
+      d = Math.min(1.5, Math.max(0.1, d)); // Clamp between 0.1s and 1.5s
+      pulseDuration = d.toFixed(3) + 's';
     }
-    if (Math.abs(val) < 0.005) {
-      return '0.00';
-    }
-    const formatted = val.toFixed(2);
-    return formatted === '-0.00' || (formatted.startsWith('-0.0') && parseFloat(formatted) === 0)
-      ? '0.00'
-      : formatted;
+
+    const getBtnClass = (isActive: boolean) => `
+      w-8 h-7 flex items-center justify-center border rounded transition-colors select-none text-[14px] font-bold
+      ${isActive 
+        ? 'bg-blue-600 border-blue-400 text-white animate-pulse shadow-[0_0_12px_rgba(59,130,246,0.9)] z-10' 
+        : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700 hover:text-white'}
+      ${disableMotion && !isActive ? 'opacity-50 cursor-not-allowed hover:bg-slate-800' : ''}
+    `;
+
+    return (
+      <div key={axis.name} className="flex items-center gap-1">
+        <button 
+          onPointerDown={(e) => { e.currentTarget.releasePointerCapture(e.pointerId); handleJogContinuous(axis.name, -1); }}
+          onPointerUp={() => handleJogContinuous(axis.name, 0)}
+          onPointerLeave={() => { if(activeJog?.axis === axis.name && activeJog?.dir === -1) handleJogContinuous(axis.name, 0); }}
+          onContextMenu={(e) => e.preventDefault()}
+          disabled={disableMotion && !isJoggingNeg}
+          className={getBtnClass(isJoggingNeg)}
+          style={isJoggingNeg ? { animationDuration: pulseDuration } : {}}
+        >
+          -
+        </button>
+        
+        <div className="flex-1 flex items-center justify-between bg-slate-950 border border-slate-800 rounded px-1.5 h-7">
+          <span className="text-[10px] font-bold text-slate-500 w-[18px]">{axis.name}</span>
+          <span className="text-[11px] font-mono text-emerald-400 tracking-wider">
+            {formatValue(idx, isJoint)}
+          </span>
+          <span className="text-[8px] text-slate-600 w-[10px]">{axis.unit}</span>
+        </div>
+
+        <button 
+          onPointerDown={(e) => { e.currentTarget.releasePointerCapture(e.pointerId); handleJogContinuous(axis.name, 1); }}
+          onPointerUp={() => handleJogContinuous(axis.name, 0)}
+          onPointerLeave={() => { if(activeJog?.axis === axis.name && activeJog?.dir === 1) handleJogContinuous(axis.name, 0); }}
+          onContextMenu={(e) => e.preventDefault()}
+          disabled={disableMotion && !isJoggingPos}
+          className={getBtnClass(isJoggingPos)}
+          style={isJoggingPos ? { animationDuration: pulseDuration } : {}}
+        >
+          +
+        </button>
+      </div>
+    );
   };
 
   return (
     <div className="bg-slate-900/80 rounded-xl border border-slate-800 p-3 shadow-lg backdrop-blur-sm shrink-0 w-full flex flex-col gap-2.5 relative">
       {/* Jog Controls Toolbar */}
       <div className="flex justify-between items-center mt-1">
-        {/* Column 1: Mode Toggle */}
-        <div className="flex flex-col gap-1 w-[105px] relative">
+        <div className="flex flex-col gap-1 w-[80px] relative">
           {/* Status LED Indicator */}
           <div className="absolute -top-4 left-0 flex items-center gap-1.5 pointer-events-none">
             <div className={`w-2 h-2 rounded-full transition-colors duration-300 ${!robotConnected ? 'bg-slate-600' : isMoving ? 'bg-amber-400 animate-pulse shadow-[0_0_8px_rgba(251,191,36,0.6)]' : 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]'}`}></div>
@@ -292,34 +396,20 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
               {!robotConnected ? 'Offline' : isMoving ? 'Moving' : 'Idle'}
             </span>
           </div>
-
-          <button 
-            onClick={() => setMode('cartesian')}
-            className={`px-2.5 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1.5 transition-colors border ${mode === 'cartesian' ? 'bg-slate-800 text-blue-400 border-slate-700/50' : 'bg-slate-950 text-slate-500 border-slate-800 hover:text-slate-300'}`}
-          >
-            <Crosshair size={12} /> Cartesian
-          </button>
-          <button 
-            onClick={() => setMode('joint')}
-            className={`px-2.5 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1.5 transition-colors border ${mode === 'joint' ? 'bg-slate-800 text-blue-400 border-slate-700/50' : 'bg-slate-950 text-slate-500 border-slate-800 hover:text-slate-300'}`}
-          >
-            <RotateCcw size={12} /> Joint
-          </button>
         </div>
-        {/* Column 2: Action Buttons (4x2 Grid) */}
-        <div className="grid grid-cols-4 grid-rows-2 gap-1 flex-1 max-w-[370px]">
-          {/* Row 1 */}
+        {/* Action Buttons (Single Row) */}
+        <div className="flex flex-row gap-1 flex-1 overflow-x-auto hide-scrollbar max-w-full">
           <button 
             onClick={handleConnect}
             disabled={connecting}
-            className={`px-1.5 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 transition-colors border disabled:opacity-50 ${robotConnected ? 'bg-green-600/20 text-green-500 hover:bg-green-600 hover:text-white border-green-600/30' : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border-slate-700/50'}`}
+            className={`px-2 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors border disabled:opacity-50 ${robotConnected ? 'bg-green-600/20 text-green-500 hover:bg-green-600 hover:text-white border-green-600/30' : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border-slate-700/50'}`}
           >
-            <Cpu size={12} className="shrink-0" /> <span className="truncate">{connecting ? '...' : robotConnected ? 'Disconnect' : 'Connect'}</span>
+            <Cpu size={12} className="shrink-0" /> <span>{connecting ? '...' : robotConnected ? 'Disconnect' : 'Connect'}</span>
           </button>
           <button
             onClick={handleHome}
             disabled={disableMotion}
-            className={`px-1.5 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 transition-colors border ${
+            className={`px-2 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors border ${
               activeAction === 'home'
                 ? 'bg-emerald-600/20 text-emerald-400 border-emerald-500/50 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)] cursor-not-allowed'
                 : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border-slate-700/50 disabled:opacity-50 disabled:cursor-not-allowed'
@@ -330,7 +420,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
           <button
             onClick={handleZero}
             disabled={disableMotion}
-            className={`px-1.5 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 transition-colors border ${
+            className={`px-2 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors border ${
               activeAction === 'zero'
                 ? 'bg-emerald-600/20 text-emerald-400 border-emerald-500/50 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)] cursor-not-allowed'
                 : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border-slate-700/50 disabled:opacity-50 disabled:cursor-not-allowed'
@@ -342,7 +432,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
             onClick={handleFold}
             disabled={disableMotion}
             title="Fold robot to [0, 0, -156°, 0, 0, 0]"
-            className={`px-1.5 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 transition-colors border ${
+            className={`px-2 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors border ${
               activeAction === 'fold'
                 ? 'bg-purple-600/20 text-purple-400 border-purple-500/50 animate-pulse shadow-[0_0_8px_rgba(168,85,247,0.5)] cursor-not-allowed'
                 : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border-slate-700/50 disabled:opacity-50 disabled:cursor-not-allowed'
@@ -350,79 +440,47 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
           >
             <Minimize2 size={12} className="shrink-0" /> <span>Fold</span>
           </button>
-
-          {/* Row 2 */}
           <button 
             onClick={handlePause}
-            className="px-1.5 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 transition-colors bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700/50"
+            className="px-2 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700/50"
           >
             <Pause size={12} className="shrink-0" /> <span>Pause</span>
           </button>
           <button 
             onClick={handleResume}
-            className="px-1.5 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 transition-colors bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700/50"
+            className="px-2 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700/50"
           >
             <Play size={12} className="shrink-0" /> <span>Resume</span>
           </button>
           <button 
             onClick={handleEstop}
-            className="col-span-2 px-1.5 h-7 text-xs font-bold rounded-md flex items-center justify-center gap-1.5 transition-colors bg-red-600/20 text-red-500 hover:bg-red-600 hover:text-white border border-red-600/30"
+            className="px-2 h-7 text-xs font-bold rounded-md flex items-center justify-center gap-1.5 shrink-0 transition-colors bg-red-600/20 text-red-500 hover:bg-red-600 hover:text-white border border-red-600/30"
           >
             <AlertOctagon size={12} className="shrink-0" /> <span>Stop</span>
           </button>
-        </div>
-
-
-        <div className="flex flex-col gap-1 w-[130px]">
-          <div className="flex items-center gap-1.5 bg-slate-950/50 px-1.5 h-7 rounded-md border border-slate-800/50">
-            <span className="text-[9px] text-slate-500 font-medium w-6">XYZ:</span>
-            <div className="flex gap-0.5 flex-1">
-              {[1.0, 5.0, 10.0, 50.0].map(step => (
-                <button 
-                  key={step}
-                  onClick={() => setXyzStep(step)}
-                  className={`flex-1 h-4.5 text-[8.5px] rounded border transition-colors ${xyzStep === step ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700 hover:text-slate-200'}`}
-                >
-                  {step}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="flex items-center gap-1.5 bg-slate-950/50 px-1.5 h-7 rounded-md border border-slate-800/50">
-            <span className="text-[9px] text-slate-500 font-medium w-6">ANG:</span>
-            <div className="flex gap-0.5 flex-1">
-              {[0.1, 1.0, 5.0, 10.0].map(step => (
-                <button 
-                  key={step}
-                  onClick={() => setAngStep(step)}
-                  className={`flex-1 h-4.5 text-[8.5px] rounded border transition-colors ${angStep === step ? 'bg-blue-600 border-blue-500 text-white' : 'bg-slate-800 border-slate-700 text-slate-400 hover:bg-slate-700 hover:text-slate-200'}`}
-                >
-                  {step}
-                </button>
-              ))}
-            </div>
-          </div>
         </div>
       </div>
 
       {/* Speed & Acceleration Sliders & Motion Dynamics */}
       <div className="flex flex-col gap-1.5 mb-0.5 bg-slate-950/40 p-2 rounded-lg border border-slate-800/40 text-[10px]">
-        {/* Motion Dynamics Header */}
-        <div className="flex flex-wrap items-center justify-between gap-1 font-medium px-0.5 border-b border-slate-800/40 pb-1">
-          <div className="flex items-center gap-1.5">
+        {/* Motion Dynamics Header & Global Speed */}
+        <div className="flex flex-wrap items-center justify-between gap-2 px-0.5 border-b border-slate-800/40 pb-1.5 font-medium">
+          <div className="flex items-center gap-2">
             <span className="tracking-wider uppercase text-slate-400 font-semibold text-[9.5px]">Dynamics</span>
-            <span className={`px-1.5 py-0.2 rounded text-[8.5px] font-mono font-medium ${
-              displayState.error_status && displayState.error_status !== 0
-                ? 'bg-red-500/20 text-red-400 border border-red-500/40 animate-pulse shadow-[0_0_8px_rgba(239,68,68,0.4)]'
-                : 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20'
-            }`}>
-              {displayState.error_status && displayState.error_status !== 0 ? `Alarm #${displayState.error_status}` : 'Normal'}
-            </span>
+            <div className="flex items-center gap-1.5 w-24">
+              <input 
+                type="range" 
+                className="flex-1 accent-amber-500 h-1 bg-slate-700/50 rounded-lg appearance-none cursor-pointer"
+                min="1" max="100" step="1"
+                value={globalSpeedFactor}
+                onChange={(e) => setGlobalSpeedFactor(parseInt(e.target.value))}
+                onMouseUp={(e) => syncGlobalSpeed(parseInt((e.target as HTMLInputElement).value))}
+                onTouchEnd={(e) => syncGlobalSpeed(parseInt((e.target as HTMLInputElement).value))}
+              />
+              <span className="text-amber-400 font-mono font-semibold text-[9px] w-6 text-right shrink-0">{globalSpeedFactor}%</span>
+            </div>
           </div>
-
           <div className="font-mono text-slate-400 flex flex-wrap items-center gap-1.5 text-[9px]">
-            <span>Global: <strong className="text-amber-400">{globalSpeedFactor}%</strong></span>
-            <span className="text-slate-600">|</span>
             <span>TCP Cap: <strong className="text-sky-400">{effMaxLinSpeed} mm/s</strong></span>
             <span className="text-slate-600">|</span>
             <span>JNT Cap: <strong className="text-emerald-400">{effMaxJntSpeed} °/s</strong></span>
@@ -512,37 +570,22 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
         </div>
       </div>
 
-      {/* Axis Rows */}
-      <div className="flex flex-col gap-1.5">
-          {currentAxes.map((axis, idx) => (
-            <div key={axis.name} className="flex items-center gap-2">
-              <button 
-                onMouseDown={() => handleJog(axis.name, -1)}
-                disabled={disableMotion}
-                className="w-9 h-7 flex items-center justify-center bg-slate-800 hover:bg-slate-700 active:bg-blue-600 border border-slate-700 rounded text-slate-300 hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:active:bg-slate-800"
-              >
-                -
-              </button>
-              
-              <div className="flex-1 flex items-center justify-between bg-slate-950 border border-slate-800 rounded px-2.5 h-7">
-                <span className="text-xs font-bold text-slate-500 w-5">{axis.name}</span>
-                <span className="text-xs font-mono text-emerald-400 tracking-wider">
-                  {formatValue(idx)}
-                </span>
-                <span className="text-[10px] text-slate-600 w-4">{axis.unit}</span>
-              </div>
+      {/* Axis Rows (Side by Side) */}
+      <div className="flex gap-3 mt-1">
+        {/* Cartesian (Left) */}
+        <div className="flex flex-col gap-1.5 flex-1">
+          {cartesianAxes.map((axis, idx) => renderAxisRow(axis, idx, false))}
+        </div>
+        
+        {/* Divider */}
+        <div className="w-[1px] bg-slate-800/60 rounded-full" />
 
-              <button 
-                onMouseDown={() => handleJog(axis.name, 1)}
-                disabled={disableMotion}
-                className="w-9 h-7 flex items-center justify-center bg-slate-800 hover:bg-slate-700 active:bg-blue-600 border border-slate-700 rounded text-slate-300 hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed disabled:active:bg-slate-800"
-              >
-                +
-              </button>
-            </div>
-          ))}
+        {/* Joint (Right) */}
+        <div className="flex flex-col gap-1.5 flex-1">
+          {jointAxes.map((axis, idx) => renderAxisRow(axis, idx, true))}
         </div>
-        </div>
+      </div>
+    </div>
   );
 };
 

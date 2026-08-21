@@ -74,6 +74,17 @@ def jog_robot(req: JogReq):
         raise HTTPException(status_code=400, detail=msg)
     return {"status": "ok"}
 
+class JogContinuousReq(BaseModel):
+    axis: str
+    direction: int
+
+@calib_router.post("/robot/jog_continuous")
+def jog_continuous_robot(req: JogContinuousReq):
+    success, msg = robot_service.jog_continuous(req.axis, req.direction)
+    if not success:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"status": "ok"}
+
 @calib_router.post("/robot/zero")
 def robot_zero(req: HomeReq):
     success, msg = robot_service.go_zero(speed=req.speed, acc=req.acc)
@@ -120,6 +131,16 @@ def set_robot_speed(req: SpeedReq):
         raise HTTPException(status_code=400, detail=msg)
     return {"status": "ok"}
 
+class GlobalSpeedReq(BaseModel):
+    factor: int
+
+@calib_router.post("/robot/global_speed")
+def set_global_speed_endpoint(req: GlobalSpeedReq):
+    success, msg = robot_service.set_global_speed_factor(req.factor)
+    if not success:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"status": "ok"}
+
 @calib_router.post("/robot/pause")
 def pause_robot():
     success, err = robot_service.pause()
@@ -137,6 +158,13 @@ def resume_robot():
 @calib_router.post("/robot/estop")
 def estop_robot():
     success, err = robot_service.estop()
+    if not success:
+        raise HTTPException(status_code=400, detail=err)
+    return {"status": "success"}
+
+@calib_router.post("/robot/clear_error")
+def robot_clear_error():
+    success, err = robot_service.clear_error()
     if not success:
         raise HTTPException(status_code=400, detail=err)
     return {"status": "success"}
