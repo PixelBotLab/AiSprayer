@@ -33,7 +33,8 @@ class WebSocketLogHandler(logging.Handler):
             log_entry = {
                 "time": datetime.fromtimestamp(record.created).strftime("%H:%M:%S"),
                 "level": levelname,
-                "logger": record.name,
+                "logger": f"{record.name}:{record.lineno}",
+                "lineno": record.lineno,
                 "message": msg
             }
             log_service.add_log(log_entry)

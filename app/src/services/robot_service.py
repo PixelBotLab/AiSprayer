@@ -390,30 +390,28 @@ class RobotService:
             logger.error(msg)
             return False, msg
 
-        if direction == 0:
-            logger.info("jog_continuous: Stop jogging")
-            if hasattr(self._driver, 'move_jog'):
-                self._driver.move_jog("")
-            return True, ""
-
         cartesian_axes = ['X', 'Y', 'Z', 'Rx', 'Ry', 'Rz']
         joint_axes = ['J1', 'J2', 'J3', 'J4', 'J5', 'J6']
         dir_str = "+" if direction > 0 else "-"
 
+        if direction == 0:
+            logger.info(f"jog_continuous: Stop jogging: {axis}{dir_str}")
+            if axis in cartesian_axes:
+                self._driver.move_jog_cartesian("")
+                return True, ""
+            if axis in joint_axes:
+                self._driver.move_jog_joint("")
+                return True, ""
+            return False, f"jog_continuous: Invalid axis {axis}"
+
         if axis in cartesian_axes:
             axis_id = axis + dir_str
             logger.info(f"jog_continuous: Start cartesian jog {axis_id} (Tool CoordType 0)")
-            if hasattr(self._driver, 'move_jog_cartesian'):
-                success = self._driver.move_jog_cartesian(axis_id, coord_type=0)
-            else:
-                success = self._driver.move_jog(axis_id, coord_type=0)
+            success = self._driver.move_jog_cartesian(axis_id, coord_type=0)
         elif axis in joint_axes:
             axis_id = axis + dir_str
             logger.info(f"jog_continuous: Start joint jog {axis_id}")
-            if hasattr(self._driver, 'move_jog_joint'):
-                success = self._driver.move_jog_joint(axis_id)
-            else:
-                success = self._driver.move_jog(axis_id, coord_type=1)
+            success = self._driver.move_jog_joint(axis_id)
         else:
             return False, f"jog_continuous: Invalid axis {axis}"
 

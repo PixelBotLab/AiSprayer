@@ -232,22 +232,22 @@ def _describe_alarm(alarm_id: int, table: Dict[int, Dict[str, Any]], lang: str) 
 # ---------------------------------------------------------------------------
 
 _COMMON_ERROR_CODES = {
-    0: "无错误，下发成功",
-    -1: "命令接收失败/执行失败",
-    -10000: "命令错误，下发的命令不存在",
-    -20000: "参数数量错误",
+    0: "Success (No error)",
+    -1: "Command execution failed",
+    -10000: "Command error (command does not exist)",
+    -20000: "Parameter count error",
 }
 
 
 def describe_error_id(error_id: int) -> str:
-    """把 ErrorID 翻译成可读描述。"""
+    """Translate ErrorID into a human-readable English description."""
     if error_id in _COMMON_ERROR_CODES:
         return _COMMON_ERROR_CODES[error_id]
     if -30099 <= error_id <= -30001:
-        return f"第 {abs(error_id) - 30000} 个参数的参数类型错误"
+        return f"Parameter {abs(error_id) - 30000} type error"
     if -40099 <= error_id <= -40001:
-        return f"第 {abs(error_id) - 40000} 个参数的参数范围错误"
-    return f"未定义的错误码 {error_id}"
+        return f"Parameter {abs(error_id) - 40000} value range error"
+    return f"Undefined error code {error_id}"
 
 
 class DobotResponse(NamedTuple):
@@ -307,6 +307,67 @@ def parse_error_id(reply: str) -> Tuple[List[int], List[List[int]]]:
     controller = [int(i) for i in groups[0]]
     servos = [[int(i) for i in group] for group in groups[1:]]
     return controller, servos
+
+
+ROBOT_MODES: Dict[int, str] = {
+    1: "INIT (ROBOT_MODE_INIT)",
+    2: "BRAKE_OPEN (ROBOT_MODE_BRAKE_OPEN)",
+    3: "POWEROFF (ROBOT_MODE_POWEROFF)",
+    4: "DISABLED (ROBOT_MODE_DISABLED)",
+    5: "ENABLE / IDLE (ROBOT_MODE_ENABLE)",
+    6: "DRAG (ROBOT_MODE_DRAG)",
+    7: "RUNNING (ROBOT_MODE_RUNNING)",
+    8: "RECORDING (ROBOT_MODE_RECORDING)",
+    9: "ERROR (ROBOT_MODE_ERROR)",
+    10: "PAUSE (ROBOT_MODE_PAUSE)",
+    11: "JOG (ROBOT_MODE_JOG)",
+}
+
+
+def parse_robot_mode(reply: Union[str, DobotResponse]) -> Tuple[int, str]:
+    """Parse RobotMode response into ``(mode_id, mode_description)``."""
+    if isinstance(reply, str):
+        resp = parse_response(reply)
+    else:
+        resp = reply
+    if not resp.ok or not resp.values:
+        return -1, f"Failed to get mode (ErrorID={resp.error_id}: {describe_error_id(resp.error_id)})"
+    try:
+        mode = int(resp.values[0])
+        desc = ROBOT_MODES.get(mode, f"UNKNOWN_MODE({mode})")
+        return mode, desc
+    except (ValueError, IndexError):
+        return -1, f"Invalid mode value: {resp.values}"
+
+
+def describe_response(reply: Union[str, DobotResponse]) -> str:
+    """Format any response into a human-readable English string."""
+    if isinstance(reply, str):
+        resp = parse_response(reply)
+    else:
+        resp = reply
+
+    if not resp.ok:
+        return f"Failed (ErrorID={resp.error_id}: {describe_error_id(resp.error_id)})"
+
+    cmd_name = resp.command.split("(")[0].strip() if resp.command else ""
+
+    if cmd_name == "RobotMode" and resp.values:
+        mode, desc = parse_robot_mode(resp)
+        return f"RobotMode {mode}: {desc}"
+
+    if cmd_name == "GetErrorID":
+        try:
+            ctrl, servos = parse_error_id(resp.raw)
+            if not ctrl and not any(servos):
+                return "No alarm (OK)"
+            return f"Controller alarms: {ctrl}, Servo alarms: {servos}"
+        except Exception:
+            pass
+
+    if resp.values:
+        return f"Success: [{', '.join(resp.values)}]"
+    return "Success (OK)"
 
 
 # ---------------------------------------------------------------------------
@@ -450,7 +511,8 @@ class DobotApi:
 
     def __init__(self, ip: str, port: int, *args, verbose: bool = False,
                  connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
-                 reply_timeout: float = DEFAULT_REPLY_TIMEOUT):
+                 reply_timeout: float = DEFAULT_REPLY_TIMEOUT,
+                 auto_reconnect: bool = True):
         if port not in SUPPORTED_PORTS:
             raise DobotParamError(
                 f"端口 {port} 不是协议支持的端口。可用端口："
@@ -461,22 +523,59 @@ class DobotApi:
         self.port = port
         self.socket_dobot: Optional[socket.socket] = None
         self.verbose = verbose  # 为 True 时把 socket 通信日志同时打印到控制台
+        self.connect_timeout = connect_timeout
         self.reply_timeout = reply_timeout
+        self.auto_reconnect = auto_reconnect
+        self._is_closed = False
         # 兼容旧用法：位置参数可传入一个 tkinter Text 控件用于显示日志
         self.text_log = args[0] if args else None
         self._globalLock = threading.Lock()
         self._recv_buffer = bytearray()
 
+        self._connect()
+
+    def _connect(self) -> None:
+        """建立底层 socket 连接。"""
+        self._close_socket()
         sock: Optional[socket.socket] = None
         try:
-            sock = socket.create_connection((ip, port), timeout=connect_timeout)
+            logger.info("Connecting to Dobot at %s:%d (timeout=%.1fs)...", self.ip, self.port, self.connect_timeout)
+            sock = socket.create_connection((self.ip, self.port), timeout=self.connect_timeout)
             sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            sock.settimeout(reply_timeout)
+            sock.settimeout(self.reply_timeout)
+            self.socket_dobot = sock
+            self._recv_buffer.clear()
+            logger.info("Successfully connected to Dobot at %s:%d", self.ip, self.port)
         except OSError as exc:
             if sock is not None:
-                sock.close()
-            raise DobotConnectionError(f"连接 {ip}:{port} 失败：{exc}") from exc
-        self.socket_dobot = sock
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+            self.socket_dobot = None
+            raise DobotConnectionError(f"连接 {self.ip}:{self.port} 失败：{exc}") from exc
+
+    def reconnect(self, max_retries: int = 3, retry_interval: float = 1.0) -> bool:
+        """尝试重新连接。如果是主动调用 close() 则不执行重连。"""
+        if self._is_closed:
+            logger.info("Dobot %s:%d was actively closed; skipping auto-reconnect.", self.ip, self.port)
+            return False
+        logger.warning("Connection lost to Dobot %s:%d. Starting auto-reconnect (up to %d attempts)...",
+                       self.ip, self.port, max_retries)
+        for attempt in range(1, max_retries + 1):
+            try:
+                self._connect()
+                logger.info("Successfully reconnected to Dobot %s:%d on attempt %d/%d.",
+                            self.ip, self.port, attempt, max_retries)
+                return True
+            except DobotConnectionError as exc:
+                logger.warning("Auto-reconnect attempt %d/%d to %s:%d failed: %s",
+                               attempt, max_retries, self.ip, self.port, exc)
+                if attempt < max_retries:
+                    time.sleep(retry_interval)
+        logger.error("Failed to auto-reconnect to Dobot %s:%d after %d attempts.",
+                     self.ip, self.port, max_retries)
+        return False
 
     # -- 日志 ---------------------------------------------------------------
 
@@ -492,16 +591,31 @@ class DobotApi:
 
     def _require_socket(self) -> socket.socket:
         if self.socket_dobot is None:
+            if not self._is_closed and self.auto_reconnect:
+                logger.warning("Socket for %s:%d is not connected, attempting auto-reconnect...", self.ip, self.port)
+                if self.reconnect():
+                    return self.socket_dobot
             raise DobotConnectionError(f"{self.ip}:{self.port} 的连接已关闭")
         return self.socket_dobot
 
     def send_data(self, string: str) -> None:
-        """下发一条指令。发送失败会抛出 DobotConnectionError，不再静默忽略。"""
+        """下发一条指令。发送失败时若启用了 auto_reconnect 会尝试自动重连并重试一次。"""
         sock = self._require_socket()
         self.log(f"Send to {self.ip}:{self.port}: {string}")
         try:
             sock.sendall(string.encode("utf-8"))
         except OSError as exc:
+            logger.warning("Failed to send data to %s:%d (%s). Socket may be broken.", self.ip, self.port, exc)
+            self._close_socket()
+            if not self._is_closed and self.auto_reconnect:
+                if self.reconnect():
+                    try:
+                        self.log(f"Resending after reconnect to {self.ip}:{self.port}: {string}")
+                        self.socket_dobot.sendall(string.encode("utf-8"))
+                        return
+                    except OSError as retry_exc:
+                        raise DobotConnectionError(
+                            f"向 {self.ip}:{self.port} 重发指令失败：{retry_exc}") from retry_exc
             raise DobotConnectionError(
                 f"向 {self.ip}:{self.port} 下发指令失败：{exc}") from exc
 
@@ -528,14 +642,25 @@ class DobotApi:
                     raise DobotTimeoutError(
                         f"等待 {self.ip}:{self.port} 应答超时（{limit}s）") from exc
                 except OSError as exc:
+                    logger.warning("Error receiving from %s:%d (%s). Connection dropped.", self.ip, self.port, exc)
+                    self._close_socket()
+                    if not self._is_closed and self.auto_reconnect:
+                        self.reconnect()
                     raise DobotConnectionError(
                         f"从 {self.ip}:{self.port} 接收数据失败：{exc}") from exc
                 if not chunk:
+                    logger.warning("Connection to %s:%d closed by peer (EOF).", self.ip, self.port)
+                    self._close_socket()
+                    if not self._is_closed and self.auto_reconnect:
+                        self.reconnect()
                     raise DobotConnectionError(f"{self.ip}:{self.port} 连接已被对端关闭")
                 self._recv_buffer.extend(chunk)
         finally:
             if self.socket_dobot is not None:
-                self.socket_dobot.settimeout(self.reply_timeout)
+                try:
+                    self.socket_dobot.settimeout(self.reply_timeout)
+                except OSError:
+                    pass
 
         end = self._recv_buffer.index(REPLY_TERMINATOR) + 1
         reply = bytes(self._recv_buffer[:end]).decode("utf-8", errors="replace")
@@ -549,11 +674,13 @@ class DobotApi:
         协议是严格的一问一答，正常情况下发送前缓冲区应为空。若上一条指令超时，
         它迟到的应答会残留在缓冲区里，导致后续所有指令与应答错位，这里主动丢弃。
         """
-        sock = self._require_socket()
+        if self.socket_dobot is None:
+            return
+        sock = self.socket_dobot
         discarded = bytearray(self._recv_buffer)
         self._recv_buffer.clear()
-        sock.setblocking(False)
         try:
+            sock.setblocking(False)
             while True:
                 chunk = sock.recv(4096)
                 if not chunk:
@@ -564,7 +691,11 @@ class DobotApi:
         except OSError:
             pass
         finally:
-            sock.settimeout(self.reply_timeout)
+            if self.socket_dobot is not None:
+                try:
+                    self.socket_dobot.settimeout(self.reply_timeout)
+                except OSError:
+                    pass
         if discarded:
             self.log(f"Discard stale data from {self.ip}:{self.port}: {bytes(discarded)!r}")
 
@@ -596,14 +727,20 @@ class DobotApi:
 
     # -- 生命周期 -----------------------------------------------------------
 
-    def close(self) -> None:
-        """关闭连接。"""
+    def _close_socket(self) -> None:
+        """关闭当前的底层 socket（不标记 _is_closed）。"""
         sock, self.socket_dobot = self.socket_dobot, None
         if sock is not None:
             try:
                 sock.close()
             except OSError:
                 pass
+
+    def close(self) -> None:
+        """主动关闭连接。标记 _is_closed = True，不会再自动重连。"""
+        self._is_closed = True
+        self._close_socket()
+        logger.info("Closed connection to Dobot %s:%d (active close)", self.ip, self.port)
 
     def __enter__(self):
         return self
@@ -891,6 +1028,10 @@ class DobotApiDashboard(DobotApi):
         10 暂停，11 点动中。
         """
         return self.sendRecvMsg("RobotMode()")
+
+    def GetRobotMode(self) -> Tuple[int, str]:
+        """获取机器人当前状态，并返回解析后的 ``(模式代号, 模式中文描述)``。"""
+        return parse_robot_mode(self.RobotMode())
 
     def HandleTrajPoints(self, traceName=None):
         """预处理轨迹文件（控制器 3.5.2 及以上）。
@@ -1686,9 +1827,23 @@ class DobotApiFeedBack(DobotApi):
                     f"{self.ip}:{self.port} 在 {self.reply_timeout}s 内没有反馈数据，"
                     "请检查网络环境") from exc
             except OSError as exc:
+                logger.warning("Feedback socket error on %s:%d: %s", self.ip, self.port, exc)
+                self._close_socket()
+                if not self._is_closed and self.auto_reconnect:
+                    if self.reconnect():
+                        sock = self.socket_dobot
+                        self._buffer.clear()
+                        continue
                 raise DobotConnectionError(
                     f"从 {self.ip}:{self.port} 接收反馈数据失败：{exc}") from exc
             if not chunk:
+                logger.warning("Feedback connection to %s:%d closed by peer (EOF).", self.ip, self.port)
+                self._close_socket()
+                if not self._is_closed and self.auto_reconnect:
+                    if self.reconnect():
+                        sock = self.socket_dobot
+                        self._buffer.clear()
+                        continue
                 raise DobotConnectionError(f"{self.ip}:{self.port} 连接已被对端关闭")
             self._buffer.extend(chunk)
 

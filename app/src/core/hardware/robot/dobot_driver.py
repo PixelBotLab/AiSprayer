@@ -567,19 +567,7 @@ class DobotDriver(BaseRobotDriver):
             return False
         try:
             if not axis_id:
-                r = self.move.MoveJog("")
-                logger.info(f"MoveJog(Joint Stop): {r}")
-                if self.dashboard:
-                    try:
-                        time.sleep(0.1)
-                        r2 = self.dashboard.ResetRobot()
-                        logger.info(f"MoveJog stop: ResetRobot: {r2}")
-                        time.sleep(0.1)
-                        r3 = self.dashboard.EnableRobot()
-                        logger.info(f"MoveJog stop: EnableRobot: {r3}")
-                        time.sleep(0.1)
-                    except Exception as e:
-                        logger.warning(f"MoveJog stop: ResetRobot/EnableRobot failed: {e}")
+                self._do_move_jog_stop()
             else:
                 r = self.move.MoveJog(axis_id)
                 logger.info(f"MoveJog({axis_id}): {r}")
@@ -600,19 +588,7 @@ class DobotDriver(BaseRobotDriver):
         user = self.user if user is None else user
         try:
             if not axis_id:
-                r = self.move.MoveJog("")
-                logger.info(f"MoveJog(Cartesian Stop): {r}")
-                if self.dashboard:
-                    try:
-                        time.sleep(0.1)
-                        r2 = self.dashboard.ResetRobot()
-                        logger.info(f"MoveJog stop: ResetRobot: {r2}")
-                        time.sleep(0.1)
-                        r3 = self.dashboard.EnableRobot()
-                        logger.info(f"MoveJog stop: EnableRobot: {r3}")
-                        time.sleep(0.1)
-                    except Exception as e:
-                        logger.warning(f"MoveJog stop: ResetRobot/EnableRobot failed: {e}")
+                self._do_move_jog_stop()
             else:
                 r = self.move.MoveJog(axis_id, coordType=coord_type, user=user, tool=tool)
                 logger.info(f"MoveJog({axis_id}, coordType={coord_type}, user={user}, tool={tool}): {r}")
@@ -621,15 +597,30 @@ class DobotDriver(BaseRobotDriver):
             logger.error(f"move_jog_cartesian failed: {e}")
             return False
 
-    def move_jog(self, axis_id: str = "", coord_type: int = 1) -> bool:
+    def _do_move_jog_stop(self):
         """
-        统一点动入口（兼容性包装）。根据 axis_id 自动分发到 move_jog_joint 或 move_jog_cartesian。
+        统一的 move_jog_stop 逻辑。
         """
-        if axis_id.startswith('J'):
-            return self.move_jog_joint(axis_id)
-        else:
-            c_type = 2 if coord_type == 1 else coord_type
-            return self.move_jog_cartesian(axis_id, coord_type=c_type)
+        r = self.move.MoveJog("")
+        logger.info(f"MoveJog: {r}")
+        time.sleep(0.3)
+        if self.dashboard:
+            try:
+                self.dashboard.ClearError()
+                r3 = self.dashboard.EnableRobot()
+                logger.info(f"MoveJog stop: EnableRobot: {r3}")
+            except Exception as e:
+                logger.warning(f"MoveJog stop: EnableRobot failed: {e}")
+
+#    def move_jog_stop(self, axis_id: str = "", coord_type: int = 1) -> bool:
+#        """
+#        统一点动入口（兼容性包装）。根据 axis_id 自动分发到 move_jog_joint 或 move_jog_cartesian。
+#        """
+#        if axis_id.startswith('J'):
+#            return self.move_jog_joint()
+#        else:
+#            c_type = 2 if coord_type == 1 else coord_type
+#            return self.move_jog_cartesian(coord_type=c_type)
     
     def sync(self) -> bool:
         """

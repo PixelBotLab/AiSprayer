@@ -33,7 +33,7 @@ class ColorFormatter(logging.Formatter):
 
 # Console handler with colors
 console_handler = logging.StreamHandler(sys.stdout)
-console_handler.setFormatter(ColorFormatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S"))
+console_handler.setFormatter(ColorFormatter("%(asctime)s [%(levelname)s] %(name)s:%(lineno)d: %(message)s", datefmt="%H:%M:%S"))
 
 # File handler without colors (plain text)
 file_handler = logging.handlers.TimedRotatingFileHandler(
@@ -44,7 +44,7 @@ file_handler = logging.handlers.TimedRotatingFileHandler(
     encoding="utf-8"
 )
 file_handler.suffix = "%Y-%m-%d"
-file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%H:%M:%S"))
+file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s:%(lineno)d: %(message)s", datefmt="%H:%M:%S"))
 
 logging.basicConfig(
     level=logging.INFO,
