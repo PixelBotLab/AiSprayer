@@ -55,6 +55,7 @@ data/*.db
 *.backup
 models/*
 !models/wissight.pt
+!models/mobile_sam.pt
 
 *.cache/
 
