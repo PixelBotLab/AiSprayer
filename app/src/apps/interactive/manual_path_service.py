@@ -11,6 +11,8 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "app/src"))
 
 from apps.interactive.reconstruction_service import reconstruction_service
+from core.utils.fast_yaml import fast_yaml_load, fast_yaml_dump
+from core.config import sprayer_config
 
 logger = logging.getLogger(__name__)
 
@@ -253,11 +255,11 @@ class ManualPathService:
                 "type": state_type,
                 "state_type": state_type,
                 "paths": [],
-                "standoff_distance_mm": 150.0
+                "standoff_distance_mm": sprayer_config.spray_distance_mm
             }
         try:
             with open(paths_file, 'r', encoding='utf-8') as f:
-                data = yaml.safe_load(f) or {}
+                data = fast_yaml_load(f)
             data["loaded_from"] = os.path.basename(paths_file)
             data["state_type"] = state_type
             return data
@@ -268,7 +270,7 @@ class ManualPathService:
                 "type": state_type,
                 "state_type": state_type,
                 "paths": [],
-                "standoff_distance_mm": 150.0
+                "standoff_distance_mm": sprayer_config.spray_distance_mm
             }
 
     def smooth_path_waypoints(self, points: list[dict]) -> list[dict]:
@@ -365,9 +367,33 @@ class ManualPathService:
         paths_data["updated_at"] = int(time.time())
         paths_data["coordinate_frame"] = "base_link"
 
-        # Apply normal smoothing and tangent frame consistency to all paths
+        # Apply normal smoothing, tangent frame consistency, and clean waypoints
+        cleaned_paths = []
         for path in paths_data.get("paths", []):
-            path["points"] = self.smooth_path_waypoints(path.get("points", []))
+            smoothed = self.smooth_path_waypoints(path.get("points", []))
+            cleaned_pts = []
+            for p in smoothed:
+                wp = {
+                    "index": int(p.get("index", len(cleaned_pts) + 1)),
+                    "pixel": [int(p["pixel"][0]), int(p["pixel"][1])] if "pixel" in p else [0, 0],
+                    "surface_point_base_mm": [round(float(v), 2) for v in p.get("surface_point_base_mm", [0, 0, 0])],
+                    "surface_normal_base": [round(float(v), 4) for v in p.get("surface_normal_base", [0, 0, 1])],
+                    "standoff_distance_mm": round(float(p.get("standoff_distance_mm", 150.0)), 1),
+                    "tcp_pose_base": {
+                        "x": round(float(p.get("tcp_pose_base", {}).get("x", 0.0)), 2),
+                        "y": round(float(p.get("tcp_pose_base", {}).get("y", 0.0)), 2),
+                        "z": round(float(p.get("tcp_pose_base", {}).get("z", 0.0)), 2),
+                        "rx": round(float(p.get("tcp_pose_base", {}).get("rx", 0.0)), 2),
+                        "ry": round(float(p.get("tcp_pose_base", {}).get("ry", 0.0)), 2),
+                        "rz": round(float(p.get("tcp_pose_base", {}).get("rz", 0.0)), 2),
+                    },
+                }
+                if "normal_2d_proj" in p and p["normal_2d_proj"]:
+                    wp["normal_2d_proj"] = [round(float(v), 1) for v in p["normal_2d_proj"]]
+                cleaned_pts.append(wp)
+            path["points"] = cleaned_pts
+            cleaned_paths.append(path)
+        paths_data["paths"] = cleaned_paths
 
         # Compute dense 3D surface points along each path segment using depth map
         try:
@@ -417,9 +443,25 @@ class ManualPathService:
         except Exception as e:
             logger.warning(f"Could not compute dense surface points: {e}")
 
+        unified_paths_data = {
+            "standoff_distance_mm": paths_data.get("standoff_distance_mm", sprayer_config.spray_distance_mm),
+            "template": template_name,
+            "type": state_type,
+            "state_type": state_type,
+            "updated_at": int(time.time()),
+            "coordinate_frame": "base_link",
+        }
+        if "execution_speed_mm_s" in paths_data:
+            unified_paths_data["execution_speed_mm_s"] = paths_data["execution_speed_mm_s"]
+        if "poi_config" in paths_data:
+            unified_paths_data["poi_config"] = paths_data["poi_config"]
+        if "verification" in paths_data:
+            unified_paths_data["verification"] = paths_data["verification"]
+        unified_paths_data["paths"] = cleaned_paths
+
         try:
             with open(paths_file, 'w', encoding='utf-8') as f:
-                yaml.dump(paths_data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
+                fast_yaml_dump(unified_paths_data, f)
             logger.info(f"Successfully saved manual TCP paths to: {paths_file}")
 
             if state_type == "raw":

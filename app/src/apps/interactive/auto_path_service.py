@@ -15,7 +15,7 @@ import yaml
 from apps.interactive.manual_path_service import manual_path_service
 from apps.interactive.reconstruction_service import reconstruction_service
 from apps.interactive.sam_service import sam_service
-from core.config import SprayerConfig
+from core.config import SprayerConfig, sprayer_config
 from core.vision.jeans_auto_waypoints import JeansAutoWaypoints, JeansAutoWaypointsError
 
 logger = logging.getLogger(__name__)
@@ -114,16 +114,11 @@ class AutoPathService:
         row_spacing_mm: Optional[float],
         point_spacing_mm: Optional[float],
     ) -> tuple[float, float, float, float]:
-        cfg = SprayerConfig()
-        planner_cfg = (cfg.config_data or {}).get("vision", {}).get("planner", {}) or {}
-        spray_dist = float(standoff_dist_mm) if standoff_dist_mm is not None else float(cfg.spray_distance) * 1000.0
-        if row_spacing_mm is not None:
-            row_mm = float(row_spacing_mm)
-        else:
-            width_mm = float(cfg.spray_width) * 1000.0
-            overlap = float(planner_cfg.get("overlap_rate", 0.0) or 0.0)
-            row_mm = width_mm * (1.0 - overlap)
-        point_mm = float(point_spacing_mm) if point_spacing_mm is not None else 100.0
+        cfg = sprayer_config
+        spray_dist = float(standoff_dist_mm) if standoff_dist_mm is not None else float(cfg.spray_distance_mm)
+        row_mm = float(row_spacing_mm) if row_spacing_mm is not None else float(cfg.row_spacing_mm)
+        point_mm = float(point_spacing_mm) if point_spacing_mm is not None else float(cfg.point_spacing_mm)
+
         if spray_dist <= 0 or row_mm <= 0 or point_mm <= 0:
             raise AutoPathServiceError("spray / row / point spacing must be positive")
         dedup_mm = 0.5 * row_mm

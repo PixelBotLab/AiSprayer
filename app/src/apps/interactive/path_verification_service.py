@@ -1,7 +1,6 @@
 import os
 import sys
 import time
-import json
 import logging
 import math
 import yaml
@@ -11,7 +10,8 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "app/src"))
 
 from core.hardware.robot.cr5_path_verifier import CR5PathVerifier
-from core.hardware.robot.verification.robot_config import get_configured_optimization_config
+from core.config import sprayer_config
+from core.utils.fast_yaml import fast_yaml_load, fast_yaml_dump
 
 logger = logging.getLogger(__name__)
 
@@ -26,17 +26,7 @@ PATH_YAML_LEGACY = {
     "raw": ("scan.raw.path.yaml",),
     "poi": ("scan.poi.path.yaml",),
 }
-PATH_REPORT_NAMES = {
-    "raw": "scan.manual.report.json",
-    "auto": "scan.auto.report.json",
-    "poi": "scan.manual.poi.report.json",
-    "auto_poi": "scan.auto.poi.report.json",
-}
-PATH_REPORT_LEGACY = {
-    "raw": ("scan.raw.report.json",),
-    "poi": ("scan.poi.report.json",),
-}
-DEFAULT_POI_TOLERANCE_RPY_DEG = get_configured_optimization_config().get("poi_tolerance_rpy_deg", [10.0, 10.0, 180.0])
+DEFAULT_POI_TOLERANCE_RPY_DEG = sprayer_config.poi_tolerance_rpy_deg
 
 
 def _ensure_state_type(state_type: str) -> str:
@@ -50,10 +40,6 @@ def _scan_path_filename(state_type: str) -> str:
     return PATH_YAML_NAMES[_ensure_state_type(state_type)]
 
 
-def _scan_report_filename(state_type: str) -> str:
-    return PATH_REPORT_NAMES[_ensure_state_type(state_type)]
-
-
 def _resolve_named_file(template_dir: str, canonical: str, legacy: tuple[str, ...] = ()) -> str:
     canonical_path = os.path.join(template_dir, canonical)
     if os.path.exists(canonical_path):
@@ -65,24 +51,80 @@ def _resolve_named_file(template_dir: str, canonical: str, legacy: tuple[str, ..
     return canonical_path
 
 
-def _validate_float_triplet(values, field_name: str, default=None, *, min_value: float | None = None, max_value: float | None = None) -> list[float]:
-    if values is None:
-        if default is None:
-            raise ValueError(f"{field_name} is required")
-        values = default
-    if not isinstance(values, (list, tuple)) or len(values) != 3:
-        raise ValueError(f"{field_name} must be a 3-element list")
-    result = []
-    for idx, value in enumerate(values):
-        v = float(value)
-        if not math.isfinite(v):
-            raise ValueError(f"{field_name}[{idx}] must be finite")
-        if min_value is not None and v < min_value:
-            raise ValueError(f"{field_name}[{idx}] must be >= {min_value}")
-        if max_value is not None and v > max_value:
-            raise ValueError(f"{field_name}[{idx}] must be <= {max_value}")
-        result.append(v)
-    return result
+def _clean_waypoints_data(points: list) -> list:
+    """Strips redundant or zeroed-out fields from waypoints to keep YAML compact."""
+    cleaned = []
+    for p in points:
+        wp = {
+            "index": int(p.get("index", len(cleaned) + 1)),
+            "pixel": [int(p["pixel"][0]), int(p["pixel"][1])] if "pixel" in p else [0, 0],
+            "surface_point_base_mm": [round(float(v), 2) for v in p.get("surface_point_base_mm", [0, 0, 0])],
+            "surface_normal_base": [round(float(v), 4) for v in p.get("surface_normal_base", [0, 0, 1])],
+            "standoff_distance_mm": round(float(p.get("standoff_distance_mm", 150.0)), 1),
+            "tcp_pose_base": {
+                "x": round(float(p.get("tcp_pose_base", {}).get("x", 0.0)), 2),
+                "y": round(float(p.get("tcp_pose_base", {}).get("y", 0.0)), 2),
+                "z": round(float(p.get("tcp_pose_base", {}).get("z", 0.0)), 2),
+                "rx": round(float(p.get("tcp_pose_base", {}).get("rx", 0.0)), 2),
+                "ry": round(float(p.get("tcp_pose_base", {}).get("ry", 0.0)), 2),
+                "rz": round(float(p.get("tcp_pose_base", {}).get("rz", 0.0)), 2),
+            },
+        }
+        if "normal_2d_proj" in p and p["normal_2d_proj"]:
+            wp["normal_2d_proj"] = [round(float(v), 1) for v in p["normal_2d_proj"]]
+        cleaned.append(wp)
+    return cleaned
+
+
+def _clean_report_data(report: dict) -> dict:
+    """Compacts verification report by rounding trajectory floats and removing duplicate blobs."""
+    if not report:
+        return {}
+
+    cleaned_path_reports = []
+    for pr in report.get("path_reports", []):
+        tq = pr.get("trajectory_q", [])
+        tt = pr.get("trajectory_tcp", [])
+
+        # Round trajectory floats for compact YAML storage
+        compact_q = [[round(float(q), 4) for q in step] for step in tq]
+        compact_tcp = [[round(float(val), 2) for val in step] for step in tt]
+
+        cleaned_pr = {
+            "path_id": pr.get("path_id", 1),
+            "name": pr.get("name", "Path 1"),
+            "status": pr.get("status", "PASS"),
+            "total_interpolated": pr.get("total_interpolated", len(tq)),
+            "speed_mm_s": round(float(pr.get("speed_mm_s", 150.0)), 1),
+            "recommended_safe_speed_mm_s": round(float(pr.get("recommended_safe_speed_mm_s", pr.get("speed_mm_s", 150.0))), 1),
+            "peak_joint_speeds_deg_s": [round(float(v), 1) for v in pr.get("peak_joint_speeds_deg_s", [])],
+            "issues": pr.get("issues", []),
+            "trajectory_q": compact_q,
+            "trajectory_tcp": compact_tcp,
+        }
+        cleaned_path_reports.append(cleaned_pr)
+
+    return {
+        "status": report.get("summary", {}).get("status", report.get("status", "PASS")),
+        "summary": report.get("summary", {}),
+        "nominal_speed_mm_s": round(float(report.get("nominal_speed_mm_s", 150.0)), 1),
+        "slerp_step_mm": round(float(report.get("slerp_step_mm", 1.5)), 2),
+        "max_joint_velocities_deg_s": report.get("max_joint_velocities_deg_s", []),
+        "urdf_tcp": report.get("urdf_tcp", {}),
+        "path_reports": cleaned_path_reports,
+    }
+
+
+def _cleanup_stale_reports(template_dir: str):
+    """Removes obsolete separate .report.json files since they are now unified inside .path.yaml."""
+    for item in os.listdir(template_dir):
+        if item.endswith(".report.json") or item.endswith(".report.yaml"):
+            try:
+                os.remove(os.path.join(template_dir, item))
+                logger.info(f"🧹 Cleaned legacy standalone report file: {item}")
+            except Exception as e:
+                logger.warning(f"Could not remove legacy report {item}: {e}")
+
 
 import multiprocessing as mp
 from logging.handlers import QueueHandler
@@ -90,26 +132,17 @@ import queue
 
 
 def _boost_process_priority():
-    """
-    Cross-platform process prioritization and CPU core affinity booster.
-    - macOS: Sets Darwin QoS to USER_INTERACTIVE (pins to P-Cores at max clock).
-    - Linux (x86_64 / ARM64, e.g. RK3588):
-      1. Sets high process priority / nice level.
-      2. Detects ARM big.LITTLE topology (e.g. RK3588 4×Cortex-A76 big cores) via cpufreq and binds affinity.
-    """
-    # 1. macOS (Darwin)
+    """Cross-platform process prioritization and CPU core affinity booster."""
     if sys.platform == "darwin":
         try:
             import ctypes
             libsystem = ctypes.CDLL("/usr/lib/libSystem.dylib")
-            libsystem.pthread_set_qos_class_self_np(0x21, 0)  # QOS_CLASS_USER_INTERACTIVE
+            libsystem.pthread_set_qos_class_self_np(0x21, 0)
         except Exception:
             pass
         return
 
-    # 2. Linux (x86_64 / ARM64, e.g. RK3588, Raspberry Pi)
     if sys.platform.startswith("linux"):
-        # A. Priority boost
         try:
             os.setpriority(os.PRIO_PROCESS, 0, -10)
         except Exception:
@@ -118,7 +151,6 @@ def _boost_process_priority():
             except Exception:
                 pass
 
-        # B. CPU Core Affinity: Auto-detect Big Cores on big.LITTLE architectures (RK3588: 4×A76 + 4×A55)
         if hasattr(os, "sched_setaffinity") and hasattr(os, "sched_getaffinity"):
             try:
                 available_cpus = list(os.sched_getaffinity(0))
@@ -139,7 +171,6 @@ def _boost_process_priority():
                         if big_cores and len(big_cores) < len(available_cpus):
                             os.sched_setaffinity(0, big_cores)
                     elif len(available_cpus) == 8 and set(range(8)).issubset(set(available_cpus)):
-                        # Standard RK3588 default topology: cores 4,5,6,7 are Cortex-A76
                         os.sched_setaffinity(0, {4, 5, 6, 7})
             except Exception:
                 pass
@@ -153,23 +184,18 @@ def _poi_optimization_worker(
     tolerance_rpy_deg: list[float],
     options: dict = None,
 ):
-    """
-    Subprocess worker: runs POI optimization in an isolated process with its own GIL.
-    Streams log records in real time back to main process via log_queue.
-    """
+    """Subprocess worker: runs POI optimization in an isolated process."""
     try:
-        # 1. Cross-platform CPU performance core & priority boost
         _boost_process_priority()
 
-        # 2. Redirect all child process logging to log_queue
         root_logger = logging.getLogger()
         root_logger.setLevel(logging.INFO)
         root_logger.handlers = [QueueHandler(log_queue)]
 
         opts = options or {}
-        step_size_mm = float(opts.get("step_size_mm", 1.5))
-        linear_velocity_mm_s = float(opts.get("linear_velocity_mm_s", 120.0))
-        max_joint_vel = opts.get("max_joint_vel_deg_s", None)
+        step_size_mm = float(opts.get("step_size_mm", sprayer_config.slerp_step_mm))
+        linear_velocity_mm_s = float(opts.get("linear_velocity_mm_s", sprayer_config.spraying_velocity))
+        max_joint_vel = opts.get("max_joint_vel_deg_s", sprayer_config.max_joint_speed_deg_s)
 
         verifier = CR5PathVerifier(
             step_size_mm=step_size_mm,
@@ -198,7 +224,6 @@ import threading
 
 
 def _drain_log_queue(log_queue: mp.Queue, proc: mp.Process):
-    """Background thread to forward log records from worker process to main logger."""
     while True:
         try:
             record = log_queue.get(timeout=0.1)
@@ -225,10 +250,7 @@ def run_poi_optimization_subprocess(
     tolerance_rpy_deg: list[float],
     options: dict = None,
 ) -> tuple[dict, dict]:
-    """
-    Spawns an isolated worker process to execute POI optimization.
-    Streams log records in real time back to the main process logger and WebSocket.
-    """
+    """Spawns an isolated worker process to execute POI optimization."""
     ctx = mp.get_context("spawn")
     log_queue = ctx.Queue()
     parent_conn, child_conn = ctx.Pipe(duplex=False)
@@ -239,11 +261,9 @@ def run_poi_optimization_subprocess(
     )
     proc.start()
 
-    # Drain logs concurrently in a background thread
     log_thread = threading.Thread(target=_drain_log_queue, args=(log_queue, proc), daemon=True)
     log_thread.start()
 
-    # Receive result from Pipe directly
     res = None
     try:
         res = parent_conn.recv()
@@ -271,57 +291,34 @@ def run_poi_optimization_subprocess(
 class PathVerificationService:
     """
     Dedicated service for robot kinematic chain verification and POI pose optimization.
+    Unifies verification, simulation trajectory generation, and path persistence into single .path.yaml files.
     """
     def __init__(self):
         self.template_group_dir = os.path.abspath(os.path.join(PROJECT_ROOT, "data", "template_group"))
 
     def create_verifier(self, options: dict = None) -> CR5PathVerifier:
-        """
-        Factory helper to instantiate a CR5PathVerifier configured with custom parameters.
-        """
+        """Factory helper: creates CR5PathVerifier reading configuration from aisprayer_config.yaml."""
         opts = options or {}
-        step_size_mm = float(opts.get("step_size_mm", 1.5))
-        
-        default_linear_vel = 120.0
-        try:
-            from services.robot_service import robot_service
-            spd_l, _, _, _ = robot_service.get_speed()
-            if spd_l and spd_l > 0:
-                default_linear_vel = float(spd_l)
-        except Exception:
-            pass
+        step_size_mm = float(opts.get("step_size_mm", sprayer_config.slerp_step_mm))
+        linear_velocity_mm_s = float(opts.get("linear_velocity_mm_s", sprayer_config.spraying_velocity))
+        max_joint_vel = opts.get("max_joint_vel_deg_s", sprayer_config.max_joint_speed_deg_s)
 
-        linear_velocity_mm_s = float(opts.get("linear_velocity_mm_s", default_linear_vel))
-        max_joint_vel = opts.get("max_joint_vel_deg_s", None)
-        
         verifier = CR5PathVerifier(
             step_size_mm=step_size_mm,
             linear_velocity_mm_s=linear_velocity_mm_s,
-            max_joint_vel_deg_s=max_joint_vel
+            max_joint_vel_deg_s=max_joint_vel,
         )
 
         tcp_xyz = opts.get("tcp_offset_xyz_mm", None)
         tcp_rpy = opts.get("tcp_offset_rpy_deg", None)
         if tcp_xyz is not None and tcp_rpy is not None:
             verifier.set_tcp_offset(tcp_xyz, tcp_rpy)
-            
+
         return verifier
 
-
     def get_urdf_tcp(self) -> dict:
-        """Returns the current active URDF tool TCP offset."""
+        """Returns the active URDF tool TCP offset."""
         return CR5PathVerifier.load_tcp_from_urdf()
-
-    def verify_raw_path_data(self, paths_data: dict, options: dict = None) -> dict:
-        """
-        Directly verifies arbitrary path dictionary data in memory without template file dependency.
-        """
-        verifier = self.create_verifier(options)
-        report = verifier.verify_all_paths(paths_data)
-        report["urdf_info"] = verifier.urdf_info
-        report["urdf_tcp"] = verifier.urdf_tcp
-        report["nominal_speed_mm_s"] = verifier.linear_velocity_mm_s
-        return report
 
     def _path_file(self, template_name: str, state_type: str, *, existing: bool = True) -> str:
         state = _ensure_state_type(state_type)
@@ -331,27 +328,14 @@ class PathVerificationService:
             return canonical
         return _resolve_named_file(template_dir, _scan_path_filename(state), PATH_YAML_LEGACY.get(state, ()))
 
-    def _report_file(self, template_name: str, state_type: str, *, existing: bool = True) -> str:
-        state = _ensure_state_type(state_type)
-        template_dir = os.path.join(self.template_group_dir, template_name)
-        canonical = os.path.join(template_dir, _scan_report_filename(state))
-        if not existing:
-            return canonical
-        return _resolve_named_file(template_dir, _scan_report_filename(state), PATH_REPORT_LEGACY.get(state, ()))
-
-    def _decorate_report(self, report: dict, verifier: CR5PathVerifier, state_type: str, source_file: str) -> dict:
-        report["source_file"] = source_file
-        report["state_type"] = state_type
-        report["urdf_info"] = verifier.urdf_info
-        report["urdf_tcp"] = verifier.urdf_tcp
-        report["nominal_speed_mm_s"] = verifier.linear_velocity_mm_s
-        return report
-
     def verify_template_paths(self, template_name: str, state_type: str = "raw", options: dict = None) -> dict:
         """
         Runs offline kinematic chain verification on a template path yaml.
+        Generates dense MoveL simulation trajectory and merges the verification report
+        directly into the single unified .path.yaml file (de-duplicated).
         """
         state = _ensure_state_type(state_type)
+        template_dir = os.path.join(self.template_group_dir, template_name)
         paths_file = self._path_file(template_name, state)
 
         if not os.path.exists(paths_file):
@@ -360,65 +344,64 @@ class PathVerificationService:
 
         logger.info(f"📂 [Verification Service] Loading '{paths_file}' for template '{template_name}' ({state})...")
         with open(paths_file, 'r', encoding='utf-8') as f:
-            paths_data = yaml.safe_load(f) or {}
+            paths_data = fast_yaml_load(f)
 
         verifier = self.create_verifier(options)
-        report = verifier.verify_all_paths(paths_data)
-        self._decorate_report(report, verifier, state, os.path.basename(paths_file))
+        raw_report = verifier.verify_all_paths(paths_data)
+        cleaned_report = _clean_report_data(raw_report)
 
-        report_path = self._report_file(template_name, state, existing=False)
-        with open(report_path, 'w', encoding='utf-8') as f:
-            json.dump(report, f, indent=2, ensure_ascii=False)
-        logger.info(f"💾 [Verification Service] Saved diagnostic report to: {report_path}")
+        # De-duplicate: Clean waypoints and remove per-path duplicate blobs
+        cleaned_paths = []
+        for p in paths_data.get("paths", []):
+            pts = _clean_waypoints_data(p.get("points", []))
+            cleaned_p = {
+                "path_id": p.get("path_id", len(cleaned_paths) + 1),
+                "name": p.get("name", f"Path {len(cleaned_paths) + 1}"),
+                "points": pts,
+            }
+            if "dense_surface_points_base_mm" in p:
+                cleaned_p["dense_surface_points_base_mm"] = p["dense_surface_points_base_mm"]
+            cleaned_paths.append(cleaned_p)
 
-        logger.info(f"✅ [Verification Service] Verification finished for '{template_name}' ({state}): Status={report['summary']['status']}, Issues={report['summary']['total_issues']}")
-        return report
+        unified_paths_data = {
+            "standoff_distance_mm": paths_data.get("standoff_distance_mm", 150.0),
+            "template": template_name,
+            "type": state,
+            "state_type": state,
+            "updated_at": int(time.time()),
+            "coordinate_frame": "base_link",
+            "execution_speed_mm_s": verifier.linear_velocity_mm_s,
+            "verification": cleaned_report,
+            "paths": cleaned_paths,
+        }
+
+        # Save unified YAML
+        canonical_path = os.path.join(template_dir, _scan_path_filename(state))
+        with open(canonical_path, 'w', encoding='utf-8') as f:
+            fast_yaml_dump(unified_paths_data, f)
+        logger.info(f"💾 [Verification Service] Merged verification report & trajectory into unified file: {canonical_path}")
+
+        # Clean up legacy .report.json files
+        _cleanup_stale_reports(template_dir)
+
+        logger.info(f"✅ [Verification Service] Verification finished for '{template_name}' ({state}): Status={cleaned_report['status']}")
+        return cleaned_report
 
     def get_saved_report(self, template_name: str, state_type: str = "raw") -> Optional[dict]:
-        """
-        Retrieves a saved scan.*.report.json from disk without re-computing IK.
-        """
+        """Retrieves saved verification report from unified .path.yaml."""
         state = _ensure_state_type(state_type)
-        report_path = self._report_file(template_name, state)
-        if not os.path.exists(report_path):
+        paths_file = self._path_file(template_name, state)
+        if not os.path.exists(paths_file):
             return None
         try:
-            with open(report_path, 'r', encoding='utf-8') as f:
-                return json.load(f)
+            with open(paths_file, 'r', encoding='utf-8') as f:
+                data = fast_yaml_load(f)
+            verif = data.get("verification")
+            if verif:
+                return verif
         except Exception as e:
-            logger.warning(f"Failed to read report {report_path}: {e}")
-            return None
-
-    def _normalize_poi_config(self, poi_config: dict | None, anchor_source: str | None = None) -> dict:
-        cfg = poi_config or {}
-        raw_ref = cfg.get("ref_rpy_deg")
-        source = cfg.get("anchor_source") or anchor_source or ("manual" if raw_ref is not None else "home")
-        if source not in {"home", "live", "manual", "raw"}:
-            raise ValueError("poi_config.anchor_source must be one of: home, live, manual, raw")
-
-        if raw_ref is not None:
-            ref_rpy = _validate_float_triplet(raw_ref, "poi_config.ref_rpy_deg")
-        elif source == "home":
-            ref_rpy = [90.0, 0.0, 90.0]
-        else:
-            ref_rpy = None
-
-        tol_rpy = _validate_float_triplet(
-            cfg.get("tolerance_rpy_deg"),
-            "poi_config.tolerance_rpy_deg",
-            default=DEFAULT_POI_TOLERANCE_RPY_DEG,
-            min_value=0.0,
-            max_value=180.0,
-        )
-
-        return {
-            "mode": "absolute_anchor_tolerance",
-            "anchor_source": source,
-            "ref_rpy_deg": ref_rpy,
-            "tolerance_rpy_deg": tol_rpy,
-            "euler_order": "XYZ",
-            "units": "deg",
-        }
+            logger.warning(f"Failed to read verification from {paths_file}: {e}")
+        return None
 
     def optimize_template_paths(
         self,
@@ -429,16 +412,12 @@ class PathVerificationService:
         options: dict = None
     ) -> dict:
         """
-        POI-optimizes one source family:
-        - source='raw'  -> scan.manual.poi.path.yaml
-        - source='auto' -> scan.auto.poi.path.yaml
+        POI-optimizes trajectory from source ('raw' or 'auto') using aisprayer_config.yaml parameters.
+        Saves optimized waypoints and merged verification/simulation report into unified .path.yaml.
         """
-        mode = (mode or "poi").strip().lower()
         source = (source or "raw").strip().lower()
-        if mode != "poi":
-            raise ValueError("Optimization mode must be 'poi'")
         if source not in {"raw", "auto"}:
-            raise ValueError("Optimization source must be 'raw' or 'auto'")
+            source = "raw"
 
         out_state = "poi" if source == "raw" else "auto_poi"
         template_dir = os.path.join(self.template_group_dir, template_name)
@@ -447,80 +426,78 @@ class PathVerificationService:
             logger.error(f"❌ [Verification Service] Optimization failed: '{_scan_path_filename(source)}' not found")
             raise FileNotFoundError(f"Original paths file '{_scan_path_filename(source)}' not found")
 
-        logger.info(
-            f"⚡ [Verification Service] Starting '{out_state}' optimization for template '{template_name}' "
-            f"from '{source_paths_file}'..."
-        )
+        logger.info(f"⚡ [Verification Service] Starting '{out_state}' optimization for '{template_name}' from '{source_paths_file}'...")
         with open(source_paths_file, 'r', encoding='utf-8') as f:
-            paths_data = yaml.safe_load(f) or {}
+            paths_data = fast_yaml_load(f)
 
         verifier = self.create_verifier(options)
-        effective_poi_config = None
 
-        effective_poi_config = self._normalize_poi_config(poi_config)
-        logger.info(f"🚀 [Verification Service] Dispatching POI optimization to dedicated worker subprocess...")
+        # POI tolerance directly from config
+        effective_poi_config = {
+            "mode": "absolute_anchor_tolerance",
+            "anchor_source": "home",
+            "ref_rpy_deg": [90.0, 0.0, 90.0],
+            "tolerance_rpy_deg": sprayer_config.poi_tolerance_rpy_deg,
+            "euler_order": "XYZ",
+            "units": "deg",
+        }
+        if poi_config and isinstance(poi_config, dict):
+            if "tolerance_rpy_deg" in poi_config and poi_config["tolerance_rpy_deg"]:
+                effective_poi_config["tolerance_rpy_deg"] = poi_config["tolerance_rpy_deg"]
+            if "ref_rpy_deg" in poi_config and poi_config["ref_rpy_deg"]:
+                effective_poi_config["ref_rpy_deg"] = poi_config["ref_rpy_deg"]
+
+        logger.info(f"🚀 [Verification Service] Running POI optimization (tolerance: {effective_poi_config['tolerance_rpy_deg']})...")
         opt_data, opt_report = run_poi_optimization_subprocess(
             paths_data,
             ref_rpy_deg=effective_poi_config["ref_rpy_deg"],
             tolerance_rpy_deg=effective_poi_config["tolerance_rpy_deg"],
             options=options,
         )
-        opt_data["poi_config"] = effective_poi_config
+
+        cleaned_report = _clean_report_data(opt_report)
+
+        # De-duplicate: Clean waypoints and strip duplicate trajectory arrays inside each path
+        cleaned_paths = []
+        for p in opt_data.get("paths", []):
+            pts = _clean_waypoints_data(p.get("points", []))
+            cleaned_p = {
+                "path_id": p.get("path_id", len(cleaned_paths) + 1),
+                "name": p.get("name", f"Path {len(cleaned_paths) + 1}"),
+                "points": pts,
+            }
+            if "dense_surface_points_base_mm" in p:
+                cleaned_p["dense_surface_points_base_mm"] = p["dense_surface_points_base_mm"]
+            cleaned_paths.append(cleaned_p)
 
         target_yaml = _scan_path_filename(out_state)
-        target_report = _scan_report_filename(out_state)
         opt_file = os.path.join(template_dir, target_yaml)
-        opt_data["template"] = template_name
-        opt_data["type"] = out_state
-        opt_data["state_type"] = out_state
-        opt_data["updated_at"] = int(time.time())
-        opt_data["coordinate_frame"] = "base_link"
-        opt_data["source_file"] = _scan_path_filename(source)
-        opt_data["saved_file"] = target_yaml
-        opt_data["execution_speed_mm_s"] = verifier.linear_velocity_mm_s
 
-        if mode == "poi":
-            for path in opt_data.get("paths", []):
-                rec_speed = path.get("recommended_speed_mm_s")
-                if rec_speed is not None:
-                    opt_data["execution_speed_mm_s"] = min(float(opt_data["execution_speed_mm_s"]), float(rec_speed))
+        unified_data = {
+            "standoff_distance_mm": paths_data.get("standoff_distance_mm", 150.0),
+            "template": template_name,
+            "type": out_state,
+            "state_type": out_state,
+            "source_file": _scan_path_filename(source),
+            "updated_at": int(time.time()),
+            "coordinate_frame": "base_link",
+            "execution_speed_mm_s": verifier.linear_velocity_mm_s,
+            "poi_config": effective_poi_config,
+            "verification": cleaned_report,
+            "paths": cleaned_paths,
+        }
 
         with open(opt_file, 'w', encoding='utf-8') as f:
-            yaml.dump(opt_data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
-        logger.info(f"💾 [Verification Service] Saved {out_state} paths to: {opt_file}")
+            fast_yaml_dump(unified_data, f)
+        logger.info(f"💾 [Verification Service] Saved unified optimized {out_state} file to: {opt_file}")
 
-        if opt_report is None:
-            opt_report = verifier.verify_all_paths(opt_data)
+        # Clean up legacy .report.json files
+        _cleanup_stale_reports(template_dir)
 
-        self._decorate_report(opt_report, verifier, out_state, target_yaml)
-        opt_report["saved_file"] = target_yaml
-        opt_report["report_file"] = target_report
-        opt_report["optimized_paths"] = opt_data.get("paths", [])
-        opt_report["execution_speed_mm_s"] = opt_data.get("execution_speed_mm_s", verifier.linear_velocity_mm_s)
-        opt_report["optimized_paths_available"] = True
-        if effective_poi_config:
-            opt_report["poi_config"] = effective_poi_config
-            if opt_report["execution_speed_mm_s"] < verifier.linear_velocity_mm_s:
-                opt_report["adaptive_feedrate_applied"] = True
-
-        report_path = self._report_file(template_name, out_state, existing=False)
-        with open(report_path, 'w', encoding='utf-8') as f:
-            json.dump(opt_report, f, indent=2, ensure_ascii=False)
-        logger.info(f"💾 [Verification Service] Saved {out_state} diagnostic report to: {report_path}")
-
-        saved_src_rep = self.get_saved_report(template_name, state_type=source)
-        if saved_src_rep:
-            opt_report["source_report"] = saved_src_rep
-        else:
-            try:
-                src_rep = self.verify_template_paths(template_name, state_type=source, options=options)
-                opt_report["source_report"] = src_rep
-            except Exception as e:
-                logger.warning(f"Could not synchronize {source} report during optimization: {e}")
-
-        logger.info(f"🎉 [Verification Service] Optimization ({out_state}) completed for '{template_name}': Status={opt_report['summary']['status']}")
-        return opt_report
+        cleaned_report["optimized_paths"] = cleaned_paths
+        cleaned_report["saved_file"] = target_yaml
+        logger.info(f"🎉 [Verification Service] Optimization ({out_state}) completed for '{template_name}': Status={cleaned_report['status']}")
+        return cleaned_report
 
 
 path_verification_service = PathVerificationService()
-

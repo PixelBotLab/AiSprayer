@@ -92,8 +92,7 @@ class SprayerConfig:
     @property
     def spray_distance(self):
         """喷涂距离 (返回单位: 米)"""
-        mm = self.config_data.get("vision", {}).get("planner", {}).get("spray_dist_mm", 100.0)
-        return float(mm) / 1000.0
+        return self.spray_distance_mm / 1000.0
 
     @property
     def urdf_path(self):
@@ -146,6 +145,55 @@ class SprayerConfig:
         robot_cfg = self.config_data.get("hardware", {}).get("robot", {})
         speeds = robot_cfg.get("max_joint_speed_deg_s", [180.0, 180.0, 180.0, 180.0, 180.0, 180.0])
         return [float(x) for x in speeds]
+
+    @property
+    def spraying_velocity(self) -> float:
+        """喷涂移动速度 (mm/s, 默认 150.0)"""
+        return float(self.config_data.get("spraying", {}).get("velocity", 150.0))
+
+    @property
+    def slerp_step_mm(self) -> float:
+        """轨迹验证与仿真插值步长 (mm, 默认 1.5)"""
+        return float(self.config_data.get("spraying", {}).get("slerp_step_mm", 1.5))
+
+    @property
+    def spray_distance_mm(self) -> float:
+        """默认喷涂靶距 / TCP standoff 距离 (mm, 默认 150.0)"""
+        spraying_cfg = self.config_data.get("spraying", {})
+        planner_cfg = self.config_data.get("vision", {}).get("planner", {})
+        mm = spraying_cfg.get("standoff_dist_mm") or planner_cfg.get("spray_dist_mm") or 150.0
+        return float(mm)
+
+    @property
+    def row_spacing_mm(self) -> float:
+        """自动规划行间距 (mm, 默认根据 spray_width_mm * (1 - overlap_rate) 计算)"""
+        spraying_cfg = self.config_data.get("spraying", {})
+        if "row_spacing_mm" in spraying_cfg and spraying_cfg["row_spacing_mm"]:
+            return float(spraying_cfg["row_spacing_mm"])
+        planner_cfg = self.config_data.get("vision", {}).get("planner", {})
+        if "row_spacing_mm" in planner_cfg and planner_cfg["row_spacing_mm"]:
+            return float(planner_cfg["row_spacing_mm"])
+        width_mm = float(planner_cfg.get("spray_width_mm", 100.0))
+        overlap = float(planner_cfg.get("overlap_rate", 0.2))
+        return width_mm * (1.0 - overlap)
+
+    @property
+    def point_spacing_mm(self) -> float:
+        """自动规划沿行点间距 (mm, 默认从 spraying.point_spacing_mm 或 vision.planner.v_step_mm 读取)"""
+        spraying_cfg = self.config_data.get("spraying", {})
+        if "point_spacing_mm" in spraying_cfg and spraying_cfg["point_spacing_mm"]:
+            return float(spraying_cfg["point_spacing_mm"])
+        planner_cfg = self.config_data.get("vision", {}).get("planner", {})
+        if "point_spacing_mm" in planner_cfg and planner_cfg["point_spacing_mm"]:
+            return float(planner_cfg["point_spacing_mm"])
+        if "v_step_mm" in planner_cfg and planner_cfg["v_step_mm"]:
+            return float(planner_cfg["v_step_mm"])
+        return 20.0
+
+    @property
+    def standoff_distance_mm(self) -> float:
+        """TCP standoff 距离别名 (mm)"""
+        return self.spray_distance_mm
 
     @property
     def poi_tolerance_rpy_deg(self) -> list[float]:

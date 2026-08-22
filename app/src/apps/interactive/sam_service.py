@@ -186,10 +186,9 @@ class SAMService:
             return None
             
         try:
+            from core.utils.fast_yaml import fast_yaml_load
             with open(yaml_path, 'r', encoding='utf-8') as f:
-                # Custom loader or full_load to handle tuple tags safely
-                data = yaml.full_load(f)
-                return data
+                return fast_yaml_load(f)
         except Exception as e:
             logger.error(f"[SAM] Failed to parse masks yaml {yaml_path}: {e}")
             return None

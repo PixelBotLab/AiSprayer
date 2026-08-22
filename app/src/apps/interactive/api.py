@@ -469,12 +469,12 @@ def optimize_paths(name: str, req: OptimizePathRequest = OptimizePathRequest()):
 @router.get("/templates/{name}/verification_report")
 def get_verification_report(name: str, state_type: str = "raw"):
     """
-    Retrieves saved verification report from disk if exists.
+    Retrieves saved verification report from unified .path.yaml.
     """
     report = path_verification_service.get_saved_report(name, state_type=state_type)
     if report is not None:
         return report
-    raise HTTPException(status_code=404, detail=f"No saved verification report found for '{actual_state}'.")
+    raise HTTPException(status_code=404, detail=f"No saved verification report found for '{state_type}'.")
 
 
 @router.get("/robot/urdf_tool_tcp")
@@ -545,17 +545,20 @@ def get_robot_anchor_pose(source: str = "home"):
 def get_template_summary(name: str):
     """
     Returns complete atomic summary of template data in a single round-trip:
-    files, masks, raw/auto/poi paths, cached reports, and URDF tool TCP info.
+    files, masks, raw/auto/poi paths, unified verification reports, and URDF tool TCP info.
     """
+    import time
+    t0 = time.time()
+    
     template_path = os.path.join(TEMPLATE_GROUP_DIR, name)
     if not os.path.exists(template_path):
         raise HTTPException(status_code=404, detail="Template not found")
         
-    # 1. File items
+    # 1. File items (excluding obsolete standalone .report.json)
     files = []
     for item in os.listdir(template_path):
         item_path = os.path.join(template_path, item)
-        if os.path.isfile(item_path):
+        if os.path.isfile(item_path) and not item.endswith(".report.json") and not item.endswith(".report.yaml"):
             size = os.path.getsize(item_path)
             ctime = os.path.getctime(item_path)
             files.append({"name": item, "size": size, "ctime": ctime})
@@ -566,29 +569,40 @@ def get_template_summary(name: str):
     has_depth = "scan.depth.npy" in file_set or "scan.depth.png" in file_set
     has_mesh = "scan.mesh.ply" in file_set or "scan.mesh.stl" in file_set
 
+    t1 = time.time()
+
     # 2. Masks
     masks_dict = sam_service.get_template_masks(template_path)
     masks_data = masks_dict.get("masks", []) if masks_dict else []
 
-    # 3. Paths (Manual orig/POI, Auto orig/POI)
+    t2 = time.time()
+
+    # 3. Paths & Verification (Single-pass load for maximum speed)
     raw_paths_data = manual_path_service.load_manual_paths(name, state_type="raw")
+    t3 = time.time()
     auto_paths_data = manual_path_service.load_manual_paths(name, state_type="auto")
+    t4 = time.time()
     poi_paths_data = manual_path_service.load_manual_paths(name, state_type="poi")
+    t5 = time.time()
     auto_poi_paths_data = manual_path_service.load_manual_paths(name, state_type="auto_poi")
+    t6 = time.time()
 
     raw_paths = raw_paths_data.get("paths", [])
     auto_paths = auto_paths_data.get("paths", []) if auto_paths_data.get("paths") else []
     auto_poi_paths = auto_poi_paths_data.get("paths", []) if auto_poi_paths_data.get("paths") else []
     poi_paths = poi_paths_data.get("paths", []) if poi_paths_data.get("paths") else []
-    standoff = raw_paths_data.get("standoff_distance_mm", 150.0)
+    standoff = raw_paths_data.get("standoff_distance_mm") or auto_paths_data.get("standoff_distance_mm") or sprayer_config.spray_distance_mm
 
-    raw_report = path_verification_service.get_saved_report(name, state_type="raw")
-    auto_report = path_verification_service.get_saved_report(name, state_type="auto")
-    auto_poi_report = path_verification_service.get_saved_report(name, state_type="auto_poi")
-    poi_report = path_verification_service.get_saved_report(name, state_type="poi")
+    raw_report = raw_paths_data.get("verification")
+    auto_report = auto_paths_data.get("verification")
+    auto_poi_report = auto_poi_paths_data.get("verification")
+    poi_report = poi_paths_data.get("verification")
 
-    # 5. URDF TCP
+    # 4. URDF TCP
     urdf_tcp = path_verification_service.get_urdf_tcp()
+    t7 = time.time()
+
+    logger.info(f"get_template_summary breakdown: init+files={t1-t0:.3f}s, masks={t2-t1:.3f}s, raw={t3-t2:.3f}s, auto={t4-t3:.3f}s, poi={t5-t4:.3f}s, auto_poi={t6-t5:.3f}s, tcp={t7-t6:.3f}s, TOTAL={t7-t0:.3f}s")
 
     return {
         "template": name,

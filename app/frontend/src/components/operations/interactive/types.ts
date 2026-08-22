@@ -125,6 +125,7 @@ export interface PathReportItem {
 }
 
 export interface VerificationReport {
+  status?: 'PASS' | 'WARNING' | 'FAILED' | 'ERROR';
   summary: {
     status: 'PASS' | 'WARNING' | 'FAILED' | 'ERROR';
     total_paths: number;

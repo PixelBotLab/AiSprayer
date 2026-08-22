@@ -13,13 +13,10 @@ import type {
   MaskData,
   WaypointItem,
   ManualPathItem,
-  UrdfTcpInfo,
-  KinematicsParams,
   VerificationReport,
   SessionData,
   LiveNormalInfo,
   PathStateType,
-  PoiConfig,
   SimulationState,
 } from './interactive/types';
 import { STATE_THEMES, pathSourceOf } from './interactive/types';
@@ -27,7 +24,6 @@ import { computeNormalClientSide } from './interactive/normalComputation';
 import { InteractiveCanvas } from './interactive/InteractiveCanvas';
 import { TemplateTopBar } from './interactive/TemplateFileManager';
 import { TemplateFileList } from './interactive/TemplateFileList';
-import { DiagnosticsDashboard } from './interactive/DiagnosticsDashboard';
 import { InteractiveActionColumn } from './interactive/InteractiveActionColumn';
 
 interface InteractiveOpProps {
@@ -113,25 +109,13 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const [mousePixel, setMousePixel] = useState<{ u: number; v: number } | null>(null);
   const [liveNormal, setLiveNormal] = useState<LiveNormalInfo | null>(null);
 
-  // ─── 5. Diagnostics & Verification State ────────────────────────────────
-  const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
+  // ─── 5. Verification & Report State ─────────────────────────────────────
   const [rawReport, setRawReport] = useState<VerificationReport | null>(null);
   const [autoReport, setAutoReport] = useState<VerificationReport | null>(null);
   const [poiReport, setPoiReport] = useState<VerificationReport | null>(null);
   const [autoPoiReport, setAutoPoiReport] = useState<VerificationReport | null>(null);
   const [isVerifying, setIsVerifying] = useState<boolean>(false);
   const [isOptimizing, setIsOptimizing] = useState<boolean>(false);
-  const [isKinParamsOpen, setIsKinParamsOpen] = useState<boolean>(false);
-  const [urdfTcpInfo, setUrdfTcpInfo] = useState<UrdfTcpInfo | null>(null);
-  const [kinParams, setKinParams] = useState<KinematicsParams>({
-    stepSizeMm: 1.5,
-    linearSpeedMmS: 120.0,
-  });
-  const [poiConfig, setPoiConfig] = useState<PoiConfig>({
-    anchor_source: 'home',
-    ref_rpy_deg: [90.0, 0.0, 90.0],
-    tolerance_rpy_deg: [10.0, 10.0, 180.0],
-  });
 
   // ─── 6. Action Execution State ──────────────────────────────────────────
   const [isCapturing, setIsCapturing] = useState<boolean>(false);
@@ -348,19 +332,16 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
 
       let initialSt: PathStateType = 'raw';
       if (poi.length > 0) initialSt = 'poi';
+      else if (autoPoi.length > 0) initialSt = 'auto_poi';
+      else if (auto.length > 0) initialSt = 'auto';
 
       setActiveState(initialSt);
-      setManualPaths(
-        initialSt === 'poi' ? poi : (initialSt === 'auto_poi' ? autoPoi : (initialSt === 'auto' ? auto : raw))
-      );
+      const chosenPaths = initialSt === 'poi' ? poi : (initialSt === 'auto_poi' ? autoPoi : (initialSt === 'auto' ? auto : raw));
+      setManualPaths(chosenPaths);
       if (onPathStateChange) onPathStateChange(initialSt);
 
       if (summary.standoff_distance_mm) {
         setStandoffDistMm(summary.standoff_distance_mm);
-      }
-
-      if (summary.urdf_tcp) {
-        setUrdfTcpInfo(summary.urdf_tcp);
       }
 
       setRawReport(summary.raw_report || null);
@@ -389,8 +370,8 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         setNatSize(null);
       }
 
-      // Load session depth data for client-side normal computation and projection
-      await loadSessionData(templateName);
+      // Load session depth data in background without blocking initial template view
+      loadSessionData(templateName);
     } catch (err) {
       console.error('Failed to load template atomic summary:', err);
     } finally {
@@ -404,10 +385,10 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       if (!res.ok) throw new Error('Session data fetch failed');
       const data = await res.json();
       const b64 = data.depth_flat_b64 as string;
-      const binary = atob(b64);
-      const bytes = new Uint8Array(binary.length);
-      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-      const depthF32 = new Float32Array(bytes.buffer);
+      // Native fast asynchronous Base64 decoding (prevents UI freeze on 5MB payload)
+      const fetchRes = await fetch(`data:application/octet-stream;base64,${b64}`);
+      const arrayBuffer = await fetchRes.arrayBuffer();
+      const depthF32 = new Float32Array(arrayBuffer);
       setSessionData({
         width: data.width,
         height: data.height,
@@ -672,8 +653,8 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     }
   };
 
-  // ─── Diagnostics & POI Optimization Handlers ────────────────────────────
-  const handleRunDiagnostics = async (targetState?: PathStateType) => {
+  // ─── Verification & POI Optimization Handlers ────────────────────────────
+  const handleVerifyPath = async (targetState?: PathStateType) => {
     if (!activeTemplate) return;
     const st = targetState || activeState;
     setIsVerifying(true);
@@ -683,20 +664,19 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           state_type: st,
-          options: {
-            step_size_mm: kinParams.stepSizeMm,
-            linear_velocity_mm_s: kinParams.linearSpeedMmS,
-          },
         }),
       });
-      if (!res.ok) throw new Error('Verification failed');
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => null);
+        throw new Error(errBody?.detail || 'Verification failed');
+      }
       const data = await res.json();
       if (st === 'poi') setPoiReport(data);
       else if (st === 'auto_poi') setAutoPoiReport(data);
       else if (st === 'auto') setAutoReport(data);
       else setRawReport(data);
 
-      setShowDiagnostics(true);
+      await fetchTemplateFiles(activeTemplate);
     } catch (err: any) {
       setModalConfig({
         isOpen: true,
@@ -709,30 +689,25 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     }
   };
 
-  const handleApplyOptimization = async (mode: 'poi') => {
+  const handleOptimizePath = async (targetState?: PathStateType) => {
     if (!activeTemplate) return;
-    const source = pathSourceOf(activeState) === 'auto' ? 'auto' : 'raw';
+    const st = targetState || activeState;
+    const source = pathSourceOf(st) === 'auto' ? 'auto' : 'raw';
     setIsOptimizing(true);
     try {
-      const res = await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/optimize_paths?mode=${mode}`, {
+      const res = await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/optimize_paths?mode=poi`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          mode,
+          mode: 'poi',
           source,
-          options: {
-            step_size_mm: kinParams.stepSizeMm,
-            linear_velocity_mm_s: kinParams.linearSpeedMmS,
-          },
-          poi_config: poiConfig,
         }),
       });
       if (!res.ok) {
         const errBody = await res.json().catch(() => null);
-        throw new Error(errBody?.detail || `${mode.toUpperCase()} Optimization failed`);
+        throw new Error(errBody?.detail || 'POI Optimization failed');
       }
       const data = await res.json();
-
       const rep = data.verification_report || data;
       const paths = (data.optimized_paths || rep.optimized_paths || []) as ManualPathItem[];
 
@@ -747,7 +722,6 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       }
 
       await fetchTemplateFiles(activeTemplate);
-      setShowDiagnostics(true);
     } catch (err: any) {
       setModalConfig({
         isOpen: true,
@@ -760,45 +734,24 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     }
   };
 
-  const handleFetchAnchorPose = async (source: 'home' | 'live') => {
-    try {
-      const res = await fetch(`${API_BASE}/api/interactive/robot/anchor_pose?source=${source}`);
-      if (!res.ok) {
-        const errBody = await res.json().catch(() => null);
-        throw new Error(errBody?.detail || 'Failed to fetch anchor pose');
-      }
-      const data = await res.json();
-      setPoiConfig((prev) => ({
-        ...prev,
-        anchor_source: data.source || source,
-        ref_rpy_deg: data.rpy_deg || prev.ref_rpy_deg,
-        tolerance_rpy_deg: data.default_tolerance_rpy_deg || prev.tolerance_rpy_deg,
-      }));
-      console.log(`[POI] Captured ${source.toUpperCase()} anchor pose: [${(data.rpy_deg || []).map((v: number) => v.toFixed(1)).join(', ')}]°`);
-    } catch (err: any) {
-      setModalConfig({
-        isOpen: true,
-        title: 'Anchor Pose Error',
-        message: err.message,
-        type: 'alert',
-      });
-    }
-  };
-
   // ─── 3D/2D Synchronized Simulation Engine (Feature 7) ────────────────────
-  const startSimulation = (stateType: PathStateType = activeState, targetPathId?: number | null) => {
+  const startSimulation = (
+    stateType: PathStateType = activeState,
+    targetPathId?: number | null,
+    overrideReport?: VerificationReport | null
+  ) => {
     stopSimulation();
-    const rep = stateType === 'poi' ? poiReport
-      : (stateType === 'auto_poi' ? autoPoiReport
-        : (stateType === 'auto' ? autoReport : rawReport));
+    const rep = overrideReport
+      || (stateType === 'poi' ? poiReport
+        : (stateType === 'auto_poi' ? autoPoiReport
+          : (stateType === 'auto' ? autoReport : rawReport)));
     if (!rep?.path_reports || rep.path_reports.length === 0) {
       setModalConfig({
         isOpen: true,
         title: 'Simulation Notice',
-        message: `No trajectory simulation steps found for ${stateType.toUpperCase()}. Running diagnostics first...`,
+        message: `No trajectory simulation steps found for ${stateType.toUpperCase()}. Please click "Verify & Sim" on the files panel first.`,
         type: 'alert',
       });
-      handleRunDiagnostics(stateType);
       return;
     }
 
@@ -1030,6 +983,18 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     if (!activeTemplate) return;
     const targetState = stateType || activeState;
     handleSelectActiveState(targetState);
+
+    // Safety validation guard: Physical robot execution requires verified PASS
+    const rep = targetState === 'poi' ? poiReport : (targetState === 'auto_poi' ? autoPoiReport : (targetState === 'auto' ? autoReport : rawReport));
+    if (!rep || (rep.summary?.status !== 'PASS' && rep.status !== 'PASS')) {
+      setModalConfig({
+        isOpen: true,
+        title: 'Safety Guard: Verification Required',
+        message: `Cannot execute ${targetState.toUpperCase()} on the physical robot. The path has not passed 6-DOF kinematics verification. Please click "Verify" on the files panel first.`,
+        type: 'alert',
+      });
+      return;
+    }
 
     // Count total waypoints in the target paths for progress state initialisation
     const srcPaths = pathsForState(targetState);
@@ -1437,7 +1402,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
           </div>
         )}
 
-        {/* Right Side Panel (w-[320px]): Top Action Toolbar + File List / Diagnostics Dashboard */}
+        {/* Right Side Panel (w-[320px]): Top Action Toolbar + File List */}
         <div className="w-[320px] shrink-0 border-l border-slate-800 bg-slate-950/40 flex flex-col h-full min-h-0 overflow-hidden">
           {/* Top Horizontal Action Toolbar */}
           <InteractiveActionColumn
@@ -1448,7 +1413,6 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
             isAutoGenerating={isAutoGenerating}
             segMode={segMode}
             manualPathMode={manualPathMode}
-            showDiagnostics={showDiagnostics}
             onTriggerCapture={handleTriggerCapture}
             onToggleSegMode={handleToggleSegMode}
             onToggleManualPathMode={() => {
@@ -1462,74 +1426,43 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
               }
               setManualPathMode(!manualPathMode);
             }}
-            onToggleDiagnostics={() => setShowDiagnostics(!showDiagnostics)}
             onTriggerReconstruct={handleTriggerReconstruct}
             onTriggerAutoPath={handleTriggerAutoPath}
           />
 
-          {/* Panel Content (File List or TCP Diagnostics) */}
+          {/* Panel Content (File List) */}
           <div className="flex-1 min-h-0 overflow-hidden flex flex-col">
-            {!showDiagnostics ? (
-              <TemplateFileList
-                files={files}
-                onDeleteFile={handleDeleteFile}
-                rawPaths={rawPaths}
-                autoPaths={autoPaths}
-                autoPoiPaths={autoPoiPaths}
-                poiPaths={poiPaths}
-                rawReport={rawReport}
-                autoReport={autoReport}
-                poiReport={poiReport}
-                autoPoiReport={autoPoiReport}
-                robotConnected={robotConnected}
-                onSimulatePath={(st, pId) => startSimulation(st, pId)}
-                onExecutePath={(fileName, st, pId) => handleDirectExecutePath(fileName, st, pId)}
-                onOpenDiagnostics={(st) => {
-                  handleSelectActiveState(st);
-                  setShowDiagnostics(true);
-                }}
-                onSelectFile={(fileName) => {
-                  if (fileName.includes('auto.poi')) {
-                    handleSelectActiveState('auto_poi');
-                  } else if (fileName.includes('manual.poi') || fileName.includes('poi.path') || fileName.includes('poi.report')) {
-                    handleSelectActiveState('poi');
-                  } else if (fileName.includes('auto.path') || fileName.includes('auto.report')) {
-                    handleSelectActiveState('auto');
-                  } else if (fileName.includes('manual.path') || fileName.includes('manual.report') || fileName.includes('raw.path') || fileName.includes('raw.report')) {
-                    handleSelectActiveState('raw');
-                  }
-                }}
-              />
-            ) : (
-              <DiagnosticsDashboard
-                activeState={activeState}
-                rawReport={rawReport}
-                autoReport={autoReport}
-                poiReport={poiReport}
-                autoPoiReport={autoPoiReport}
-                rawPaths={rawPaths}
-                autoPaths={autoPaths}
-                poiPaths={poiPaths}
-                autoPoiPaths={autoPoiPaths}
-                isVerifying={isVerifying}
-                isOptimizing={isOptimizing}
-                activeTemplate={activeTemplate}
-                kinParams={kinParams}
-                poiConfig={poiConfig}
-                urdfTcpInfo={urdfTcpInfo}
-                isKinParamsOpen={isKinParamsOpen}
-                highlightedPathId={highlightedPathId}
-                setKinParams={setKinParams}
-                setPoiConfig={setPoiConfig}
-                setIsKinParamsOpen={setIsKinParamsOpen}
-                setHighlightedPathId={setHighlightedPathId}
-                onSelectActiveState={handleSelectActiveState}
-                onRunDiagnostics={handleRunDiagnostics}
-                onApplyOptimization={handleApplyOptimization}
-                onFetchAnchorPose={handleFetchAnchorPose}
-                onClose={() => setShowDiagnostics(false)}
-              />
-            )}
+            <TemplateFileList
+              files={files}
+              activeState={activeState}
+              onDeleteFile={handleDeleteFile}
+              rawPaths={rawPaths}
+              autoPaths={autoPaths}
+              autoPoiPaths={autoPoiPaths}
+              poiPaths={poiPaths}
+              rawReport={rawReport}
+              autoReport={autoReport}
+              poiReport={poiReport}
+              autoPoiReport={autoPoiReport}
+              robotConnected={robotConnected}
+              isVerifying={isVerifying}
+              isOptimizing={isOptimizing}
+              onVerifyPath={handleVerifyPath}
+              onOptimizePath={handleOptimizePath}
+              onSimulatePath={(st, pId) => startSimulation(st, pId)}
+              onExecutePath={(fileName, st, pId) => handleDirectExecutePath(fileName, st, pId)}
+              onSelectFile={(fileName) => {
+                if (fileName.includes('auto.poi')) {
+                  handleSelectActiveState('auto_poi');
+                } else if (fileName.includes('manual.poi') || fileName.includes('poi.path')) {
+                  handleSelectActiveState('poi');
+                } else if (fileName.includes('auto.path')) {
+                  handleSelectActiveState('auto');
+                } else if (fileName.includes('manual.path') || fileName.includes('raw.path') || fileName.includes('manual_paths')) {
+                  handleSelectActiveState('raw');
+                }
+              }}
+            />
           </div>
         </div>
       </div>
