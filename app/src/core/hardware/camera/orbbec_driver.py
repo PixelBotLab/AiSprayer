@@ -105,7 +105,7 @@ class OrbbecDriver:
             
             # 预热
             for _ in range(10):
-                self.pipeline.wait_for_frames(5000)
+                self.pipeline.wait_for_frames(200)
             
             print(f"Orbbec 相机已启动: {self.width}x{self.height}")
             
@@ -118,7 +118,7 @@ class OrbbecDriver:
             return None, None
 
         try:
-            frames = self.pipeline.wait_for_frames(5000)
+            frames = self.pipeline.wait_for_frames(200)
             if frames is None:
                 return None, None
 
