@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Cpu, RotateCcw, Crosshair, Home, Pause, Play, AlertOctagon, Minimize2 } from 'lucide-react';
+import { Cpu, Crosshair, Home, Pause, Play, AlertOctagon, Minimize2 } from 'lucide-react';
+import { API_BASE, WS_BASE } from '../config';
 
 interface RobotState {
   pose: number[];
@@ -31,14 +32,14 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
   const effMaxJntSpeed = Math.max(5, Math.round(maxJointSpeed * (globalSpeedFactor / 100.0)));
 
   // Use prop robotState if provided, else fall back to internal zeros
-  const displayState: RobotState = robotState ?? { pose: [0,0,0,0,0,0], joint: [0,0,0,0,0,0] };
+  const displayState: RobotState = robotState ?? { pose: [0, 0, 0, 0, 0, 0], joint: [0, 0, 0, 0, 0, 0] };
   const [robotConnected, setRobotConnected] = useState<boolean>(false);
   const [connecting, setConnecting] = useState<boolean>(false);
   const [activeAction, setActiveAction] = useState<'home' | 'zero' | 'fold' | null>(null);
-  
+
   // Track active jog button
-  const [activeJog, setActiveJog] = useState<{axis: string, dir: number} | null>(null);
-  
+  const [activeJog, setActiveJog] = useState<{ axis: string, dir: number } | null>(null);
+
   const wsRef = useRef<WebSocket | null>(null);
 
   const isMoving = displayState.status === 1;
@@ -59,8 +60,8 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
   }, []);
 
   const connectWs = () => {
-    const ws = new WebSocket('ws://localhost:8000/api/calib/robot/ws');
-    ws.onopen = () => {};
+    const ws = new WebSocket(`${WS_BASE}/api/calib/robot/ws`);
+    ws.onopen = () => { };
     ws.onclose = () => {
       setTimeout(connectWs, 2000); // Reconnect WebSocket
     };
@@ -72,7 +73,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
 
   const fetchSpeed = async () => {
     try {
-      const spdRes = await fetch('http://localhost:8000/api/calib/robot/speed');
+      const spdRes = await fetch(`${API_BASE}/api/calib/robot/speed`);
       if (spdRes.ok) {
         const spdData = await spdRes.json();
         const gFactor = spdData.global_speed_factor ?? 50;
@@ -111,11 +112,11 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
   const handleConnect = async () => {
     if (connecting) return;
     setConnecting(true);
-    
+
     if (robotConnected) {
       // Disconnect
       try {
-        const res = await fetch('http://localhost:8000/api/calib/robot/disconnect', { method: 'POST' });
+        const res = await fetch(`${API_BASE}/api/calib/robot/disconnect`, { method: 'POST' });
         if (res.ok) {
           setRobotConnected(false);
         }
@@ -125,7 +126,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
     } else {
       // Connect
       try {
-        const res = await fetch('http://localhost:8000/api/calib/robot/connect', {
+        const res = await fetch(`${API_BASE}/api/calib/robot/connect`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ robot_type: 'dobot' })
@@ -146,7 +147,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
 
   const handleSpeedUpdate = async () => {
     try {
-      await fetch('http://localhost:8000/api/calib/robot/speed', {
+      await fetch(`${API_BASE}/api/calib/robot/speed`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ speed_l: speedL, acc_l: accL, speed_j: speedJ, acc_j: accJ })
@@ -158,7 +159,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
 
   const syncGlobalSpeed = async (newFactor: number) => {
     try {
-      await fetch('http://localhost:8000/api/calib/robot/global_speed', {
+      await fetch(`${API_BASE}/api/calib/robot/global_speed`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ factor: newFactor })
@@ -176,7 +177,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
       setActiveJog(null);
     }
     try {
-      const res = await fetch('http://localhost:8000/api/calib/robot/jog_continuous', {
+      const res = await fetch(`${API_BASE}/api/calib/robot/jog_continuous`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ axis, direction })
@@ -195,7 +196,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
   const handleZero = async () => {
     setActiveAction('zero');
     try {
-      const res = await fetch('http://localhost:8000/api/calib/robot/zero', {
+      const res = await fetch(`${API_BASE}/api/calib/robot/zero`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ speed: speedJ, acc: accJ })
@@ -214,7 +215,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
   const handleHome = async () => {
     setActiveAction('home');
     try {
-      const res = await fetch('http://localhost:8000/api/calib/robot/home', {
+      const res = await fetch(`${API_BASE}/api/calib/robot/home`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ speed: speedJ, acc: accJ })
@@ -233,7 +234,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
   const handleFold = async () => {
     setActiveAction('fold');
     try {
-      const res = await fetch('http://localhost:8000/api/calib/robot/fold', {
+      const res = await fetch(`${API_BASE}/api/calib/robot/fold`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ speed: speedJ, acc: accJ })
@@ -251,32 +252,19 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
 
   const handlePause = async () => {
     try {
-      await fetch('http://localhost:8000/api/calib/robot/pause', { method: 'POST' });
+      await fetch(`${API_BASE}/api/calib/robot/pause`, { method: 'POST' });
     } catch (err: any) { console.error('Pause error:', err); }
   };
 
   const handleResume = async () => {
     try {
-      await fetch('http://localhost:8000/api/calib/robot/resume', { method: 'POST' });
+      await fetch(`${API_BASE}/api/calib/robot/resume`, { method: 'POST' });
     } catch (err: any) { console.error('Resume error:', err); }
-  };
-
-  const handleClearError = async () => {
-    try {
-      const res = await fetch('http://localhost:8000/api/calib/robot/clear_error', { method: 'POST' });
-      if (!res.ok) {
-        const error = await res.json();
-        alert(`Clear Error failed: ${error.detail || 'Unknown error'}`);
-      }
-    } catch (err: any) {
-      alert(`Clear Error error: ${err.message}`);
-      console.error('Failed to clear error:', err);
-    }
   };
 
   const handleEstop = async () => {
     try {
-      await fetch('http://localhost:8000/api/calib/robot/estop', { method: 'POST' });
+      await fetch(`${API_BASE}/api/calib/robot/estop`, { method: 'POST' });
     } catch (err: any) {
       alert(`E-Stop triggered!`);
       console.error('E-Stop error:', err);
@@ -287,20 +275,20 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
     { name: 'X', unit: 'mm' }, { name: 'Y', unit: 'mm' }, { name: 'Z', unit: 'mm' },
     { name: 'Rx', unit: '°' }, { name: 'Ry', unit: '°' }, { name: 'Rz', unit: '°' }
   ];
-  
+
   const jointAxes = [
     { name: 'J1', unit: '°' }, { name: 'J2', unit: '°' }, { name: 'J3', unit: '°' },
     { name: 'J4', unit: '°' }, { name: 'J5', unit: '°' }, { name: 'J6', unit: '°' }
   ];
 
-  const renderAxisRow = (axis: {name: string, unit: string}, idx: number, isJoint: boolean) => {
+  const renderAxisRow = (axis: { name: string, unit: string }, idx: number, isJoint: boolean) => {
     const currentValues = isJoint ? displayState.joint : displayState.pose;
-    
+
     const formatValue = (idx: number, isJoint: boolean) => {
       let val = currentValues[idx];
       if (val === undefined || val === null) return '0.00';
       if (!isJoint && idx >= 3) {
-         val = val * (180 / Math.PI);
+        val = val * (180 / Math.PI);
       }
       if (Math.abs(val) < 0.005) return '0.00';
       const formatted = val.toFixed(2);
@@ -330,7 +318,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
           speed = speedL;
         }
       }
-      
+
       // Calculate duration inversely proportional to speed
       // Map 10mm/s -> 1s, 50mm/s -> 0.2s
       speed = Math.max(0.1, speed);
@@ -341,18 +329,18 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
 
     const getBtnClass = (isActive: boolean) => `
       w-8 h-7 flex items-center justify-center border rounded transition-colors select-none text-[14px] font-bold
-      ${isActive 
-        ? 'bg-blue-600 border-blue-400 text-white animate-pulse shadow-[0_0_12px_rgba(59,130,246,0.9)] z-10' 
+      ${isActive
+        ? 'bg-blue-600 border-blue-400 text-white animate-pulse shadow-[0_0_12px_rgba(59,130,246,0.9)] z-10'
         : 'bg-slate-800 border-slate-700 text-slate-300 hover:bg-slate-700 hover:text-white'}
       ${disableMotion && !isActive ? 'opacity-50 cursor-not-allowed hover:bg-slate-800' : ''}
     `;
 
     return (
       <div key={axis.name} className="flex items-center gap-1">
-        <button 
+        <button
           onPointerDown={(e) => { e.currentTarget.releasePointerCapture(e.pointerId); handleJogContinuous(axis.name, -1); }}
           onPointerUp={() => handleJogContinuous(axis.name, 0)}
-          onPointerLeave={() => { if(activeJog?.axis === axis.name && activeJog?.dir === -1) handleJogContinuous(axis.name, 0); }}
+          onPointerLeave={() => { if (activeJog?.axis === axis.name && activeJog?.dir === -1) handleJogContinuous(axis.name, 0); }}
           onContextMenu={(e) => e.preventDefault()}
           disabled={disableMotion && !isJoggingNeg}
           className={getBtnClass(isJoggingNeg)}
@@ -360,7 +348,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
         >
           -
         </button>
-        
+
         <div className="flex-1 flex items-center justify-between bg-slate-950 border border-slate-800 rounded px-1.5 h-7">
           <span className="text-[10px] font-bold text-slate-500 w-[18px]">{axis.name}</span>
           <span className="text-[11px] font-mono text-emerald-400 tracking-wider">
@@ -369,10 +357,10 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
           <span className="text-[8px] text-slate-600 w-[10px]">{axis.unit}</span>
         </div>
 
-        <button 
+        <button
           onPointerDown={(e) => { e.currentTarget.releasePointerCapture(e.pointerId); handleJogContinuous(axis.name, 1); }}
           onPointerUp={() => handleJogContinuous(axis.name, 0)}
-          onPointerLeave={() => { if(activeJog?.axis === axis.name && activeJog?.dir === 1) handleJogContinuous(axis.name, 0); }}
+          onPointerLeave={() => { if (activeJog?.axis === axis.name && activeJog?.dir === 1) handleJogContinuous(axis.name, 0); }}
           onContextMenu={(e) => e.preventDefault()}
           disabled={disableMotion && !isJoggingPos}
           className={getBtnClass(isJoggingPos)}
@@ -399,7 +387,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
         </div>
         {/* Action Buttons (Single Row) */}
         <div className="flex flex-row gap-1 flex-1 overflow-x-auto hide-scrollbar max-w-full">
-          <button 
+          <button
             onClick={handleConnect}
             disabled={connecting}
             className={`px-2 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors border disabled:opacity-50 ${robotConnected ? 'bg-green-600/20 text-green-500 hover:bg-green-600 hover:text-white border-green-600/30' : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border-slate-700/50'}`}
@@ -409,22 +397,20 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
           <button
             onClick={handleHome}
             disabled={disableMotion}
-            className={`px-2 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors border ${
-              activeAction === 'home'
+            className={`px-2 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors border ${activeAction === 'home'
                 ? 'bg-emerald-600/20 text-emerald-400 border-emerald-500/50 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)] cursor-not-allowed'
                 : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border-slate-700/50 disabled:opacity-50 disabled:cursor-not-allowed'
-            }`}
+              }`}
           >
             <Home size={12} className="shrink-0" /> <span>Home</span>
           </button>
           <button
             onClick={handleZero}
             disabled={disableMotion}
-            className={`px-2 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors border ${
-              activeAction === 'zero'
+            className={`px-2 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors border ${activeAction === 'zero'
                 ? 'bg-emerald-600/20 text-emerald-400 border-emerald-500/50 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)] cursor-not-allowed'
                 : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border-slate-700/50 disabled:opacity-50 disabled:cursor-not-allowed'
-            }`}
+              }`}
           >
             <Crosshair size={12} className="shrink-0" /> <span>Zero</span>
           </button>
@@ -432,27 +418,26 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
             onClick={handleFold}
             disabled={disableMotion}
             title="Fold robot to [0, 0, -156°, 0, 0, 0]"
-            className={`px-2 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors border ${
-              activeAction === 'fold'
+            className={`px-2 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors border ${activeAction === 'fold'
                 ? 'bg-purple-600/20 text-purple-400 border-purple-500/50 animate-pulse shadow-[0_0_8px_rgba(168,85,247,0.5)] cursor-not-allowed'
                 : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border-slate-700/50 disabled:opacity-50 disabled:cursor-not-allowed'
-            }`}
+              }`}
           >
             <Minimize2 size={12} className="shrink-0" /> <span>Fold</span>
           </button>
-          <button 
+          <button
             onClick={handlePause}
             className="px-2 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700/50"
           >
             <Pause size={12} className="shrink-0" /> <span>Pause</span>
           </button>
-          <button 
+          <button
             onClick={handleResume}
             className="px-2 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700/50"
           >
             <Play size={12} className="shrink-0" /> <span>Resume</span>
           </button>
-          <button 
+          <button
             onClick={handleEstop}
             className="px-2 h-7 text-xs font-bold rounded-md flex items-center justify-center gap-1.5 shrink-0 transition-colors bg-red-600/20 text-red-500 hover:bg-red-600 hover:text-white border border-red-600/30"
           >
@@ -468,8 +453,8 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
           <div className="flex items-center gap-2">
             <span className="tracking-wider uppercase text-slate-400 font-semibold text-[9.5px]">Dynamics</span>
             <div className="flex items-center gap-1.5 w-24">
-              <input 
-                type="range" 
+              <input
+                type="range"
                 className="flex-1 accent-amber-500 h-1 bg-slate-700/50 rounded-lg appearance-none cursor-pointer"
                 min="1" max="100" step="1"
                 value={globalSpeedFactor}
@@ -499,12 +484,12 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
                 <span className="text-[8.5px] text-slate-500 font-normal">/ {effMaxLinSpeed}</span>
               </div>
             </div>
-            <input 
-              type="range" 
-              min="1" 
+            <input
+              type="range"
+              min="1"
               max={effMaxLinSpeed}
               step="1"
-              value={Math.min(speedL, effMaxLinSpeed)} 
+              value={Math.min(speedL, effMaxLinSpeed)}
               onChange={(e) => setSpeedL(Number(e.target.value))}
               onPointerUp={handleSpeedUpdate}
               onKeyUp={handleSpeedUpdate}
@@ -516,11 +501,11 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
               <span className="text-slate-400">LIN ACCEL</span>
               <span className="text-blue-400 font-mono font-semibold">{accL}%</span>
             </div>
-            <input 
-              type="range" 
-              min="1" 
-              max="100" 
-              value={accL} 
+            <input
+              type="range"
+              min="1"
+              max="100"
+              value={accL}
               onChange={(e) => setAccL(Number(e.target.value))}
               onPointerUp={handleSpeedUpdate}
               onKeyUp={handleSpeedUpdate}
@@ -539,12 +524,12 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
                 <span className="text-[8.5px] text-slate-500 font-normal">/ {effMaxJntSpeed}</span>
               </div>
             </div>
-            <input 
-              type="range" 
-              min="1" 
-              max={effMaxJntSpeed} 
+            <input
+              type="range"
+              min="1"
+              max={effMaxJntSpeed}
               step="1"
-              value={Math.min(speedJ, effMaxJntSpeed)} 
+              value={Math.min(speedJ, effMaxJntSpeed)}
               onChange={(e) => setSpeedJ(Number(e.target.value))}
               onPointerUp={handleSpeedUpdate}
               onKeyUp={handleSpeedUpdate}
@@ -556,11 +541,11 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
               <span className="text-slate-400">JNT ACCEL</span>
               <span className="text-green-400 font-mono font-semibold">{accJ}%</span>
             </div>
-            <input 
-              type="range" 
-              min="1" 
-              max="100" 
-              value={accJ} 
+            <input
+              type="range"
+              min="1"
+              max="100"
+              value={accJ}
               onChange={(e) => setAccJ(Number(e.target.value))}
               onPointerUp={handleSpeedUpdate}
               onKeyUp={handleSpeedUpdate}
@@ -576,7 +561,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
         <div className="flex flex-col gap-1.5 flex-1">
           {cartesianAxes.map((axis, idx) => renderAxisRow(axis, idx, false))}
         </div>
-        
+
         {/* Divider */}
         <div className="w-[1px] bg-slate-800/60 rounded-full" />
 

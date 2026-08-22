@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Terminal, Trash2, Maximize2, Minimize2 } from 'lucide-react';
+import { WS_BASE } from '../config';
 
 interface LogEntry {
   time: string;
@@ -21,7 +22,7 @@ const ConsoleLogZone: React.FC = () => {
 
     const connect = () => {
       if (!isMounted) return;
-      ws = new WebSocket('ws://localhost:8000/api/system/logs/ws');
+      ws = new WebSocket(`${WS_BASE}/api/system/logs/ws`);
       ws.onmessage = (e) => {
         try {
           const entry: LogEntry = JSON.parse(e.data);

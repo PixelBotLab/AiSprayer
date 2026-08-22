@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Save, Server, Camera as CameraIcon, Cpu } from 'lucide-react';
+import { API_BASE } from '../config';
 
 const ConfigView: React.FC = () => {
   const [config, setConfig] = useState<any>({});
@@ -8,7 +9,7 @@ const ConfigView: React.FC = () => {
   const [saveSuccess, setSaveSuccess] = useState(false);
 
   useEffect(() => {
-    fetch('http://localhost:8000/api/system/config')
+    fetch(`${API_BASE}/api/system/config`)
       .then(res => res.json())
       .then(data => {
         setConfig(data.config || {});
@@ -24,7 +25,7 @@ const ConfigView: React.FC = () => {
     setSaving(true);
     setSaveSuccess(false);
     try {
-      await fetch('http://localhost:8000/api/system/config', {
+      await fetch(`${API_BASE}/api/system/config`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ settings: config })

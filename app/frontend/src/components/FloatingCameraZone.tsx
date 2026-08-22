@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Camera, Maximize2, Minimize2, Crosshair, GripHorizontal, X } from 'lucide-react';
+import { API_BASE } from '../config';
 
 interface FloatingCameraZoneProps {
   onClose?: () => void;
@@ -7,7 +8,7 @@ interface FloatingCameraZoneProps {
 
 const FloatingCameraZone: React.FC<FloatingCameraZoneProps> = ({ onClose }) => {
   const [resolution, setResolution] = useState<{width: number, height: number} | null>(null);
-  const [streamUrl, setStreamUrl] = useState("http://localhost:8000/api/calib/camera/stream");
+  const [streamUrl, setStreamUrl] = useState(`${API_BASE}/api/calib/camera/stream`);
   
   // Floating window state
   const [position, setPosition] = useState({ x: 24, y: 24 });
@@ -163,7 +164,7 @@ const FloatingCameraZone: React.FC<FloatingCameraZoneProps> = ({ onClose }) => {
             if (fallback) fallback.style.display = 'flex';
             
             setTimeout(() => {
-              setStreamUrl(`http://localhost:8000/api/calib/camera/stream?t=${Date.now()}`);
+              setStreamUrl(`${API_BASE}/api/calib/camera/stream?t=${Date.now()}`);
             }, 3000);
           }}
           onLoad={(e) => {

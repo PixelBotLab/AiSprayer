@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, FolderPlus, Trash2, Image as ImageIcon, Camera, ChevronLeft, ChevronRight } from 'lucide-react';
 import { CustomModal, type ModalConfig } from '../common/CustomModal';
+import { API_BASE } from '../../config';
 
 const CalibrationOp: React.FC = () => {
   const [sessions, setSessions] = useState<string[]>([]);
@@ -32,7 +33,7 @@ const CalibrationOp: React.FC = () => {
 
   const fetchSessions = async () => {
     try {
-      const res = await fetch('http://localhost:8000/api/calib/sessions');
+      const res = await fetch(`${API_BASE}/api/calib/sessions`);
       if (res.ok) {
         const data = await res.json();
         setSessions(data.sessions || []);
@@ -56,7 +57,7 @@ const CalibrationOp: React.FC = () => {
     }
 
     // Enable calibration mode for live camera feed
-    fetch('http://localhost:8000/api/system/camera/calibration_mode', {
+    fetch(`${API_BASE}/api/system/camera/calibration_mode`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled: true })
@@ -64,7 +65,7 @@ const CalibrationOp: React.FC = () => {
 
     return () => {
       calibrationModeTimeout = setTimeout(() => {
-        fetch('http://localhost:8000/api/system/camera/calibration_mode', {
+        fetch(`${API_BASE}/api/system/camera/calibration_mode`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ enabled: false })
@@ -75,7 +76,7 @@ const CalibrationOp: React.FC = () => {
 
   const fetchSessionData = async (sessionId: string) => {
     try {
-      const res = await fetch(`http://localhost:8000/api/calib/sessions/${sessionId}`);
+      const res = await fetch(`${API_BASE}/api/calib/sessions/${sessionId}`);
       if (res.ok) {
         const data = await res.json();
         setSessionData({ 
@@ -101,7 +102,7 @@ const CalibrationOp: React.FC = () => {
 
   const handleCreateSession = async () => {
     try {
-      const res = await fetch('http://localhost:8000/api/calib/sessions/new', { method: 'POST' });
+      const res = await fetch(`${API_BASE}/api/calib/sessions/new`, { method: 'POST' });
       if (res.ok) {
         const data = await res.json();
         await fetchSessions();
@@ -123,7 +124,7 @@ const CalibrationOp: React.FC = () => {
       isDanger: true,
       onConfirm: async () => {
         try {
-          const res = await fetch(`http://localhost:8000/api/calib/sessions/${activeSession}`, { method: 'DELETE' });
+          const res = await fetch(`${API_BASE}/api/calib/sessions/${activeSession}`, { method: 'DELETE' });
           if (res.ok) {
             setActiveSession(null);
             setActiveImage(null);
@@ -141,9 +142,9 @@ const CalibrationOp: React.FC = () => {
     if (!activeSession || isCapturing) return;
     setIsCapturing(true);
     try {
-      const res = await fetch(`http://localhost:8000/api/calib/sessions/${activeSession}/samples`, { method: 'POST' });
+      const res = await fetch(`${API_BASE}/api/calib/sessions/${activeSession}/samples`, { method: 'POST' });
       if (res.ok) {
-        const dataRes = await fetch(`http://localhost:8000/api/calib/sessions/${activeSession}`);
+        const dataRes = await fetch(`${API_BASE}/api/calib/sessions/${activeSession}`);
         if (dataRes.ok) {
           const data = await dataRes.json();
           setSessionData({ 
@@ -175,12 +176,12 @@ const CalibrationOp: React.FC = () => {
     setIsRunning(true);
     setProgressData({ current: 0, total: sessionData.samples.length, status: 'started' });
     try {
-      const res = await fetch(`http://localhost:8000/api/calib/sessions/${activeSession}/run`, { method: 'POST' });
+      const res = await fetch(`${API_BASE}/api/calib/sessions/${activeSession}/run`, { method: 'POST' });
       if (!res.ok) {
         throw new Error('Failed to start calibration task');
       }
 
-      const eventSource = new EventSource(`http://localhost:8000/api/calib/sessions/${activeSession}/progress`);
+      const eventSource = new EventSource(`${API_BASE}/api/calib/sessions/${activeSession}/progress`);
       
       eventSource.onmessage = (event) => {
         const data = JSON.parse(event.data);
@@ -222,7 +223,7 @@ const CalibrationOp: React.FC = () => {
   };
 
   const activeImageUrl = activeSession && activeImage 
-    ? `http://localhost:8000/api/calib/sessions/${activeSession}/images_with_corners/${activeImage}`
+    ? `${API_BASE}/api/calib/sessions/${activeSession}/images_with_corners/${activeImage}`
     : null;
 
   const scrollTabs = (dir: 'left' | 'right') => {
@@ -319,7 +320,7 @@ const CalibrationOp: React.FC = () => {
               >
                 <div className="w-full aspect-video relative">
                   <img 
-                    src={`http://localhost:8000/api/calib/sessions/${activeSession}/images/${sample.filename}`} 
+                    src={`${API_BASE}/api/calib/sessions/${activeSession}/images/${sample.filename}`} 
                     alt={sample.filename}
                     className="w-full h-full object-cover"
                   />

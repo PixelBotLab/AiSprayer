@@ -3,6 +3,7 @@ import { Canvas } from '@react-three/fiber';
 import { OrbitControls, Grid } from '@react-three/drei';
 import URDFLoader from 'urdf-loader';
 import { Maximize2, Minimize2, Eye, EyeOff, Box, Grid3X3, Route } from 'lucide-react';
+import { API_BASE } from '../config';
 import {
   Object3D,
   Group,
@@ -125,7 +126,7 @@ const RobotModel: React.FC<RobotModelProps> = ({
   useEffect(() => {
     let isCancelled = false;
 
-    fetch('http://localhost:8000/api/interactive/robot/urdf_tool_tcp')
+    fetch(`${API_BASE}/api/interactive/robot/urdf_tool_tcp`)
       .then(res => res.ok ? res.json() : null)
       .then(data => {
         if (isCancelled) return;
@@ -134,12 +135,12 @@ const RobotModel: React.FC<RobotModelProps> = ({
         const loader = new URDFLoader(manager);
 
         loader.packages = {
-          dobot_rviz: 'http://localhost:8000/urdf',
-          dobot_gazebo_sim: 'http://localhost:8000/urdf',
+          dobot_rviz: `${API_BASE}/urdf`,
+          dobot_gazebo_sim: `${API_BASE}/urdf`,
         };
         (loader as any).loadMeshCb = loadUrdfMesh;
 
-        loader.load(`http://localhost:8000/urdf/${urdfFile}?v=${Date.now()}`, (r: any) => {
+        loader.load(`${API_BASE}/urdf/${urdfFile}?v=${Date.now()}`, (r: any) => {
           if (isCancelled) return;
           stripEmbeddedLights(r);
           r.rotation.x = -Math.PI / 2;
@@ -200,8 +201,8 @@ const RobotModel: React.FC<RobotModelProps> = ({
       return;
     }
 
-    const plyUrl = `http://localhost:8000/templates/${activeTemplate}/scan.mesh.ply?v=${meshVersion}`;
-    const stlUrl = `http://localhost:8000/templates/${activeTemplate}/scan.mesh.stl?v=${meshVersion}`;
+    const plyUrl = `${API_BASE}/templates/${activeTemplate}/scan.mesh.ply?v=${meshVersion}`;
+    const stlUrl = `${API_BASE}/templates/${activeTemplate}/scan.mesh.stl?v=${meshVersion}`;
 
     if (!surfaceMaterialRef.current) {
       surfaceMaterialRef.current = new MeshStandardMaterial({
@@ -288,7 +289,7 @@ const RobotModel: React.FC<RobotModelProps> = ({
 
     const fetchPaths = async () => {
       try {
-        const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/manual_paths?state_type=${effectiveState}&t=${pathsVersion}`);
+        const res = await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/manual_paths?state_type=${effectiveState}&t=${pathsVersion}`);
         if (isCancelled) return;
         if (!res.ok) {
           if (onPathsLoaded) onPathsLoaded(0, 0);

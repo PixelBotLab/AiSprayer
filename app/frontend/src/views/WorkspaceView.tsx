@@ -5,6 +5,8 @@ import ConsoleLogZone from '../components/ConsoleLogZone';
 import CalibrationOp from '../components/operations/CalibrationOp';
 import InteractiveOp from '../components/operations/InteractiveOp';
 
+import { WS_BASE } from '../config';
+
 interface RobotState {
   pose: number[];
   joint: number[];
@@ -44,7 +46,7 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({
 
   useEffect(() => {
     const connect = () => {
-      const ws = new WebSocket('ws://localhost:8000/api/calib/robot/ws');
+      const ws = new WebSocket(`${WS_BASE}/api/calib/robot/ws`);
       ws.onmessage = (e) => {
         try {
           const msg = JSON.parse(e.data);

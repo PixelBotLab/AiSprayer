@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Settings, Crosshair, MousePointer2, GitBranch, Box, Maximize2, Minimize2, Camera } from 'lucide-react';
+import { WS_BASE } from '../config';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -33,7 +34,7 @@ const Layout: React.FC<LayoutProps> = ({
     const connectWs = () => {
       if (isDisposed) return;
       try {
-        ws = new WebSocket('ws://localhost:8000/api/system/camera/ws');
+        ws = new WebSocket(`${WS_BASE}/api/system/camera/ws`);
         ws.onopen = () => {};
         ws.onmessage = (event) => {
           try {

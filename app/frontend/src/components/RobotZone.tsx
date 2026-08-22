@@ -1,6 +1,7 @@
 import React from 'react';
 import Robot3DViewer from './Robot3DViewer';
 import JogControlPanel from './JogControlPanel';
+import { API_BASE } from '../config';
 
 interface RobotState {
   pose: number[];
@@ -71,7 +72,7 @@ const RobotZone: React.FC<RobotZoneProps> = ({
 }) => {
   const handleClearError = async () => {
     try {
-      const res = await fetch('http://localhost:8000/api/calib/robot/clear_error', { method: 'POST' });
+      const res = await fetch(`${API_BASE}/api/calib/robot/clear_error`, { method: 'POST' });
       if (!res.ok) {
         const error = await res.json();
         alert(`Clear Error failed: ${error.detail || 'Unknown error'}`);

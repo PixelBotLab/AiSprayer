@@ -71,10 +71,13 @@ npm run dev 2>&1 | tee -a "$FRONTEND_LOG" &
 FRONTEND_PID=$!
 echo "Frontend started with PID: $FRONTEND_PID"
 
+LAN_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+[ -z "$LAN_IP" ] && LAN_IP="127.0.0.1"
+
 echo "=========================================="
 echo "AiSprayer is now running!"
-echo "Backend: http://localhost:8000"
-echo "Frontend: http://localhost:5173"
+echo "Backend:  http://$LAN_IP:8000  (http://localhost:8000)"
+echo "Frontend: http://$LAN_IP:5173  (http://localhost:5173)"
 echo "Press Ctrl+C to stop both processes."
 echo "=========================================="
 

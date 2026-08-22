@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, type MouseEvent } from 'react';
 import { CustomModal, type ModalConfig } from '../common/CustomModal';
+import { API_BASE, WS_BASE } from '../../config';
 import {
   Play,
   Pause,
@@ -179,7 +180,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
     const connect = () => {
-      ws = new WebSocket('ws://localhost:8000/api/calib/robot/ws');
+      ws = new WebSocket(`${WS_BASE}/api/calib/robot/ws`);
       robotWsRef.current = ws;
 
       ws.onopen = () => {};
@@ -294,7 +295,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   // ─── Templates API & Atomic Synchronization ─────────────────────────────
   const fetchTemplates = async () => {
     try {
-      const res = await fetch('http://localhost:8000/api/interactive/templates');
+      const res = await fetch(`${API_BASE}/api/interactive/templates`);
       if (!res.ok) return;
       const data = await res.json();
       setTemplates(data.templates || []);
@@ -325,7 +326,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     // Fetch batch summary atomically
     setIsLoadingTemplate(true);
     try {
-      const res = await fetch(`http://localhost:8000/api/interactive/templates/${templateName}/summary`);
+      const res = await fetch(`${API_BASE}/api/interactive/templates/${templateName}/summary`);
       if (!res.ok) throw new Error(`Summary status ${res.status}`);
       const summary = await res.json();
 
@@ -362,7 +363,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       setPoiReport(summary.poi_report || null);
 
       if (summary.has_image) {
-        const newImgUrl = `http://localhost:8000/templates/${templateName}/scan.jpg?v=${Date.now()}`;
+        const newImgUrl = `${API_BASE}/templates/${templateName}/scan.jpg?v=${Date.now()}`;
         // Image-First barrier: Preload image before dropping backdrop
         await new Promise<void>((resolve) => {
           const img = new Image();
@@ -393,7 +394,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
 
   const loadSessionData = async (templateName: string) => {
     try {
-      const res = await fetch(`http://localhost:8000/api/interactive/templates/${templateName}/session_data`);
+      const res = await fetch(`${API_BASE}/api/interactive/templates/${templateName}/session_data`);
       if (!res.ok) throw new Error('Session data fetch failed');
       const data = await res.json();
       const b64 = data.depth_flat_b64 as string;
@@ -454,7 +455,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     }
 
     try {
-      await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/sam/init`, {
+      await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/sam/init`, {
         method: 'POST',
       });
     } catch (err) {
@@ -491,7 +492,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       return;
     }
     try {
-      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/sam/predict`, {
+      const res = await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/sam/predict`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -522,7 +523,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const handleSaveAllSegMasks = async () => {
     if (!activeTemplate) return;
     try {
-      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/sam/save`, {
+      const res = await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/sam/save`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ committed_masks: committedMasks }),
@@ -549,7 +550,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
 
   const fetchTemplateFiles = async (templateName: string) => {
     try {
-      const res = await fetch(`http://localhost:8000/api/interactive/templates/${templateName}/files`);
+      const res = await fetch(`${API_BASE}/api/interactive/templates/${templateName}/files`);
       if (res.ok) {
         const data = await res.json();
         setFiles(data.files || []);
@@ -635,7 +636,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const handleSaveManualPaths = async () => {
     if (!activeTemplate) return;
     try {
-      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/manual_paths?state_type=raw`, {
+      const res = await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/manual_paths?state_type=raw`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -670,7 +671,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     const st = targetState || activeState;
     setIsVerifying(true);
     try {
-      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/verify_paths`, {
+      const res = await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/verify_paths`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -704,7 +705,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     if (!activeTemplate) return;
     setIsOptimizing(true);
     try {
-      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/optimize_paths?mode=${mode}`, {
+      const res = await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/optimize_paths?mode=${mode}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -751,7 +752,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
 
   const handleFetchAnchorPose = async (source: 'home' | 'live') => {
     try {
-      const res = await fetch(`http://localhost:8000/api/interactive/robot/anchor_pose?source=${source}`);
+      const res = await fetch(`${API_BASE}/api/interactive/robot/anchor_pose?source=${source}`);
       if (!res.ok) {
         const errBody = await res.json().catch(() => null);
         throw new Error(errBody?.detail || 'Failed to fetch anchor pose');
@@ -1043,7 +1044,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
 
     // 2. Dispatch real robot execution asynchronously
     try {
-      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/execute_yaml_path`, {
+      const res = await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/execute_yaml_path`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -1069,7 +1070,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     if (!activeTemplate) return;
     setIsCapturing(true);
     try {
-      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/capture`, {
+      const res = await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/capture`, {
         method: 'POST',
       });
       if (!res.ok) throw new Error('Capture failed');
@@ -1090,7 +1091,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     if (!activeTemplate) return;
     setIsReconstructing(true);
     try {
-      const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/reconstruct`, {
+      const res = await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/reconstruct`, {
         method: 'POST',
       });
       if (!res.ok) throw new Error('Reconstruction failed');
@@ -1145,7 +1146,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
             onConfirm: async (name) => {
               if (!name) return;
               try {
-                const res = await fetch('http://localhost:8000/api/interactive/templates', {
+                const res = await fetch(`${API_BASE}/api/interactive/templates`, {
                   method: 'POST',
                   headers: { 'Content-Type': 'application/json' },
                   body: JSON.stringify({ name }),
@@ -1167,7 +1168,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
             type: 'confirm',
             onConfirm: async () => {
               try {
-                const res = await fetch(`http://localhost:8000/api/interactive/templates/${t}`, {
+                const res = await fetch(`${API_BASE}/api/interactive/templates/${t}`, {
                   method: 'DELETE',
                 });
                 if (!res.ok) throw new Error('Failed to delete template');
@@ -1390,7 +1391,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                     type: 'confirm',
                     onConfirm: async () => {
                       try {
-                        const res = await fetch(`http://localhost:8000/api/interactive/templates/${activeTemplate}/files/${f}`, {
+                        const res = await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/files/${f}`, {
                           method: 'DELETE',
                         });
                         if (!res.ok) throw new Error('Failed to delete file');
