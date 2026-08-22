@@ -119,6 +119,14 @@ class SprayerConfig:
         return self.config_data.get("hardware", {}).get("robot", {}).get("robot_tcp", "spray_nozzle_link")
 
     @property
+    def calib_board_cols(self) -> int:
+        return int(self.config_data.get("calib", {}).get("board", {}).get("cols", 9))
+
+    @property
+    def calib_board_rows(self) -> int:
+        return int(self.config_data.get("calib", {}).get("board", {}).get("rows", 12))
+
+    @property
     def camera_model(self):
         return self.config_data.get("hardware", {}).get("camera", {}).get("model", "orbbec")
 

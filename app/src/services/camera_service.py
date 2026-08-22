@@ -25,6 +25,10 @@ class CameraService:
         self._last_frame_time: float = 0.0
         self._camera_type: str = "orbbec"
         self._last_online_state: bool = False
+        self._fps_frame_count = 0
+        self._fps_detect_count = 0
+        self._fps_found_count = 0
+        self._fps_last_log_time = time.time()
         self._status_callbacks: List[Callable] = []
 
     def register_status_callback(self, cb: Callable):
@@ -113,6 +117,17 @@ class CameraService:
                     self._latest_color_frame = color
                     self._latest_depth_frame = depth
                     self._last_frame_time = time.time()
+                    
+                    self._fps_frame_count += 1
+                    now = time.time()
+                    if now - self._fps_last_log_time >= 5.0:
+                        elapsed = now - self._fps_last_log_time
+                        logger.info(f"[FPS Monitor] Camera Read: {self._fps_frame_count/elapsed:.1f} fps | Corner Processed: {self._fps_detect_count/elapsed:.1f} fps | Found: {self._fps_found_count/elapsed:.1f} fps")
+                        self._fps_frame_count = 0
+                        self._fps_detect_count = 0
+                        self._fps_found_count = 0
+                        self._fps_last_log_time = now
+
                     if not self._last_online_state:
                         self._last_online_state = True
                         self._notify_status()
@@ -136,49 +151,67 @@ class CameraService:
         # Limit OpenCV to 1 thread in background to avoid starving the CPU
         cv2.setNumThreads(1)
         
+        last_setting_time = 0
+        cols, rows = 9, 12
+        pattern_size = (8, 11)
+        
+        last_processed_frame_time = 0
+        
         while self._is_streaming:
             if not self._draw_calibration_corners:
                 self._cached_corners = None
                 time.sleep(0.15)
                 continue
                 
+            current_frame_time = self._last_frame_time
+            if current_frame_time <= last_processed_frame_time:
+                time.sleep(0.02)
+                continue
+                
+            last_processed_frame_time = current_frame_time
             frame = self.get_latest_frame()
             if frame is None:
                 time.sleep(0.05)
                 continue
                 
             try:
-                settings = SettingService()
-                cols = int(settings.get_value("calib_board_cols", 9))
-                rows = int(settings.get_value("calib_board_rows", 12))
-                pattern_size = (cols - 1, rows - 1)
+                if time.time() - last_setting_time > 3.0:
+                    from core.config import config
+                    cols = config.calib_board_cols
+                    rows = config.calib_board_rows
+                    pattern_size = (cols - 1, rows - 1)
+                    last_setting_time = time.time()
 
                 h, w = frame.shape[:2]
-                # Downscale to ~480px width for fast and lightweight corner search on ARM64
-                target_w = 480
-                scale = max(1.0, float(w) / float(target_w))
-                small_w = int(w / scale)
-                small_h = int(h / scale)
+                # Use original size for best detection reliability as requested by user
+                scale = 1.0
+                small_w = w
+                small_h = h
                 
                 small = cv2.resize(frame, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
                 gray_small = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
                 
                 flags = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_FAST_CHECK + cv2.CALIB_CB_NORMALIZE_IMAGE
                 ret, corners_small = cv2.findChessboardCorners(gray_small, pattern_size, flags=flags)
+                self._fps_detect_count += 1
                 
                 if ret and corners_small is not None:
+                    self._fps_found_count += 1
                     # Scale corners back to original full resolution
                     corners_full = corners_small * float(scale)
                     self._cached_corners = corners_full
                     self._cached_corners_time = time.time()
+                    sleep_time = 0.08  # Run fast (12 Hz) when tracking
                 else:
                     if time.time() - self._cached_corners_time > 0.5:
                         self._cached_corners = None
+                    sleep_time = 0.5  # Run slow (2 Hz) when searching to save CPU
             except Exception as e:
                 logger.debug(f"Corner detection error: {e}")
                 self._cached_corners = None
+                sleep_time = 0.5
                 
-            time.sleep(0.08) # ~12 Hz max detection rate for smooth corner tracking
+            time.sleep(sleep_time)
 
     def get_latest_frame(self) -> Optional[np.ndarray]:
         return self._latest_color_frame
@@ -197,15 +230,26 @@ class CameraService:
             self._cached_corners = None
 
     def generate_mjpeg_stream(self) -> Generator[bytes, None, None]:
-        from services.setting_service import SettingService
-        settings = SettingService()
-        cols = int(settings.get_value("calib_board_cols", 9))
-        rows = int(settings.get_value("calib_board_rows", 12))
+        from core.config import config
+        cols = config.calib_board_cols
+        rows = config.calib_board_rows
         pattern_size = (cols - 1, rows - 1)
 
         encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 80]
+        last_encoded_frame_time = 0
+        last_yield_time = 0
 
         while self._is_streaming:
+            if time.time() - last_yield_time < 0.066:
+                time.sleep(0.01)
+                continue
+                
+            current_frame_time = self._last_frame_time
+            if current_frame_time <= last_encoded_frame_time:
+                time.sleep(0.01)
+                continue
+                
+            last_encoded_frame_time = current_frame_time
             frame = self.get_latest_frame()
             if frame is not None:
                 # If calibration mode is active and corners are fresh, overlay them
@@ -224,6 +268,7 @@ class CameraService:
                     try:
                         yield (b'--frame\r\n'
                                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                        last_yield_time = time.time()
                     except GeneratorExit:
                         break
                     except Exception:
