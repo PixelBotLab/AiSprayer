@@ -28,7 +28,7 @@ interface RobotZoneProps {
   activeTemplate?: string | null;
   meshVersion?: number;
   pathsVersion?: number;
-  pathState?: 'raw' | 'opt' | 'poi';
+  pathState?: 'raw' | 'auto' | 'poi' | 'auto_poi';
 }
 
 const formatNum = (val?: number, decimals: number = 1, threshold: number = 0.05): string => {

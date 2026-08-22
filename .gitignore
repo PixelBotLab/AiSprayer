@@ -61,6 +61,9 @@ models/*
 
 deps/
 tmp/
+ros2_ws/
+data/runs/*/output/
+data/runs/0/output/
 # 模型文件 (可选：如果模型很大不建议进 Git，可以保持忽略)
 # models/*.pt
 # models/*.onnx

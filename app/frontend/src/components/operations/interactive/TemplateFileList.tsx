@@ -13,15 +13,20 @@ import {
   Activity,
   Zap,
 } from 'lucide-react';
-import type { FileItem, PathStateType, ManualPathItem } from './types';
+import type { FileItem, PathStateType, ManualPathItem, VerificationReport } from './types';
 
 interface TemplateFileListProps {
   files: FileItem[];
   rawPaths?: ManualPathItem[];
-  optPaths?: ManualPathItem[];
+  autoPaths?: ManualPathItem[];
+  autoPoiPaths?: ManualPathItem[];
   poiPaths?: ManualPathItem[];
+  rawReport?: VerificationReport | null;
+  autoReport?: VerificationReport | null;
+  poiReport?: VerificationReport | null;
+  autoPoiReport?: VerificationReport | null;
   robotConnected?: boolean;
-  onOpenDeleteFileModal: (f: string) => void;
+  onDeleteFile: (f: string) => void;
   onSimulatePath?: (state: PathStateType, pathId?: number | null) => void;
   onExecutePath?: (fileName: string, state?: PathStateType, pathId?: number | null) => void;
   onOpenDiagnostics?: (state: PathStateType) => void;
@@ -31,16 +36,22 @@ interface TemplateFileListProps {
 export const TemplateFileList: React.FC<TemplateFileListProps> = ({
   files,
   rawPaths = [],
-  optPaths = [],
+  autoPaths = [],
+  autoPoiPaths = [],
   poiPaths = [],
+  rawReport = null,
+  autoReport = null,
+  poiReport = null,
+  autoPoiReport = null,
   robotConnected = false,
-  onOpenDeleteFileModal,
+  onDeleteFile,
   onSimulatePath,
   onExecutePath,
   onOpenDiagnostics,
   onSelectFile,
 }) => {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; fileName: string; state?: PathStateType } | null>(null);
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
 
   // Close menus on outside click
   useEffect(() => {
@@ -51,19 +62,61 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
     return () => window.removeEventListener('click', handleOutside);
   }, []);
 
+  useEffect(() => {
+    if (selectedFile && !files.some((f) => f.name === selectedFile)) {
+      setSelectedFile(null);
+    }
+  }, [files, selectedFile]);
+
   const getPathsForFile = (fileName: string) => {
-    if (fileName.includes('poi.path') || fileName.includes('poi.report')) return poiPaths || [];
-    if (fileName.includes('opt.path') || fileName.includes('opt.report') || fileName.includes('opt_paths')) return optPaths || [];
-    if (fileName.includes('raw.path') || fileName.includes('raw.report') || fileName.includes('manual_paths')) return rawPaths || [];
+    if (fileName.includes('auto.poi')) return autoPoiPaths || [];
+    if (fileName.includes('manual.poi') || fileName.includes('poi.path') || fileName.includes('poi.report')) return poiPaths || [];
+    if (fileName.includes('auto.path') || fileName.includes('auto.report')) return autoPaths || [];
+    if (fileName.includes('manual.path') || fileName.includes('manual.report') || fileName.includes('raw.path') || fileName.includes('raw.report') || fileName.includes('manual_paths')) return rawPaths || [];
     return [];
   };
 
   const getFileState = (fileName: string): PathStateType | null => {
-    if (fileName.includes('poi.path') || fileName.includes('poi.report')) return 'poi';
-    if (fileName.includes('opt.path') || fileName.includes('opt.report') || fileName.includes('opt_paths')) return 'opt';
-    if (fileName.includes('raw.path') || fileName.includes('raw.report') || fileName.includes('manual_paths')) return 'raw';
+    if (fileName.includes('auto.poi')) return 'auto_poi';
+    if (fileName.includes('manual.poi') || fileName.includes('poi.path') || fileName.includes('poi.report')) return 'poi';
+    if (fileName.includes('auto.path') || fileName.includes('auto.report')) return 'auto';
+    if (fileName.includes('manual.path') || fileName.includes('manual.report') || fileName.includes('raw.path') || fileName.includes('raw.report') || fileName.includes('manual_paths')) return 'raw';
     return null;
   };
+
+  const isPathYaml = (fileName: string) =>
+    fileName.endsWith('.path.yaml') || fileName.includes('paths.yaml');
+
+  const reportForState = (st: PathStateType | null) => {
+    if (st === 'poi') return poiReport;
+    if (st === 'auto_poi') return autoPoiReport;
+    if (st === 'auto') return autoReport;
+    if (st === 'raw') return rawReport;
+    return null;
+  };
+
+  const hasRunnablePaths = (fileName: string) =>
+    getPathsForFile(fileName).some((p) => (p.points?.length || 0) > 0);
+
+  const hasSimTrajectory = (st: PathStateType | null) => {
+    const reports = reportForState(st)?.path_reports || [];
+    return reports.some((pr) => (pr.trajectory_q?.length || 0) > 0 && (pr.trajectory_tcp?.length || 0) > 0);
+  };
+
+  const canSimulateFile = (fileName: string | null) => {
+    if (!fileName || !isPathYaml(fileName)) return false;
+    const st = getFileState(fileName);
+    return !!st && hasRunnablePaths(fileName) && hasSimTrajectory(st);
+  };
+
+  const canExecuteFile = (fileName: string | null) => {
+    if (!fileName || !isPathYaml(fileName) || !robotConnected) return false;
+    return !!getFileState(fileName) && hasRunnablePaths(fileName);
+  };
+
+  const selectedState = selectedFile ? getFileState(selectedFile) : null;
+  const canSim = canSimulateFile(selectedFile);
+  const canExec = canExecuteFile(selectedFile);
 
 
   const getFileIcon = (fileName: string) => {
@@ -82,12 +135,14 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
     if (fileName === 'scan.jpg') return { label: 'RGB', color: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' };
     if (fileName === 'scan.depth.npy' || fileName === 'scan.depth.bin') return { label: 'DEPTH', color: 'bg-cyan-500/10 text-cyan-400 border-cyan-500/30' };
     if (fileName === 'scan.masks.yaml') return { label: 'MASKS', color: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' };
-    if (fileName.includes('poi.path')) return { label: 'POI', color: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40' };
-    if (fileName.includes('opt.path') || fileName.includes('opt_paths')) return { label: 'OPT', color: 'bg-sky-500/20 text-sky-400 border-sky-500/40' };
-    if (fileName.includes('raw.path') || fileName.includes('manual_paths')) return { label: 'RAW', color: 'bg-slate-500/20 text-slate-300 border-slate-500/40' };
-    if (fileName.includes('poi.report')) return { label: 'POI DIAG', color: 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30' };
-    if (fileName.includes('opt.report')) return { label: 'OPT DIAG', color: 'bg-sky-500/10 text-sky-300 border-sky-500/30' };
-    if (fileName.includes('raw.report')) return { label: 'RAW DIAG', color: 'bg-slate-500/10 text-slate-400 border-slate-500/30' };
+    if (fileName.includes('auto.poi.path')) return { label: 'AUTO POI', color: 'bg-teal-500/20 text-teal-300 border-teal-500/40' };
+    if (fileName.includes('manual.poi.path') || fileName.includes('poi.path')) return { label: 'MANUAL POI', color: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40' };
+    if (fileName.includes('auto.path')) return { label: 'AUTO', color: 'bg-violet-500/20 text-violet-300 border-violet-500/40' };
+    if (fileName.includes('manual.path') || fileName.includes('raw.path') || fileName.includes('manual_paths')) return { label: 'MANUAL', color: 'bg-slate-500/20 text-slate-300 border-slate-500/40' };
+    if (fileName.includes('auto.poi.report')) return { label: 'AUTO POI DIAG', color: 'bg-teal-500/10 text-teal-300 border-teal-500/30' };
+    if (fileName.includes('manual.poi.report') || fileName.includes('poi.report')) return { label: 'MANUAL POI DIAG', color: 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30' };
+    if (fileName.includes('auto.report')) return { label: 'AUTO DIAG', color: 'bg-violet-500/10 text-violet-300 border-violet-500/30' };
+    if (fileName.includes('manual.report') || fileName.includes('raw.report')) return { label: 'MANUAL DIAG', color: 'bg-slate-500/10 text-slate-400 border-slate-500/30' };
     if (fileName.endsWith('.ply') || fileName.endsWith('.stl')) return { label: '3D MESH', color: 'bg-purple-500/10 text-purple-400 border-purple-500/30' };
     if (fileName.endsWith('.json')) return { label: 'DATA', color: 'bg-amber-500/10 text-amber-400 border-amber-500/30' };
     return null;
@@ -164,9 +219,37 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
           <HardDrive size={13} className="text-slate-400" />
           <span>Files</span>
         </div>
-        <span className="bg-slate-800 text-slate-400 text-[9px] font-mono px-1.5 py-0.5 rounded border border-slate-700">
-          {files.length}
-        </span>
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            disabled={!canSim}
+            onClick={() => {
+              if (canSim && selectedState && onSimulatePath) onSimulatePath(selectedState, null);
+            }}
+            className={`p-1 rounded transition-colors ${
+              canSim ? 'text-sky-300 hover:bg-white/10' : 'text-slate-600 cursor-not-allowed'
+            }`}
+            title={canSim ? `Simulate ${selectedFile}` : 'Select a path file with a verified trajectory'}
+          >
+            <Play size={11} className={canSim ? 'fill-sky-300' : ''} />
+          </button>
+          <button
+            type="button"
+            disabled={!canExec}
+            onClick={() => {
+              if (canExec && selectedFile && onExecutePath) onExecutePath(selectedFile, selectedState || undefined, null);
+            }}
+            className={`p-1 rounded transition-colors ${
+              canExec ? 'text-emerald-300 hover:bg-white/10' : 'text-slate-600 cursor-not-allowed'
+            }`}
+            title={canExec ? `Execute ${selectedFile}` : robotConnected ? 'Select a path file with waypoints' : 'Robot offline'}
+          >
+            <Zap size={11} />
+          </button>
+          <span className="bg-slate-800 text-slate-400 text-[9px] font-mono px-1.5 py-0.5 rounded border border-slate-700">
+            {files.length}
+          </span>
+        </div>
       </div>
 
       {/* Files Category Scroll Container */}
@@ -198,15 +281,19 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
                   {cat.files.map((file) => {
                     const badge = getFileBadge(file.name);
                     const stateType = getFileState(file.name);
-                    const isPathYaml = file.name.endsWith('.path.yaml') || file.name.includes('paths.yaml');
                     const isReportJson = file.name.endsWith('.report.json');
+                    const isSelected = selectedFile === file.name;
 
                     return (
                       <div
                         key={file.name}
-                        onClick={() => onSelectFile && onSelectFile(file.name)}
+                        onClick={() => {
+                          setSelectedFile(file.name);
+                          if (onSelectFile) onSelectFile(file.name);
+                        }}
                         onContextMenu={(e) => {
                           e.preventDefault();
+                          setSelectedFile(file.name);
                           setContextMenu({
                             x: e.clientX,
                             y: e.clientY,
@@ -214,7 +301,11 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
                             state: stateType || undefined,
                           });
                         }}
-                        className="p-1.5 rounded-lg border transition-all flex flex-col gap-0.5 group relative bg-slate-900/60 border-slate-800/80 hover:border-slate-700 hover:bg-slate-800/60 cursor-pointer"
+                        className={`p-1.5 rounded-lg border transition-all flex flex-col gap-0.5 group relative cursor-pointer ${
+                          isSelected
+                            ? 'bg-slate-800/80 border-sky-500/40'
+                            : 'bg-slate-900/60 border-slate-800/80 hover:border-slate-700 hover:bg-slate-800/60'
+                        }`}
                       >
                         <div className="flex items-center justify-between gap-1">
                           <div className="flex items-center gap-1.5 min-w-0">
@@ -227,126 +318,6 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
                           </div>
 
                           <div className="flex items-center gap-1 shrink-0">
-                            {/* Hover Quick Action Buttons (Feature 5 & 7) */}
-                            {isPathYaml && (
-                              <div className="opacity-0 group-hover:opacity-100 flex items-center gap-1 transition-opacity">
-                                {/* Sim Button with Hover Popover */}
-                                <div className="relative group/sim">
-                                  <button
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      if (onSimulatePath && stateType) onSimulatePath(stateType, null);
-                                    }}
-                                    className="px-1.5 py-0.5 rounded bg-sky-600 hover:bg-sky-500 text-white text-[9px] font-bold flex items-center gap-0.5 shadow transition-all"
-                                    title="3D/2D Simulation"
-                                  >
-                                    <Play size={8} className="fill-white" />
-                                    <span>Sim</span>
-                                  </button>
-
-                                  {/* Sim Floating Path Selector Popover */}
-                                  {(() => {
-                                    const pList = getPathsForFile(file.name);
-                                    if (pList.length <= 1) return null;
-                                    return (
-                                      <div className="absolute right-0 top-full mt-1 z-50 hidden group-hover/sim:flex flex-col bg-slate-900/95 border border-slate-700 rounded-lg shadow-2xl p-1 text-[9.5px] w-40 backdrop-blur-md animate-fadeIn pointer-events-auto">
-                                        <div className="px-2 py-0.5 text-[8.5px] font-semibold text-slate-400 border-b border-slate-800 uppercase tracking-wider flex items-center gap-1">
-                                          <Play size={8} className="text-sky-400" />
-                                          <span>Simulate Path</span>
-                                        </div>
-                                        <button
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            if (onSimulatePath && stateType) onSimulatePath(stateType, null);
-                                          }}
-                                          className="px-2 py-1 rounded text-left hover:bg-sky-600 text-slate-200 flex items-center justify-between transition-colors font-medium"
-                                        >
-                                          <span>All Paths (全部路径)</span>
-                                          <span className="text-[8.5px] font-mono text-sky-400">{pList.length}P</span>
-                                        </button>
-                                        {pList.map((p, idx) => {
-                                          const pId = p.path_id ?? (idx + 1);
-                                          return (
-                                            <button
-                                              key={pId}
-                                              onClick={(e) => {
-                                                e.stopPropagation();
-                                                if (onSimulatePath && stateType) onSimulatePath(stateType, pId);
-                                              }}
-                                              className="px-2 py-1 rounded text-left hover:bg-sky-600 text-slate-200 flex items-center justify-between transition-colors"
-                                            >
-                                              <span className="truncate">{p.name || `Path ${pId}`}</span>
-                                              <span className="text-[8.5px] font-mono text-slate-400">{p.points?.length || 0} pts</span>
-                                            </button>
-                                          );
-                                        })}
-                                      </div>
-                                    );
-                                  })()}
-                                </div>
-
-                                {/* Exec Button with Hover Popover — disabled when robot offline */}
-                                <div className="relative group/exec">
-                                  <button
-                                    disabled={!robotConnected}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      if (robotConnected && onExecutePath) onExecutePath(file.name, stateType || undefined, null);
-                                    }}
-                                    className={`px-1.5 py-0.5 rounded text-white text-[9px] font-bold flex items-center gap-0.5 shadow transition-all ${
-                                      robotConnected
-                                        ? 'bg-emerald-600 hover:bg-emerald-500 cursor-pointer'
-                                        : 'bg-slate-700 text-slate-500 cursor-not-allowed opacity-60'
-                                    }`}
-                                    title={robotConnected ? 'Execute on Real Robot' : 'Robot offline — connect first'}
-                                  >
-                                    <Zap size={8} className={robotConnected ? 'text-white' : 'text-slate-500'} />
-                                    <span>Exec</span>
-                                  </button>
-
-                                  {/* Exec Floating Path Selector Popover — only when connected */}
-                                  {robotConnected && (() => {
-                                    const pList = getPathsForFile(file.name);
-                                    if (pList.length <= 1) return null;
-                                    return (
-                                      <div className="absolute right-0 top-full mt-1 z-50 hidden group-hover/exec:flex flex-col bg-slate-900/95 border border-slate-700 rounded-lg shadow-2xl p-1 text-[9.5px] w-40 backdrop-blur-md animate-fadeIn pointer-events-auto">
-                                        <div className="px-2 py-0.5 text-[8.5px] font-semibold text-slate-400 border-b border-slate-800 uppercase tracking-wider flex items-center gap-1">
-                                          <Zap size={8} className="text-emerald-400" />
-                                          <span>Execute on Robot</span>
-                                        </div>
-                                        <button
-                                          onClick={(e) => {
-                                            e.stopPropagation();
-                                            if (onExecutePath) onExecutePath(file.name, stateType || undefined, null);
-                                          }}
-                                          className="px-2 py-1 rounded text-left hover:bg-emerald-600 text-slate-200 flex items-center justify-between transition-colors font-medium"
-                                        >
-                                          <span>All Paths (全部路径)</span>
-                                          <span className="text-[8.5px] font-mono text-emerald-400">{pList.length}P</span>
-                                        </button>
-                                        {pList.map((p, idx) => {
-                                          const pId = p.path_id ?? (idx + 1);
-                                          return (
-                                            <button
-                                              key={pId}
-                                              onClick={(e) => {
-                                                e.stopPropagation();
-                                                if (onExecutePath) onExecutePath(file.name, stateType || undefined, pId);
-                                              }}
-                                              className="px-2 py-1 rounded text-left hover:bg-emerald-600 text-slate-200 flex items-center justify-between transition-colors"
-                                            >
-                                              <span className="truncate">{p.name || `Path ${pId}`}</span>
-                                              <span className="text-[8.5px] font-mono text-slate-400">{p.points?.length || 0} pts</span>
-                                            </button>
-                                          );
-                                        })}
-                                      </div>
-                                    );
-                                  })()}
-                                </div>
-                              </div>
-                            )}
-
                             {isReportJson && (
                               <button
                                 onClick={(e) => {
@@ -410,7 +381,7 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
-                                onOpenDeleteFileModal(file.name);
+                                onDeleteFile(file.name);
                               }}
                               className="opacity-0 group-hover:opacity-100 hover:text-rose-400 p-0.5 rounded transition-opacity"
                               title="Delete file"
@@ -444,7 +415,7 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
           <div className="px-2 py-1 text-[9px] text-slate-400 border-b border-slate-800 truncate">
             {contextMenu.fileName}
           </div>
-          {contextMenu.state && (
+          {canSimulateFile(contextMenu.fileName) && contextMenu.state && (
             <button
               onClick={() => {
                 if (onSimulatePath) onSimulatePath(contextMenu.state!);
@@ -453,10 +424,10 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
               className="px-2 py-1 rounded text-left hover:bg-sky-600 text-slate-200 flex items-center gap-1.5"
             >
               <Play size={11} className="text-sky-400" />
-              <span>Simulate ({contextMenu.state.toUpperCase()})</span>
+              <span>Simulate</span>
             </button>
           )}
-          {(contextMenu.fileName.endsWith('.path.yaml') || contextMenu.fileName.includes('paths.yaml')) && (
+          {canExecuteFile(contextMenu.fileName) && (
             <button
               onClick={() => {
                 if (onExecutePath) onExecutePath(contextMenu.fileName, contextMenu.state);
@@ -464,7 +435,7 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
               }}
               className="px-2 py-1 rounded text-left hover:bg-emerald-600 text-slate-200 flex items-center gap-1.5"
             >
-              <Play size={11} className="text-emerald-400 fill-emerald-400" />
+              <Zap size={11} className="text-emerald-400" />
               <span>Execute on Robot</span>
             </button>
           )}
@@ -482,7 +453,7 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
           )}
           <button
             onClick={() => {
-              onOpenDeleteFileModal(contextMenu.fileName);
+              onDeleteFile(contextMenu.fileName);
               setContextMenu(null);
             }}
             className="px-2 py-1 rounded text-left hover:bg-rose-600 text-rose-300 hover:text-white flex items-center gap-1.5"

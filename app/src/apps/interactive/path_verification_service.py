@@ -15,23 +15,54 @@ from core.hardware.robot.verification.robot_config import get_configured_optimiz
 
 logger = logging.getLogger(__name__)
 
-VALID_PATH_STATES = {"raw", "opt", "poi"}
+VALID_PATH_STATES = {"raw", "auto", "poi", "auto_poi"}
+PATH_YAML_NAMES = {
+    "raw": "scan.manual.path.yaml",
+    "auto": "scan.auto.path.yaml",
+    "poi": "scan.manual.poi.path.yaml",
+    "auto_poi": "scan.auto.poi.path.yaml",
+}
+PATH_YAML_LEGACY = {
+    "raw": ("scan.raw.path.yaml",),
+    "poi": ("scan.poi.path.yaml",),
+}
+PATH_REPORT_NAMES = {
+    "raw": "scan.manual.report.json",
+    "auto": "scan.auto.report.json",
+    "poi": "scan.manual.poi.report.json",
+    "auto_poi": "scan.auto.poi.report.json",
+}
+PATH_REPORT_LEGACY = {
+    "raw": ("scan.raw.report.json",),
+    "poi": ("scan.poi.report.json",),
+}
 DEFAULT_POI_TOLERANCE_RPY_DEG = get_configured_optimization_config().get("poi_tolerance_rpy_deg", [10.0, 10.0, 180.0])
 
 
 def _ensure_state_type(state_type: str) -> str:
     state = (state_type or "").strip().lower()
     if state not in VALID_PATH_STATES:
-        raise ValueError(f"Invalid path state '{state_type}'. Expected one of: raw, opt, poi")
+        raise ValueError(f"Invalid path state '{state_type}'. Expected one of: raw, auto, poi, auto_poi")
     return state
 
 
 def _scan_path_filename(state_type: str) -> str:
-    return f"scan.{_ensure_state_type(state_type)}.path.yaml"
+    return PATH_YAML_NAMES[_ensure_state_type(state_type)]
 
 
 def _scan_report_filename(state_type: str) -> str:
-    return f"scan.{_ensure_state_type(state_type)}.report.json"
+    return PATH_REPORT_NAMES[_ensure_state_type(state_type)]
+
+
+def _resolve_named_file(template_dir: str, canonical: str, legacy: tuple[str, ...] = ()) -> str:
+    canonical_path = os.path.join(template_dir, canonical)
+    if os.path.exists(canonical_path):
+        return canonical_path
+    for name in legacy:
+        legacy_path = os.path.join(template_dir, name)
+        if os.path.exists(legacy_path):
+            return legacy_path
+    return canonical_path
 
 
 def _validate_float_triplet(values, field_name: str, default=None, *, min_value: float | None = None, max_value: float | None = None) -> list[float]:
@@ -239,9 +270,7 @@ def run_poi_optimization_subprocess(
 
 class PathVerificationService:
     """
-    Dedicated service for robot kinematic chain verification, singularity/overspeed analysis,
-    and spray tolerance axial rotation auto-fix optimization.
-    Can be used by interactive manual paths, automated trajectory generators, or spray execution workflows.
+    Dedicated service for robot kinematic chain verification and POI pose optimization.
     """
     def __init__(self):
         self.template_group_dir = os.path.abspath(os.path.join(PROJECT_ROOT, "data", "template_group"))
@@ -294,25 +323,21 @@ class PathVerificationService:
         report["nominal_speed_mm_s"] = verifier.linear_velocity_mm_s
         return report
 
-    def optimize_raw_path_data(self, paths_data: dict, options: dict = None) -> tuple[dict, dict]:
-        """
-        Directly optimizes arbitrary path dictionary data in memory without template file dependency.
-        Returns: (opt_data, opt_report)
-        """
-        verifier = self.create_verifier(options)
-        opt_data, opt_report = verifier.optimize_all_paths(paths_data)
-        opt_report["urdf_info"] = verifier.urdf_info
-        opt_report["urdf_tcp"] = verifier.urdf_tcp
-        opt_report["nominal_speed_mm_s"] = verifier.linear_velocity_mm_s
-        return opt_data, opt_report
-
-    def _path_file(self, template_name: str, state_type: str) -> str:
+    def _path_file(self, template_name: str, state_type: str, *, existing: bool = True) -> str:
         state = _ensure_state_type(state_type)
-        return os.path.join(self.template_group_dir, template_name, _scan_path_filename(state))
+        template_dir = os.path.join(self.template_group_dir, template_name)
+        canonical = os.path.join(template_dir, _scan_path_filename(state))
+        if not existing:
+            return canonical
+        return _resolve_named_file(template_dir, _scan_path_filename(state), PATH_YAML_LEGACY.get(state, ()))
 
-    def _report_file(self, template_name: str, state_type: str) -> str:
+    def _report_file(self, template_name: str, state_type: str, *, existing: bool = True) -> str:
         state = _ensure_state_type(state_type)
-        return os.path.join(self.template_group_dir, template_name, _scan_report_filename(state))
+        template_dir = os.path.join(self.template_group_dir, template_name)
+        canonical = os.path.join(template_dir, _scan_report_filename(state))
+        if not existing:
+            return canonical
+        return _resolve_named_file(template_dir, _scan_report_filename(state), PATH_REPORT_LEGACY.get(state, ()))
 
     def _decorate_report(self, report: dict, verifier: CR5PathVerifier, state_type: str, source_file: str) -> dict:
         report["source_file"] = source_file
@@ -324,7 +349,7 @@ class PathVerificationService:
 
     def verify_template_paths(self, template_name: str, state_type: str = "raw", options: dict = None) -> dict:
         """
-        Runs offline kinematic chain verification on scan.raw/opt/poi.path.yaml only.
+        Runs offline kinematic chain verification on a template path yaml.
         """
         state = _ensure_state_type(state_type)
         paths_file = self._path_file(template_name, state)
@@ -341,7 +366,7 @@ class PathVerificationService:
         report = verifier.verify_all_paths(paths_data)
         self._decorate_report(report, verifier, state, os.path.basename(paths_file))
 
-        report_path = self._report_file(template_name, state)
+        report_path = self._report_file(template_name, state, existing=False)
         with open(report_path, 'w', encoding='utf-8') as f:
             json.dump(report, f, indent=2, ensure_ascii=False)
         logger.info(f"💾 [Verification Service] Saved diagnostic report to: {report_path}")
@@ -351,7 +376,7 @@ class PathVerificationService:
 
     def get_saved_report(self, template_name: str, state_type: str = "raw") -> Optional[dict]:
         """
-        Retrieves saved scan.raw/opt/poi.report.json from disk without re-computing IK.
+        Retrieves a saved scan.*.report.json from disk without re-computing IK.
         """
         state = _ensure_state_type(state_type)
         report_path = self._report_file(template_name, state)
@@ -398,58 +423,63 @@ class PathVerificationService:
     def optimize_template_paths(
         self,
         template_name: str,
-        mode: str = "opt",
+        mode: str = "poi",
+        source: str = "raw",
         poi_config: dict = None,
         options: dict = None
     ) -> dict:
         """
-        Optimizes manual paths for a template:
-        - mode='opt': Free axial spin auto-fix -> saves to scan.opt.path.yaml & scan.opt.report.json
-        - mode='poi': Absolute Anchor + tolerance POI -> saves to scan.poi.path.yaml & scan.poi.report.json
+        POI-optimizes one source family:
+        - source='raw'  -> scan.manual.poi.path.yaml
+        - source='auto' -> scan.auto.poi.path.yaml
         """
-        state = _ensure_state_type(mode)
-        if state == "raw":
-            raise ValueError("Optimization mode must be 'opt' or 'poi'")
+        mode = (mode or "poi").strip().lower()
+        source = (source or "raw").strip().lower()
+        if mode != "poi":
+            raise ValueError("Optimization mode must be 'poi'")
+        if source not in {"raw", "auto"}:
+            raise ValueError("Optimization source must be 'raw' or 'auto'")
 
+        out_state = "poi" if source == "raw" else "auto_poi"
         template_dir = os.path.join(self.template_group_dir, template_name)
-        raw_paths_file = self._path_file(template_name, "raw")
-        if not os.path.exists(raw_paths_file):
-            logger.error(f"❌ [Verification Service] Optimization failed: '{_scan_path_filename('raw')}' not found")
-            raise FileNotFoundError(f"Original paths file '{_scan_path_filename('raw')}' not found")
+        source_paths_file = self._path_file(template_name, source)
+        if not os.path.exists(source_paths_file):
+            logger.error(f"❌ [Verification Service] Optimization failed: '{_scan_path_filename(source)}' not found")
+            raise FileNotFoundError(f"Original paths file '{_scan_path_filename(source)}' not found")
 
-        logger.info(f"⚡ [Verification Service] Starting '{state}' optimization for template '{template_name}' from '{raw_paths_file}'...")
-        with open(raw_paths_file, 'r', encoding='utf-8') as f:
+        logger.info(
+            f"⚡ [Verification Service] Starting '{out_state}' optimization for template '{template_name}' "
+            f"from '{source_paths_file}'..."
+        )
+        with open(source_paths_file, 'r', encoding='utf-8') as f:
             paths_data = yaml.safe_load(f) or {}
 
         verifier = self.create_verifier(options)
         effective_poi_config = None
 
-        if state == "poi":
-            effective_poi_config = self._normalize_poi_config(poi_config)
-            logger.info(f"🚀 [Verification Service] Dispatching POI optimization to dedicated worker subprocess...")
-            opt_data, opt_report = run_poi_optimization_subprocess(
-                paths_data,
-                ref_rpy_deg=effective_poi_config["ref_rpy_deg"],
-                tolerance_rpy_deg=effective_poi_config["tolerance_rpy_deg"],
-                options=options,
-            )
-            opt_data["poi_config"] = effective_poi_config
-        else:
-            opt_data, opt_report = verifier.optimize_all_paths(paths_data)
+        effective_poi_config = self._normalize_poi_config(poi_config)
+        logger.info(f"🚀 [Verification Service] Dispatching POI optimization to dedicated worker subprocess...")
+        opt_data, opt_report = run_poi_optimization_subprocess(
+            paths_data,
+            ref_rpy_deg=effective_poi_config["ref_rpy_deg"],
+            tolerance_rpy_deg=effective_poi_config["tolerance_rpy_deg"],
+            options=options,
+        )
+        opt_data["poi_config"] = effective_poi_config
 
-        target_yaml = _scan_path_filename(state)
-        target_report = _scan_report_filename(state)
+        target_yaml = _scan_path_filename(out_state)
+        target_report = _scan_report_filename(out_state)
         opt_file = os.path.join(template_dir, target_yaml)
         opt_data["template"] = template_name
-        opt_data["type"] = state
-        opt_data["state_type"] = state
+        opt_data["type"] = out_state
+        opt_data["state_type"] = out_state
         opt_data["updated_at"] = int(time.time())
         opt_data["coordinate_frame"] = "base_link"
-        opt_data["source_file"] = _scan_path_filename("raw")
+        opt_data["source_file"] = _scan_path_filename(source)
         opt_data["saved_file"] = target_yaml
         opt_data["execution_speed_mm_s"] = verifier.linear_velocity_mm_s
 
-        if state == "poi":
+        if mode == "poi":
             for path in opt_data.get("paths", []):
                 rec_speed = path.get("recommended_speed_mm_s")
                 if rec_speed is not None:
@@ -457,12 +487,12 @@ class PathVerificationService:
 
         with open(opt_file, 'w', encoding='utf-8') as f:
             yaml.dump(opt_data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
-        logger.info(f"💾 [Verification Service] Saved {state} paths to: {opt_file}")
+        logger.info(f"💾 [Verification Service] Saved {out_state} paths to: {opt_file}")
 
         if opt_report is None:
             opt_report = verifier.verify_all_paths(opt_data)
 
-        self._decorate_report(opt_report, verifier, state, target_yaml)
+        self._decorate_report(opt_report, verifier, out_state, target_yaml)
         opt_report["saved_file"] = target_yaml
         opt_report["report_file"] = target_report
         opt_report["optimized_paths"] = opt_data.get("paths", [])
@@ -473,22 +503,22 @@ class PathVerificationService:
             if opt_report["execution_speed_mm_s"] < verifier.linear_velocity_mm_s:
                 opt_report["adaptive_feedrate_applied"] = True
 
-        report_path = self._report_file(template_name, state)
+        report_path = self._report_file(template_name, out_state, existing=False)
         with open(report_path, 'w', encoding='utf-8') as f:
             json.dump(opt_report, f, indent=2, ensure_ascii=False)
-        logger.info(f"💾 [Verification Service] Saved {state} diagnostic report to: {report_path}")
+        logger.info(f"💾 [Verification Service] Saved {out_state} diagnostic report to: {report_path}")
 
-        saved_raw_rep = self.get_saved_report(template_name, state_type="raw")
-        if saved_raw_rep:
-            opt_report["raw_report"] = saved_raw_rep
+        saved_src_rep = self.get_saved_report(template_name, state_type=source)
+        if saved_src_rep:
+            opt_report["source_report"] = saved_src_rep
         else:
             try:
-                raw_rep = self.verify_template_paths(template_name, state_type="raw", options=options)
-                opt_report["raw_report"] = raw_rep
+                src_rep = self.verify_template_paths(template_name, state_type=source, options=options)
+                opt_report["source_report"] = src_rep
             except Exception as e:
-                logger.warning(f"Could not synchronize raw report during optimization: {e}")
+                logger.warning(f"Could not synchronize {source} report during optimization: {e}")
 
-        logger.info(f"🎉 [Verification Service] Optimization ({state}) completed for '{template_name}': Status={opt_report['summary']['status']}")
+        logger.info(f"🎉 [Verification Service] Optimization ({out_state}) completed for '{template_name}': Status={opt_report['summary']['status']}")
         return opt_report
 
 

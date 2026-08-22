@@ -16,6 +16,7 @@ from core.vision.point_cloud_processor import depth_to_pcd
 from apps.interactive.sam_service import sam_service
 from apps.interactive.reconstruction_service import reconstruction_service
 from apps.interactive.manual_path_service import manual_path_service
+from apps.interactive.auto_path_service import auto_path_service, AutoPathServiceError
 from apps.interactive.path_verification_service import path_verification_service, DEFAULT_POI_TOLERANCE_RPY_DEG
 
 
@@ -278,13 +279,42 @@ def sample_point(name: str, req: SamplePointRequest):
         raise HTTPException(status_code=500, detail=f"Point sampling failed: {str(e)}")
 
 @router.get("/templates/{name}/manual_paths")
-def get_manual_paths(name: str, state_type: str = "raw", use_opt: bool = False):
+def get_manual_paths(name: str, state_type: str = "raw"):
     try:
-        actual_state = "opt" if use_opt else state_type
-        return manual_path_service.load_manual_paths(name, state_type=actual_state, use_opt=use_opt)
+        return manual_path_service.load_manual_paths(name, state_type=state_type)
     except Exception as e:
         logger.warning(f"Get manual paths failed for template '{name}': {e}")
         raise HTTPException(status_code=500, detail=f"Failed to load manual paths: {str(e)}")
+
+
+class AutoPathRequest(BaseModel):
+    standoff_dist_mm: Optional[float] = None
+    row_spacing_mm: Optional[float] = None
+    point_spacing_mm: Optional[float] = None
+
+
+@router.post("/templates/{name}/auto_paths")
+def generate_auto_paths(name: str, req: AutoPathRequest = AutoPathRequest()):
+    template_path = os.path.join(TEMPLATE_GROUP_DIR, name)
+    if not os.path.exists(template_path):
+        raise HTTPException(status_code=404, detail="Template not found")
+    body = req
+    try:
+        return auto_path_service.generate_auto_paths(
+            name,
+            standoff_dist_mm=body.standoff_dist_mm,
+            row_spacing_mm=body.row_spacing_mm,
+            point_spacing_mm=body.point_spacing_mm,
+        )
+    except AutoPathServiceError as e:
+        logger.warning("Auto path generation rejected for '%s': %s", name, e)
+        raise HTTPException(status_code=400, detail=str(e))
+    except PermissionError as e:
+        logger.warning("Auto path permission error for '%s': %s", name, e)
+        raise HTTPException(status_code=403, detail=f"Permission denied: {str(e)}")
+    except Exception as e:
+        logger.warning("Auto path generation failed for '%s': %s", name, e)
+        raise HTTPException(status_code=500, detail=f"Auto path generation failed: {str(e)}")
 
 
 class SaveManualPathsRequest(BaseModel):
@@ -386,13 +416,13 @@ class KinematicsOptions(BaseModel):
 
 
 class VerifyPathRequest(BaseModel):
-    state_type: str = "raw"  # 'raw' | 'opt' | 'poi'
-    use_opt: bool = False
+    state_type: str = "raw"  # 'raw' | 'auto' | 'poi' | 'auto_poi'
     options: KinematicsOptions = KinematicsOptions()
 
 
 class OptimizePathRequest(BaseModel):
-    mode: str = "opt"  # 'opt' | 'poi'
+    mode: str = "poi"
+    source: str = "raw"  # 'raw' | 'auto'
     poi_config: PoiConstraintConfig | None = None
     options: KinematicsOptions = KinematicsOptions()
 
@@ -400,10 +430,9 @@ class OptimizePathRequest(BaseModel):
 @router.post("/templates/{name}/verify_paths")
 def verify_paths(name: str, req: VerifyPathRequest = VerifyPathRequest()):
     try:
-        actual_state = "opt" if req.use_opt else req.state_type
         res = path_verification_service.verify_template_paths(
             name, 
-            state_type=actual_state,
+            state_type=req.state_type,
             options=req.options.model_dump()
         )
         return res
@@ -423,6 +452,7 @@ def optimize_paths(name: str, req: OptimizePathRequest = OptimizePathRequest()):
         res = path_verification_service.optimize_template_paths(
             name,
             mode=req.mode,
+            source=req.source,
             poi_config=poi_dict,
             options=req.options.model_dump()
         )
@@ -437,12 +467,11 @@ def optimize_paths(name: str, req: OptimizePathRequest = OptimizePathRequest()):
 
 
 @router.get("/templates/{name}/verification_report")
-def get_verification_report(name: str, state_type: str = "raw", use_opt: bool = False):
+def get_verification_report(name: str, state_type: str = "raw"):
     """
     Retrieves saved verification report from disk if exists.
     """
-    actual_state = "opt" if use_opt else state_type
-    report = path_verification_service.get_saved_report(name, state_type=actual_state)
+    report = path_verification_service.get_saved_report(name, state_type=state_type)
     if report is not None:
         return report
     raise HTTPException(status_code=404, detail=f"No saved verification report found for '{actual_state}'.")
@@ -516,7 +545,7 @@ def get_robot_anchor_pose(source: str = "home"):
 def get_template_summary(name: str):
     """
     Returns complete atomic summary of template data in a single round-trip:
-    files, masks, raw/opt/poi paths, cached raw/opt/poi reports, and URDF tool TCP info.
+    files, masks, raw/auto/poi paths, cached reports, and URDF tool TCP info.
     """
     template_path = os.path.join(TEMPLATE_GROUP_DIR, name)
     if not os.path.exists(template_path):
@@ -541,19 +570,21 @@ def get_template_summary(name: str):
     masks_dict = sam_service.get_template_masks(template_path)
     masks_data = masks_dict.get("masks", []) if masks_dict else []
 
-    # 3. Paths (Raw, Opt, POI)
+    # 3. Paths (Manual orig/POI, Auto orig/POI)
     raw_paths_data = manual_path_service.load_manual_paths(name, state_type="raw")
-    opt_paths_data = manual_path_service.load_manual_paths(name, state_type="opt")
+    auto_paths_data = manual_path_service.load_manual_paths(name, state_type="auto")
     poi_paths_data = manual_path_service.load_manual_paths(name, state_type="poi")
+    auto_poi_paths_data = manual_path_service.load_manual_paths(name, state_type="auto_poi")
 
     raw_paths = raw_paths_data.get("paths", [])
-    opt_paths = opt_paths_data.get("paths", []) if opt_paths_data.get("paths") else []
+    auto_paths = auto_paths_data.get("paths", []) if auto_paths_data.get("paths") else []
+    auto_poi_paths = auto_poi_paths_data.get("paths", []) if auto_poi_paths_data.get("paths") else []
     poi_paths = poi_paths_data.get("paths", []) if poi_paths_data.get("paths") else []
     standoff = raw_paths_data.get("standoff_distance_mm", 150.0)
 
-    # 4. Diagnostic Reports (Raw, Opt, POI)
     raw_report = path_verification_service.get_saved_report(name, state_type="raw")
-    opt_report = path_verification_service.get_saved_report(name, state_type="opt")
+    auto_report = path_verification_service.get_saved_report(name, state_type="auto")
+    auto_poi_report = path_verification_service.get_saved_report(name, state_type="auto_poi")
     poi_report = path_verification_service.get_saved_report(name, state_type="poi")
 
     # 5. URDF TCP
@@ -567,11 +598,13 @@ def get_template_summary(name: str):
         "has_mesh": has_mesh,
         "masks": masks_data,
         "raw_paths": raw_paths,
-        "opt_paths": opt_paths,
+        "auto_paths": auto_paths,
+        "auto_poi_paths": auto_poi_paths,
         "poi_paths": poi_paths,
         "standoff_distance_mm": standoff,
         "raw_report": raw_report,
-        "opt_report": opt_report,
+        "auto_report": auto_report,
+        "auto_poi_report": auto_poi_report,
         "poi_report": poi_report,
         "urdf_tcp": urdf_tcp
     }

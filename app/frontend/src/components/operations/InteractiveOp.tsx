@@ -22,7 +22,7 @@ import type {
   PoiConfig,
   SimulationState,
 } from './interactive/types';
-import { STATE_THEMES } from './interactive/types';
+import { STATE_THEMES, pathSourceOf } from './interactive/types';
 import { computeNormalClientSide } from './interactive/normalComputation';
 import { InteractiveCanvas } from './interactive/InteractiveCanvas';
 import { TemplateTopBar } from './interactive/TemplateFileManager';
@@ -95,13 +95,14 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const [savedMasks, setSavedMasks] = useState<MaskData[]>([]);
   const [showMasksOverlay, setShowMasksOverlay] = useState<boolean>(true);
 
-  // ─── 4. Three-State Manual TCP Path State (RAW / OPT / POI) ──────────────
+  // ─── 4. Manual / Auto × Orig / POI path state ────────────────────────────
   const [activeState, setActiveState] = useState<PathStateType>('raw');
   const [manualPathMode, setManualPathMode] = useState<boolean>(false);
   const [manualPaths, setManualPaths] = useState<ManualPathItem[]>([]);
   const [rawPaths, setRawPaths] = useState<ManualPathItem[]>([]);
-  const [optPaths, setOptPaths] = useState<ManualPathItem[]>([]);
+  const [autoPaths, setAutoPaths] = useState<ManualPathItem[]>([]);
   const [poiPaths, setPoiPaths] = useState<ManualPathItem[]>([]);
+  const [autoPoiPaths, setAutoPoiPaths] = useState<ManualPathItem[]>([]);
   const [currentManualPoints, setCurrentManualPoints] = useState<WaypointItem[]>([]);
   const [selectedPathIdForEdit, setSelectedPathIdForEdit] = useState<number | null>(null);
   const [standoffDistMm, setStandoffDistMm] = useState<number>(150.0);
@@ -112,11 +113,12 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const [mousePixel, setMousePixel] = useState<{ u: number; v: number } | null>(null);
   const [liveNormal, setLiveNormal] = useState<LiveNormalInfo | null>(null);
 
-  // ─── 5. Three-State Diagnostics & Verification State ─────────────────────
+  // ─── 5. Diagnostics & Verification State ────────────────────────────────
   const [showDiagnostics, setShowDiagnostics] = useState<boolean>(false);
   const [rawReport, setRawReport] = useState<VerificationReport | null>(null);
-  const [optReport, setOptReport] = useState<VerificationReport | null>(null);
+  const [autoReport, setAutoReport] = useState<VerificationReport | null>(null);
   const [poiReport, setPoiReport] = useState<VerificationReport | null>(null);
+  const [autoPoiReport, setAutoPoiReport] = useState<VerificationReport | null>(null);
   const [isVerifying, setIsVerifying] = useState<boolean>(false);
   const [isOptimizing, setIsOptimizing] = useState<boolean>(false);
   const [isKinParamsOpen, setIsKinParamsOpen] = useState<boolean>(false);
@@ -134,6 +136,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   // ─── 6. Action Execution State ──────────────────────────────────────────
   const [isCapturing, setIsCapturing] = useState<boolean>(false);
   const [isReconstructing, setIsReconstructing] = useState<boolean>(false);
+  const [isAutoGenerating, setIsAutoGenerating] = useState<boolean>(false);
 
   // ─── 7. 3D/2D Synchronized Simulation Engine State (Feature 7) ───────────
   const [simulationState, setSimulationState] = useState<SimulationState | null>(null);
@@ -335,19 +338,21 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       setSavedMasks(summary.masks || []);
 
       const raw = summary.raw_paths || [];
-      const opt = summary.opt_paths || [];
+      const auto = summary.auto_paths || [];
       const poi = summary.poi_paths || [];
+      const autoPoi = summary.auto_poi_paths || [];
       setRawPaths(raw);
-      setOptPaths(opt);
+      setAutoPaths(auto);
       setPoiPaths(poi);
+      setAutoPoiPaths(autoPoi);
 
-      // Determine initial active state (prefer POI if exists, then OPT, then RAW)
       let initialSt: PathStateType = 'raw';
       if (poi.length > 0) initialSt = 'poi';
-      else if (opt.length > 0) initialSt = 'opt';
 
       setActiveState(initialSt);
-      setManualPaths(initialSt === 'poi' ? poi : (initialSt === 'opt' ? opt : raw));
+      setManualPaths(
+        initialSt === 'poi' ? poi : (initialSt === 'auto_poi' ? autoPoi : (initialSt === 'auto' ? auto : raw))
+      );
       if (onPathStateChange) onPathStateChange(initialSt);
 
       if (summary.standoff_distance_mm) {
@@ -359,8 +364,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       }
 
       setRawReport(summary.raw_report || null);
-      setOptReport(summary.opt_report || null);
+      setAutoReport(summary.auto_report || null);
       setPoiReport(summary.poi_report || null);
+      setAutoPoiReport(summary.auto_poi_report || null);
 
       if (summary.has_image) {
         const newImgUrl = `${API_BASE}/templates/${templateName}/scan.jpg?v=${Date.now()}`;
@@ -418,8 +424,15 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     }
   };
 
+  const pathsForState = (st: PathStateType): ManualPathItem[] => {
+    if (st === 'auto') return autoPaths;
+    if (st === 'auto_poi') return autoPoiPaths;
+    if (st === 'poi') return poiPaths;
+    return rawPaths;
+  };
+
   const activatePathStateSnapshot = (newState: PathStateType, explicitPaths?: ManualPathItem[]) => {
-    const targetPaths = explicitPaths ?? (newState === 'poi' ? poiPaths : (newState === 'opt' ? optPaths : rawPaths));
+    const targetPaths = explicitPaths ?? pathsForState(newState);
     stopSimulation();
     setActiveState(newState);
     setManualPaths(targetPaths.map((path) => ({ ...path, points: [...(path.points || [])] })));
@@ -431,7 +444,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     if (onPathsUpdated) onPathsUpdated();
   };
 
-  // State Switcher (RAW / OPT / POI)
+  // State Switcher (Manual/Auto × Orig/POI)
   const handleSelectActiveState = (newState: PathStateType) => {
     activatePathStateSnapshot(newState);
   };
@@ -649,12 +662,6 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       activatePathStateSnapshot('raw', manualPaths);
       setManualPathMode(false);
       await fetchTemplateFiles(activeTemplate);
-      setModalConfig({
-        isOpen: true,
-        title: 'Success',
-        message: `Saved ${manualPaths.length} TCP paths to scan.raw.path.yaml.`,
-        type: 'alert',
-      });
     } catch (err: any) {
       setModalConfig({
         isOpen: true,
@@ -685,7 +692,8 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       if (!res.ok) throw new Error('Verification failed');
       const data = await res.json();
       if (st === 'poi') setPoiReport(data);
-      else if (st === 'opt') setOptReport(data);
+      else if (st === 'auto_poi') setAutoPoiReport(data);
+      else if (st === 'auto') setAutoReport(data);
       else setRawReport(data);
 
       setShowDiagnostics(true);
@@ -701,8 +709,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     }
   };
 
-  const handleApplyOptimization = async (mode: 'opt' | 'poi') => {
+  const handleApplyOptimization = async (mode: 'poi') => {
     if (!activeTemplate) return;
+    const source = pathSourceOf(activeState) === 'auto' ? 'auto' : 'raw';
     setIsOptimizing(true);
     try {
       const res = await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/optimize_paths?mode=${mode}`, {
@@ -710,6 +719,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           mode,
+          source,
           options: {
             step_size_mm: kinParams.stepSizeMm,
             linear_velocity_mm_s: kinParams.linearSpeedMmS,
@@ -726,14 +736,14 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       const rep = data.verification_report || data;
       const paths = (data.optimized_paths || rep.optimized_paths || []) as ManualPathItem[];
 
-      if (mode === 'poi') {
+      if (source === 'auto') {
+        setAutoPoiPaths(paths);
+        setAutoPoiReport(rep);
+        activatePathStateSnapshot('auto_poi', paths);
+      } else {
         setPoiPaths(paths);
         setPoiReport(rep);
         activatePathStateSnapshot('poi', paths);
-      } else {
-        setOptPaths(paths);
-        setOptReport(rep);
-        activatePathStateSnapshot('opt', paths);
       }
 
       await fetchTemplateFiles(activeTemplate);
@@ -778,7 +788,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   // ─── 3D/2D Synchronized Simulation Engine (Feature 7) ────────────────────
   const startSimulation = (stateType: PathStateType = activeState, targetPathId?: number | null) => {
     stopSimulation();
-    const rep = stateType === 'poi' ? poiReport : (stateType === 'opt' ? optReport : rawReport);
+    const rep = stateType === 'poi' ? poiReport
+      : (stateType === 'auto_poi' ? autoPoiReport
+        : (stateType === 'auto' ? autoReport : rawReport));
     if (!rep?.path_reports || rep.path_reports.length === 0) {
       setModalConfig({
         isOpen: true,
@@ -1020,7 +1032,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     handleSelectActiveState(targetState);
 
     // Count total waypoints in the target paths for progress state initialisation
-    const srcPaths = targetState === 'poi' ? poiPaths : (targetState === 'opt' ? optPaths : rawPaths);
+    const srcPaths = pathsForState(targetState);
     const filteredPaths = (pathId !== null && pathId !== undefined)
       ? srcPaths.filter((p) => p.path_id === pathId)
       : srcPaths;
@@ -1115,6 +1127,80 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     }
   };
 
+  const runAutoPathGeneration = async () => {
+    if (!activeTemplate) return;
+    setIsAutoGenerating(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/auto_paths`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          standoff_dist_mm: standoffDistMm,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(typeof data.detail === 'string' ? data.detail : 'Auto path generation failed');
+      }
+      await handleSelectTemplate(activeTemplate);
+      const generated = (data.paths || []) as ManualPathItem[];
+      setAutoPaths(generated);
+      activatePathStateSnapshot('auto', generated);
+      if (onPathsUpdated) onPathsUpdated();
+      setModalConfig({
+        isOpen: true,
+        title: 'Auto Waypoints Ready',
+        message: `Generated ${data.point_count ?? 0} waypoints (row ${data.row_spacing_mm ?? '?'} mm) and saved to scan.auto.path.yaml.`,
+        type: 'alert',
+      });
+    } catch (err: any) {
+      setModalConfig({
+        isOpen: true,
+        title: 'Auto Path Error',
+        message: err.message,
+        type: 'alert',
+      });
+    } finally {
+      setIsAutoGenerating(false);
+    }
+  };
+
+  const handleDeleteFile = async (fileName: string) => {
+    if (!activeTemplate) return;
+    try {
+      const res = await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/files/${fileName}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok) throw new Error('Failed to delete file');
+      await handleSelectTemplate(activeTemplate);
+    } catch (err: any) {
+      setModalConfig({
+        isOpen: true,
+        title: 'Error',
+        message: err.message,
+        type: 'alert',
+      });
+    }
+  };
+
+  const handleTriggerAutoPath = () => {
+    if (!activeTemplate) return;
+    const hasExisting = (autoPaths?.length || 0) > 0;
+    if (hasExisting) {
+      setModalConfig({
+        isOpen: true,
+        title: 'Overwrite Auto Paths?',
+        message: 'This will replace scan.auto.path.yaml and clear its POI result. Manual paths are left unchanged.',
+        type: 'confirm',
+        onConfirm: () => {
+          void runAutoPathGeneration();
+        },
+      });
+      return;
+    }
+    void runAutoPathGeneration();
+  };
+
   // Helper to render SVG polygon path
   const renderPolygons = (polygons: number[][][], fill: string, stroke?: string) => {
     return (
@@ -1205,7 +1291,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
           liveNormal={liveNormal}
           natSize={natSize}
           verificationReport={
-            activeState === 'poi' ? poiReport : (activeState === 'opt' ? optReport : rawReport)
+            activeState === 'poi' ? poiReport
+              : (activeState === 'auto_poi' ? autoPoiReport
+                : (activeState === 'auto' ? autoReport : rawReport))
           }
           activeState={activeState}
           simulationState={simulationState}
@@ -1357,6 +1445,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
             activeTemplate={activeTemplate}
             isCapturing={isCapturing}
             isReconstructing={isReconstructing}
+            isAutoGenerating={isAutoGenerating}
             segMode={segMode}
             manualPathMode={manualPathMode}
             showDiagnostics={showDiagnostics}
@@ -1375,6 +1464,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
             }}
             onToggleDiagnostics={() => setShowDiagnostics(!showDiagnostics)}
             onTriggerReconstruct={handleTriggerReconstruct}
+            onTriggerAutoPath={handleTriggerAutoPath}
           />
 
           {/* Panel Content (File List or TCP Diagnostics) */}
@@ -1382,29 +1472,15 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
             {!showDiagnostics ? (
               <TemplateFileList
                 files={files}
-                onOpenDeleteFileModal={(f) => {
-                  if (!activeTemplate) return;
-                  setModalConfig({
-                    isOpen: true,
-                    title: 'Delete File',
-                    message: `Delete file '${f}' from template '${activeTemplate}'?`,
-                    type: 'confirm',
-                    onConfirm: async () => {
-                      try {
-                        const res = await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/files/${f}`, {
-                          method: 'DELETE',
-                        });
-                        if (!res.ok) throw new Error('Failed to delete file');
-                        await handleSelectTemplate(activeTemplate);
-                      } catch (err: any) {
-                        alert(err.message);
-                      }
-                    },
-                  });
-                }}
+                onDeleteFile={handleDeleteFile}
                 rawPaths={rawPaths}
-                optPaths={optPaths}
+                autoPaths={autoPaths}
+                autoPoiPaths={autoPoiPaths}
                 poiPaths={poiPaths}
+                rawReport={rawReport}
+                autoReport={autoReport}
+                poiReport={poiReport}
+                autoPoiReport={autoPoiReport}
                 robotConnected={robotConnected}
                 onSimulatePath={(st, pId) => startSimulation(st, pId)}
                 onExecutePath={(fileName, st, pId) => handleDirectExecutePath(fileName, st, pId)}
@@ -1413,11 +1489,13 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                   setShowDiagnostics(true);
                 }}
                 onSelectFile={(fileName) => {
-                  if (fileName.includes('poi.path') || fileName.includes('poi.report')) {
+                  if (fileName.includes('auto.poi')) {
+                    handleSelectActiveState('auto_poi');
+                  } else if (fileName.includes('manual.poi') || fileName.includes('poi.path') || fileName.includes('poi.report')) {
                     handleSelectActiveState('poi');
-                  } else if (fileName.includes('opt.path') || fileName.includes('opt.report')) {
-                    handleSelectActiveState('opt');
-                  } else if (fileName.includes('raw.path') || fileName.includes('raw.report')) {
+                  } else if (fileName.includes('auto.path') || fileName.includes('auto.report')) {
+                    handleSelectActiveState('auto');
+                  } else if (fileName.includes('manual.path') || fileName.includes('manual.report') || fileName.includes('raw.path') || fileName.includes('raw.report')) {
                     handleSelectActiveState('raw');
                   }
                 }}
@@ -1426,11 +1504,13 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
               <DiagnosticsDashboard
                 activeState={activeState}
                 rawReport={rawReport}
-                optReport={optReport}
+                autoReport={autoReport}
                 poiReport={poiReport}
+                autoPoiReport={autoPoiReport}
                 rawPaths={rawPaths}
-                optPaths={optPaths}
+                autoPaths={autoPaths}
                 poiPaths={poiPaths}
+                autoPoiPaths={autoPoiPaths}
                 isVerifying={isVerifying}
                 isOptimizing={isOptimizing}
                 activeTemplate={activeTemplate}

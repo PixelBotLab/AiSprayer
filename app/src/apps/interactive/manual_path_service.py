@@ -207,20 +207,46 @@ class ManualPathService:
             "calib_source": calib_desc
         }
 
+    @staticmethod
+    def path_filename(state_type: str) -> str:
+        names = {
+            "raw": "scan.manual.path.yaml",
+            "auto": "scan.auto.path.yaml",
+            "poi": "scan.manual.poi.path.yaml",
+            "auto_poi": "scan.auto.poi.path.yaml",
+        }
+        if state_type not in names:
+            raise ValueError(f"Invalid path state '{state_type}'. Expected one of: {', '.join(names)}")
+        return names[state_type]
+
+    @staticmethod
+    def legacy_path_filenames(state_type: str) -> tuple[str, ...]:
+        return {
+            "raw": ("scan.raw.path.yaml",),
+            "poi": ("scan.poi.path.yaml",),
+        }.get(state_type, ())
+
     def _ensure_state_type(self, state_type: str) -> str:
         state = (state_type or "").strip().lower()
-        if state not in {"raw", "opt", "poi"}:
-            raise ValueError(f"Invalid path state '{state_type}'. Expected one of: raw, opt, poi")
+        self.path_filename(state)
         return state
 
-    def load_manual_paths(self, template_name: str, state_type: str = "raw", use_opt: bool = False) -> dict:
-        """Loads scan.raw.path.yaml, scan.opt.path.yaml, or scan.poi.path.yaml for a given template."""
-        if use_opt:
-            state_type = "opt"
+    def _resolve_path_file(self, template_dir: str, state_type: str) -> str:
+        canonical = os.path.join(template_dir, self.path_filename(state_type))
+        if os.path.exists(canonical):
+            return canonical
+        for name in self.legacy_path_filenames(state_type):
+            legacy = os.path.join(template_dir, name)
+            if os.path.exists(legacy):
+                return legacy
+        return canonical
+
+    def load_manual_paths(self, template_name: str, state_type: str = "raw") -> dict:
+        """Loads scan.{manual,auto,manual.poi,auto.poi}.path.yaml for a given template."""
         state_type = self._ensure_state_type(state_type)
 
         template_dir = os.path.join(self.template_group_dir, template_name)
-        paths_file = os.path.join(template_dir, f"scan.{state_type}.path.yaml")
+        paths_file = self._resolve_path_file(template_dir, state_type)
         if not os.path.exists(paths_file):
             return {
                 "template": template_name,
@@ -326,13 +352,13 @@ class ManualPathService:
         return new_points
 
     def save_manual_paths(self, template_name: str, paths_data: dict, state_type: str = "raw") -> bool:
-        """Saves manual paths to scan.raw.path.yaml / scan.opt.path.yaml / scan.poi.path.yaml."""
+        """Saves paths to scan.{manual,auto,manual.poi,auto.poi}.path.yaml. Raw/auto save cleans that family's stale POI."""
         state_type = self._ensure_state_type(state_type)
         template_dir = os.path.join(self.template_group_dir, template_name)
         if not os.path.exists(template_dir):
             os.makedirs(template_dir, exist_ok=True)
             
-        file_name = f"scan.{state_type}.path.yaml"
+        file_name = self.path_filename(state_type)
         paths_file = os.path.join(template_dir, file_name)
         paths_data["template"] = template_name
         paths_data["type"] = state_type
@@ -396,21 +422,34 @@ class ManualPathService:
                 yaml.dump(paths_data, f, allow_unicode=True, default_flow_style=False, sort_keys=False)
             logger.info(f"Successfully saved manual TCP paths to: {paths_file}")
 
-            # Clean stale downstream optimization and report files if raw paths changed.
-            # Only current scan.* files are managed; legacy filenames are intentionally ignored.
             if state_type == "raw":
                 stale_files = [
-                    "scan.opt.path.yaml", "scan.poi.path.yaml",
-                    "scan.raw.report.json", "scan.opt.report.json", "scan.poi.report.json",
+                    "scan.raw.path.yaml",
+                    "scan.manual.poi.path.yaml", "scan.poi.path.yaml",
+                    "scan.manual.report.json", "scan.raw.report.json",
+                    "scan.manual.poi.report.json", "scan.poi.report.json",
+                    "scan.opt.path.yaml", "scan.opt.report.json",
                 ]
-                for stale_file in stale_files:
-                    stale_path = os.path.join(template_dir, stale_file)
-                    if os.path.exists(stale_path):
-                        try:
-                            os.remove(stale_path)
-                            logger.info(f"🧹 [ManualPathService] Cleaned stale file: {stale_file}")
-                        except Exception as ex:
-                            logger.warning(f"Could not remove stale file {stale_file}: {ex}")
+            elif state_type == "auto":
+                stale_files = [
+                    "scan.auto.poi.path.yaml",
+                    "scan.auto.report.json", "scan.auto.poi.report.json",
+                ]
+            elif state_type == "poi":
+                stale_files = [
+                    "scan.poi.path.yaml",
+                    "scan.poi.report.json",
+                ]
+            else:
+                stale_files = []
+            for stale_file in stale_files:
+                stale_path = os.path.join(template_dir, stale_file)
+                if os.path.exists(stale_path):
+                    try:
+                        os.remove(stale_path)
+                        logger.info(f"🧹 [ManualPathService] Cleaned stale file: {stale_file}")
+                    except Exception as ex:
+                        logger.warning(f"Could not remove stale file {stale_file}: {ex}")
 
             return True
         except PermissionError as e:

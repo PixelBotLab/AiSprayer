@@ -126,7 +126,7 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
             const pId = path.path_id ?? (pIdx + 1);
             const isHighlighted = highlightedPathId === pId;
             const isCurrentSimPath = simulationState?.isPlaying && (simulationState.currentPathIndex === pIdx);
-            const pathStroke = isHighlighted ? '#ffffff' : (isCurrentSimPath ? theme.hex : (activeState === 'poi' ? '#22c55e' : (activeState === 'opt' ? '#38bdf8' : '#94a3b8')));
+            const pathStroke = isHighlighted ? '#ffffff' : (isCurrentSimPath ? theme.hex : (STATE_THEMES[activeState]?.hex || '#94a3b8'));
 
             // Check if there are verification issues reported on this path
             const pathRep = verificationReport?.path_reports?.find((r: any) => r.path_id === pId);
@@ -249,7 +249,7 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
                 {pts.length > 0 && (() => {
                   const p0 = pts[0];
                   const [u0, v0] = p0.pixel;
-                  const badgeColor = activeState === 'poi' ? '#16a34a' : (activeState === 'opt' ? '#0284c7' : '#64748b');
+                  const badgeColor = STATE_THEMES[activeState]?.hex || '#64748b';
                   return (
                     <g
                       key={`start-badge-${pId}`}
@@ -311,7 +311,7 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
                         />
                       )}
 
-                      {/* Tool Z Axis Projection: changes with RAW/OPT/POI TCP orientation. */}
+                      {/* Tool Z Axis Projection: changes with current-state TCP orientation. */}
                       {toolZ && (
                         <line
                           x1={toolZ[0]}
@@ -340,7 +340,7 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
                           cx={0}
                           cy={0}
                           r={6.5}
-                          fill={activeState === 'poi' ? '#10b981' : (activeState === 'opt' ? '#0284c7' : '#64748b')}
+                          fill={STATE_THEMES[activeState]?.hex || '#64748b'}
                           stroke="#ffffff"
                           strokeWidth={1.5}
                           filter="drop-shadow(0px 1px 3px rgba(0,0,0,0.6))"
@@ -397,58 +397,6 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
             </g>
           )}
 
-          {/* Topmost Tooltip Layer in VIEW mode */}
-          {hoveredWaypoint && (() => {
-            const pt = hoveredWaypoint;
-            const [u, v] = pt.pixel;
-            const pId = pt.path_id ?? 1;
-            const wpIdx = pt.index;
-
-            const pathRep = verificationReport?.path_reports?.find((r: any) => r.path_id === pId);
-            const totalSteps = pathRep?.total_interpolated || 1;
-            const matchingIssue = pathRep?.issues?.find((iss: any) => {
-              if (iss.waypoint_index !== undefined && iss.waypoint_index === wpIdx - 1) return true;
-              if (iss.step_index !== undefined) {
-                const approxWp = Math.floor((iss.step_index / totalSteps) * (pathRep.total_interpolated || 1));
-                return approxWp === wpIdx - 1;
-              }
-              return false;
-            });
-
-            const tipW = 230, tipH = matchingIssue ? 125 : 100;
-            const tipX = Math.min(u + 14, natSize.w - tipW - 10);
-            const tipY = Math.max(v - tipH - 10, 10);
-
-            return (
-              <g transform={`translate(${tipX}, ${tipY})`} style={{ pointerEvents: 'none' }}>
-                <rect x={0} y={0} width={tipW} height={tipH} rx={8} fill="rgba(10, 15, 29, 0.95)" stroke="rgba(56, 189, 248, 0.4)" strokeWidth={1} filter="drop-shadow(0px 8px 16px rgba(0,0,0,0.85))" />
-                <rect x={0} y={0} width={tipW} height={22} rx={8} fill="rgba(30, 41, 59, 0.8)" />
-                <text x={8} y={15} fill="#38bdf8" fontSize={10.5} fontWeight="bold" fontFamily="monospace">
-                  Path {pId} · Point {wpIdx}
-                </text>
-                <text x={tipW - 8} y={15} textAnchor="end" fill="#93c5fd" fontSize={9} fontFamily="monospace">
-                  {pt.standoff_distance_mm}mm
-                </text>
-                <text x={8} y={38} fill="#94a3b8" fontSize={9.5} fontFamily="monospace">
-                  Surf [mm]: <tspan fill="#f1f5f9">[{pt.surface_point_base_mm.map(n => n.toFixed(1)).join(', ')}]</tspan>
-                </text>
-                <text x={8} y={53} fill="#94a3b8" fontSize={9.5} fontFamily="monospace">
-                  TCP [mm]: <tspan fill="#fde047" fontWeight="bold">[{pt.tcp_pose_base.x.toFixed(1)}, {pt.tcp_pose_base.y.toFixed(1)}, {pt.tcp_pose_base.z.toFixed(1)}]</tspan>
-                </text>
-                <text x={8} y={68} fill="#94a3b8" fontSize={9.5} fontFamily="monospace">
-                  Normal: <tspan fill="#34d399">[{pt.surface_normal_base.map(n => n.toFixed(2)).join(', ')}]</tspan>
-                </text>
-                <text x={8} y={83} fill="#94a3b8" fontSize={9.5} fontFamily="monospace">
-                  Euler [°]: <tspan fill="#f59e0b">Rx:{pt.tcp_pose_base.rx}° Ry:{pt.tcp_pose_base.ry}° Rz:{pt.tcp_pose_base.rz}°</tspan>
-                </text>
-                {matchingIssue && (
-                  <text x={8} y={102} fill="#f43f5e" fontSize={9.5} fontWeight="bold" fontFamily="monospace">
-                    ⚠️ {matchingIssue.type}: {matchingIssue.message}
-                  </text>
-                )}
-              </g>
-            );
-          })()}
         </svg>
       )}
 

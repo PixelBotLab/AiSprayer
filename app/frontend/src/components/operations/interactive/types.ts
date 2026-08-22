@@ -69,7 +69,22 @@ export interface VerificationIssue {
   limit?: number;
 }
 
-export type PathStateType = 'raw' | 'opt' | 'poi';
+export type PathStateType = 'raw' | 'auto' | 'poi' | 'auto_poi';
+export type PathSource = 'manual' | 'auto';
+export type PathStage = 'orig' | 'poi';
+
+export function pathSourceOf(state: PathStateType): PathSource {
+  return state === 'auto' || state === 'auto_poi' ? 'auto' : 'manual';
+}
+
+export function pathStageOf(state: PathStateType): PathStage {
+  return state === 'poi' || state === 'auto_poi' ? 'poi' : 'orig';
+}
+
+export function composePathState(source: PathSource, stage: PathStage): PathStateType {
+  if (source === 'auto') return stage === 'poi' ? 'auto_poi' : 'auto';
+  return stage === 'poi' ? 'poi' : 'raw';
+}
 
 export interface PoiConfig {
   ref_rpy_deg: [number, number, number];
@@ -161,23 +176,32 @@ export const STATE_THEMES: Record<PathStateType, { label: string; name: string; 
     text: 'text-slate-300',
     lightBg: 'bg-slate-800'
   },
-  opt: {
-    label: 'OPT',
-    name: 'Axial Opt',
-    hex: '#38bdf8',
-    bg: 'bg-sky-500/20',
-    border: 'border-sky-400/40',
-    text: 'text-sky-400',
-    lightBg: 'bg-sky-950/60'
+  auto: {
+    label: 'AUTO',
+    name: 'Auto Zigzag',
+    hex: '#a78bfa',
+    bg: 'bg-violet-500/20',
+    border: 'border-violet-400/40',
+    text: 'text-violet-300',
+    lightBg: 'bg-violet-950/60'
   },
   poi: {
     label: 'POI',
-    name: 'Pose Constrained',
+    name: 'Manual POI',
     hex: '#22c55e',
     bg: 'bg-emerald-500/20',
     border: 'border-emerald-400/40',
     text: 'text-emerald-400',
     lightBg: 'bg-emerald-950/60'
+  },
+  auto_poi: {
+    label: 'A-POI',
+    name: 'Auto POI',
+    hex: '#2dd4bf',
+    bg: 'bg-teal-500/20',
+    border: 'border-teal-400/40',
+    text: 'text-teal-300',
+    lightBg: 'bg-teal-950/60'
   }
 };
 

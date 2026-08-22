@@ -39,8 +39,7 @@ interface RobotModelProps {
   isMeshVisible: boolean;
   isWireframe: boolean;
   isPathsVisible: boolean;
-  pathState?: 'raw' | 'opt' | 'poi';
-  useOptPaths?: boolean;
+  pathState?: 'raw' | 'auto' | 'poi' | 'auto_poi';
   onMeshLoaded?: (vertexCount: number) => void;
   onPathsLoaded?: (pathCount: number, pointCount: number) => void;
 }
@@ -111,11 +110,10 @@ const RobotModel: React.FC<RobotModelProps> = ({
   isWireframe,
   isPathsVisible,
   pathState = 'raw',
-  useOptPaths = false,
   onMeshLoaded,
   onPathsLoaded
 }) => {
-  const effectiveState = pathState || (useOptPaths ? 'opt' : 'raw');
+  const effectiveState = pathState;
 
   const [robot, setRobot] = useState<Object3D | null>(null);
   const surfaceMeshRef = useRef<Mesh | null>(null);
@@ -312,8 +310,8 @@ const RobotModel: React.FC<RobotModelProps> = ({
         let totalPts = 0;
 
         // Colors per state
-        const tcpColorHex = effectiveState === 'poi' ? 0x22c55e : (effectiveState === 'opt' ? 0x38bdf8 : 0x94a3b8);
-        const spriteFill = effectiveState === 'poi' ? '#15803d' : (effectiveState === 'opt' ? '#0284c7' : '#475569');
+        const tcpColorHex = effectiveState === 'poi' ? 0x22c55e : (effectiveState === 'auto_poi' ? 0x2dd4bf : (effectiveState === 'auto' ? 0xa78bfa : 0x94a3b8));
+        const spriteFill = effectiveState === 'poi' ? '#15803d' : (effectiveState === 'auto_poi' ? '#0f766e' : (effectiveState === 'auto' ? '#6d28d9' : '#475569'));
 
         paths.forEach((pathItem: any) => {
           const pts = pathItem.points || [];
@@ -451,7 +449,7 @@ const RobotModel: React.FC<RobotModelProps> = ({
             // 2. Normal Line from surface to TCP
             const normalLineGeom = new BufferGeometry().setFromPoints([surfPos, tcpPos]);
             const normalLineMat = new LineBasicMaterial({ 
-              color: useOptPaths ? 0x2dd4bf : 0xfbbf24, 
+              color: (effectiveState === 'poi' || effectiveState === 'auto_poi') ? 0x2dd4bf : 0xfbbf24, 
               linewidth: 1.5 
             });
             const normalLine = new Line(normalLineGeom, normalLineMat);
@@ -460,10 +458,10 @@ const RobotModel: React.FC<RobotModelProps> = ({
             // 3. TCP Target Point Sphere
             const tcpSphereGeom = new SphereGeometry(0.007, 12, 12);
             const tcpSphereMat = new MeshStandardMaterial({ 
-              color: useOptPaths ? 0x10b981 : 0xf59e0b, 
+              color: (effectiveState === 'poi' || effectiveState === 'auto_poi') ? 0x10b981 : 0xf59e0b, 
               roughness: 0.2, 
               metalness: 0.5, 
-              emissive: useOptPaths ? 0x064e3b : 0x78350f, 
+              emissive: (effectiveState === 'poi' || effectiveState === 'auto_poi') ? 0x064e3b : 0x78350f, 
               emissiveIntensity: 0.4 
             });
             const tcpSphere = new Mesh(tcpSphereGeom, tcpSphereMat);
@@ -517,7 +515,7 @@ const RobotModel: React.FC<RobotModelProps> = ({
         pathsGroupRef.current = null;
       }
     };
-  }, [robot, activeTemplate, pathsVersion, useOptPaths, pathState, effectiveState]);
+  }, [robot, activeTemplate, pathsVersion, pathState, effectiveState]);
 
 
   // 5. Handle Visibility and Wireframe Changes
@@ -549,8 +547,7 @@ interface Robot3DViewerProps {
   activeTemplate?: string | null;
   meshVersion?: number;
   pathsVersion?: number;
-  pathState?: 'raw' | 'opt' | 'poi';
-  useOptPaths?: boolean;
+  pathState?: 'raw' | 'auto' | 'poi' | 'auto_poi';
 }
 
 const TOOLTIP_CLASSES = "bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2.5 py-1 rounded-md shadow-2xl border border-white/10 whitespace-nowrap z-50 pointer-events-none";
@@ -561,7 +558,6 @@ const Robot3DViewer: React.FC<Robot3DViewerProps> = ({
   meshVersion = 0,
   pathsVersion = 0,
   pathState = 'raw',
-  useOptPaths = false
 }) => {
   const [isMaximized, setIsMaximized] = useState(false);
   const [isMeshVisible, setIsMeshVisible] = useState(true);
@@ -596,7 +592,6 @@ const Robot3DViewer: React.FC<Robot3DViewerProps> = ({
           isMeshVisible={isMeshVisible}
           isWireframe={isWireframe}
           isPathsVisible={isPathsVisible}
-          useOptPaths={useOptPaths}
           onMeshLoaded={(cnt) => setMeshVertexCount(cnt)}
           onPathsLoaded={(pCount, ptCount) => {
             setPathsCount(pCount);
@@ -639,11 +634,13 @@ const Robot3DViewer: React.FC<Robot3DViewerProps> = ({
           <div className={`h-6 px-2 rounded-full text-[9px] font-mono backdrop-blur-md border shadow-sm flex items-center gap-1 ${
             pathState === 'poi'
               ? 'text-emerald-300 bg-emerald-950/60 border-emerald-500/40'
-              : pathState === 'opt'
-              ? 'text-sky-300 bg-sky-950/60 border-sky-500/40'
+              : pathState === 'auto_poi'
+              ? 'text-teal-300 bg-teal-950/60 border-teal-500/40'
+              : pathState === 'auto'
+              ? 'text-violet-300 bg-violet-950/60 border-violet-500/40'
               : 'text-slate-300 bg-slate-900/80 border-slate-700/50'
           }`}>
-            <Route size={10} className={pathState === 'poi' ? "text-emerald-400" : (pathState === 'opt' ? "text-sky-400" : "text-slate-400")} />
+            <Route size={10} className={pathState === 'poi' ? "text-emerald-400" : (pathState === 'auto_poi' ? "text-teal-400" : (pathState === 'auto' ? "text-violet-400" : "text-slate-400"))} />
             <span>TCP ({pathState.toUpperCase()}): {pathsCount}P ({pointsCount} pts)</span>
           </div>
         )}

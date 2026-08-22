@@ -2,7 +2,6 @@ import React, { useState } from 'react';
 import {
   ShieldCheck,
   RefreshCw,
-  Sparkles,
   Layers,
   HardDrive,
   Check,
@@ -22,16 +21,19 @@ import type {
   PathStateType,
   PoiConfig,
 } from './types';
-import { STATE_THEMES } from './types';
+import { pathSourceOf } from './types';
+import { PathStateSwitcher } from './PathStateSwitcher';
 
 interface DiagnosticsDashboardProps {
   activeState: PathStateType;
   rawReport: VerificationReport | null;
-  optReport: VerificationReport | null;
+  autoReport: VerificationReport | null;
   poiReport: VerificationReport | null;
+  autoPoiReport: VerificationReport | null;
   rawPaths: ManualPathItem[];
-  optPaths: ManualPathItem[];
+  autoPaths: ManualPathItem[];
   poiPaths: ManualPathItem[];
+  autoPoiPaths: ManualPathItem[];
   isVerifying: boolean;
   isOptimizing: boolean;
   activeTemplate: string | null;
@@ -46,7 +48,7 @@ interface DiagnosticsDashboardProps {
   setHighlightedPathId?: (id: number | null) => void;
   onSelectActiveState: (state: PathStateType) => void;
   onRunDiagnostics: (state?: PathStateType) => void;
-  onApplyOptimization: (mode: 'opt' | 'poi') => void;
+  onApplyOptimization: (mode: 'poi') => void;
   onFetchAnchorPose: (source: 'home' | 'live') => void;
   onClose?: () => void;
 }
@@ -54,11 +56,13 @@ interface DiagnosticsDashboardProps {
 export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
   activeState,
   rawReport,
-  optReport,
+  autoReport,
   poiReport,
+  autoPoiReport,
   rawPaths,
-  optPaths,
+  autoPaths,
   poiPaths,
+  autoPoiPaths,
   isVerifying,
   isOptimizing,
   activeTemplate,
@@ -79,7 +83,14 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
   const [selectedPathIndex, setSelectedPathIndex] = useState<number>(0);
 
   // Active paths list based on selected state
-  const currentPaths = activeState === 'poi' ? poiPaths : (activeState === 'opt' ? optPaths : rawPaths);
+  const source = pathSourceOf(activeState);
+  const origPaths = source === 'auto' ? autoPaths : rawPaths;
+  const srcPoiPaths = source === 'auto' ? autoPoiPaths : poiPaths;
+  const origReport = source === 'auto' ? autoReport : rawReport;
+  const srcPoiReport = source === 'auto' ? autoPoiReport : poiReport;
+  const currentPaths = pathSourceOf(activeState) === 'auto'
+    ? (activeState === 'auto_poi' ? autoPoiPaths : autoPaths)
+    : (activeState === 'poi' ? poiPaths : rawPaths);
 
   const findPathById = (paths: ManualPathItem[], pathId: number | undefined, fallbackIndex: number) => {
     if (pathId !== undefined) {
@@ -134,9 +145,8 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
     return peaks;
   };
 
-  const rawPeakJoints = getOverallPeakJoints(rawReport);
-  const optPeakJoints = getOverallPeakJoints(optReport);
-  const poiPeakJoints = getOverallPeakJoints(poiReport);
+  const origPeakJoints = getOverallPeakJoints(origReport);
+  const poiPeakJoints = getOverallPeakJoints(srcPoiReport);
 
   const getStatusBadge = (rep: VerificationReport | null) => {
     if (!rep) return <span className="text-[9px] font-mono text-slate-500">N/A</span>;
@@ -196,41 +206,16 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
 
       {/* Top 3-Way Mode Switcher & Tab Sub-Nav */}
       <div className="p-2 border-b border-slate-800/80 bg-slate-950/40 flex flex-col gap-2 shrink-0">
-        {/* Active State Selector Pills: RAW / OPT / POI */}
-        <div className="grid grid-cols-3 gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800/80">
-          {(['raw', 'opt', 'poi'] as PathStateType[]).map((st) => {
-            const isActive = activeState === st;
-            const theme = STATE_THEMES[st];
-            const hasData = st === 'raw' ? rawPaths.length > 0 : (st === 'opt' ? optPaths.length > 0 : poiPaths.length > 0);
-            return (
-              <button
-                key={st}
-                onClick={() => onSelectActiveState(st)}
-                disabled={!hasData && st !== 'raw'}
-                className={`py-1 px-1.5 rounded flex items-center justify-between text-[10px] font-bold tracking-wider transition-all disabled:opacity-30 ${
-                  isActive
-                    ? `${theme.lightBg} ${theme.text} border ${theme.border} shadow-md`
-                    : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60'
-                }`}
-              >
-                <div className="flex items-center gap-1">
-                  <span
-                    className="w-1.5 h-1.5 rounded-full"
-                    style={{ backgroundColor: theme.hex }}
-                  />
-                  <span>{theme.label}</span>
-                </div>
-                {hasData ? (
-                  <span className="text-[8.5px] font-mono opacity-80">
-                    {st === 'raw' ? rawPaths.length : (st === 'opt' ? optPaths.length : poiPaths.length)}P
-                  </span>
-                ) : (
-                  <span className="text-[8px] font-mono text-slate-600">Empty</span>
-                )}
-              </button>
-            );
-          })}
-        </div>
+        <PathStateSwitcher
+          activeState={activeState}
+          onSelect={onSelectActiveState}
+          counts={{
+            raw: rawPaths.length,
+            auto: autoPaths.length,
+            poi: poiPaths.length,
+            auto_poi: autoPoiPaths.length,
+          }}
+        />
 
         {/* View Mode Tabs: Matrix Table | Waypoints | POI Settings */}
         <div className="flex items-center justify-between text-[10px] font-medium border-b border-slate-800 pb-0.5">
@@ -244,7 +229,7 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
               }`}
             >
               <Layers size={11} />
-              <span>3-State Matrix</span>
+              <span>Orig vs POI</span>
             </button>
             <button
               onClick={() => setSelectedTab('inspector')}
@@ -285,27 +270,17 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
 
       {/* Main Tab Content */}
       <div className="p-3 space-y-3.5 text-xs flex-1">
-        {/* ========================================================================= */}
-        {/* TAB 1: 3-STATE MATRIX COMPARISON TABLE (RAW 灰 / OPT 蓝 / POI 绿)           */}
-        {/* ========================================================================= */}
         {selectedTab === 'matrix' && (
           <div className="space-y-3">
-            {/* Global Metrics Comparison Table */}
             <div className="rounded-lg border border-slate-800 bg-slate-950/60 overflow-hidden shadow-inner">
               <table className="w-full text-[10px] text-left border-collapse">
                 <thead>
                   <tr className="bg-slate-950 border-b border-slate-800 text-[9.5px] uppercase font-mono text-slate-400">
-                    <th className="p-2 font-semibold">Metric</th>
+                    <th className="p-2 font-semibold">Metric · {source === 'auto' ? 'Auto' : 'Manual'}</th>
                     <th className="p-2 font-bold text-slate-300 bg-slate-900/40 text-center border-l border-slate-800">
                       <div className="flex items-center justify-center gap-1">
                         <span className="w-1.5 h-1.5 rounded-full bg-slate-400" />
-                        <span>RAW</span>
-                      </div>
-                    </th>
-                    <th className="p-2 font-bold text-sky-400 bg-sky-950/20 text-center border-l border-slate-800">
-                      <div className="flex items-center justify-center gap-1">
-                        <span className="w-1.5 h-1.5 rounded-full bg-sky-400" />
-                        <span>OPT</span>
+                        <span>Orig</span>
                       </div>
                     </th>
                     <th className="p-2 font-bold text-emerald-400 bg-emerald-950/20 text-center border-l border-slate-800">
@@ -317,45 +292,31 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/80 font-mono">
-                  {/* Row 1: Status */}
                   <tr>
                     <td className="p-2 text-slate-400 font-sans font-medium text-[10px]">Status</td>
                     <td className="p-2 text-center bg-slate-900/20 border-l border-slate-800">
-                      {getStatusBadge(rawReport)}
-                    </td>
-                    <td className="p-2 text-center bg-sky-950/10 border-l border-slate-800">
-                      {getStatusBadge(optReport)}
+                      {getStatusBadge(origReport)}
                     </td>
                     <td className="p-2 text-center bg-emerald-950/10 border-l border-slate-800">
-                      {getStatusBadge(poiReport)}
+                      {getStatusBadge(srcPoiReport)}
                     </td>
                   </tr>
-
-                  {/* Row 2: Issues */}
                   <tr>
                     <td className="p-2 text-slate-400 font-sans font-medium text-[10px]">Issues</td>
                     <td className="p-2 text-center text-slate-300 border-l border-slate-800">
-                      {rawReport?.summary ? `${rawReport.summary.total_issues}` : '-'}
-                    </td>
-                    <td className="p-2 text-center text-sky-300 border-l border-slate-800">
-                      {optReport?.summary ? `${optReport.summary.total_issues}` : '-'}
+                      {origReport?.summary ? `${origReport.summary.total_issues}` : '-'}
                     </td>
                     <td className="p-2 text-center text-emerald-300 border-l border-slate-800">
-                      {poiReport?.summary ? `${poiReport.summary.total_issues}` : '-'}
+                      {srcPoiReport?.summary ? `${srcPoiReport.summary.total_issues}` : '-'}
                     </td>
                   </tr>
-
-                  {/* Row 3: MoveL Steps */}
                   <tr>
                     <td className="p-2 text-slate-400 font-sans font-medium text-[10px]">Steps</td>
                     <td className="p-2 text-center text-slate-300 border-l border-slate-800">
-                      {rawReport?.summary ? `${rawReport.summary.total_steps}` : '-'}
-                    </td>
-                    <td className="p-2 text-center text-sky-300 border-l border-slate-800">
-                      {optReport?.summary ? `${optReport.summary.total_steps}` : '-'}
+                      {origReport?.summary ? `${origReport.summary.total_steps}` : '-'}
                     </td>
                     <td className="p-2 text-center text-emerald-300 border-l border-slate-800">
-                      {poiReport?.summary ? `${poiReport.summary.total_steps}` : '-'}
+                      {srcPoiReport?.summary ? `${srcPoiReport.summary.total_steps}` : '-'}
                     </td>
                   </tr>
                 </tbody>
@@ -371,10 +332,7 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
                 </span>
                 <div className="flex items-center gap-2 text-[8.5px] font-mono">
                   <span className="flex items-center gap-0.5 text-slate-400">
-                    <span className="w-1.5 h-1.5 bg-slate-400 rounded-sm" /> Raw
-                  </span>
-                  <span className="flex items-center gap-0.5 text-sky-400">
-                    <span className="w-1.5 h-1.5 bg-sky-400 rounded-sm" /> Opt
+                    <span className="w-1.5 h-1.5 bg-slate-400 rounded-sm" /> Orig
                   </span>
                   <span className="flex items-center gap-0.5 text-emerald-400">
                     <span className="w-1.5 h-1.5 bg-emerald-400 rounded-sm" /> POI
@@ -385,8 +343,7 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
               <div className="grid grid-cols-6 gap-1.5 pt-1">
                 {[0, 1, 2, 3, 4, 5].map((jIdx) => {
                   const limit = maxVelLimits[jIdx];
-                  const vRaw = rawPeakJoints[jIdx] || 0;
-                  const vOpt = optPeakJoints[jIdx] || 0;
+                  const vRaw = origPeakJoints[jIdx] || 0;
                   const vPoi = poiPeakJoints[jIdx] || 0;
 
                   return (
@@ -407,14 +364,6 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
                           style={{ height: `${Math.min(100, (vRaw / limit) * 100)}%` }}
                           title={`Raw J${jIdx + 1}: ${Math.round(vRaw)}°/s`}
                         />
-                        {/* Opt Bar */}
-                        <div
-                          className={`w-1.5 rounded-t transition-all ${
-                            vOpt > limit ? 'bg-rose-500' : 'bg-sky-400'
-                          }`}
-                          style={{ height: `${Math.min(100, (vOpt / limit) * 100)}%` }}
-                          title={`Opt J${jIdx + 1}: ${Math.round(vOpt)}°/s`}
-                        />
                         {/* POI Bar */}
                         <div
                           className={`w-1.5 rounded-t transition-all ${
@@ -425,7 +374,7 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
                         />
                       </div>
                       <span className="text-[8px] font-mono text-slate-400">
-                        {Math.round(activeState === 'poi' ? vPoi : (activeState === 'opt' ? vOpt : vRaw))}°/s
+                        {Math.round(activeState === 'poi' || activeState === 'auto_poi' ? vPoi : vRaw)}°/s
                       </span>
                     </div>
                   );
@@ -434,12 +383,12 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
             </div>
 
             {/* Multi-Path Breakdown Table (All Paths Comparison in 3-State Matrix) */}
-            {rawPaths.length > 0 && (
+            {origPaths.length > 0 && (
               <div className="rounded-lg border border-slate-800 bg-slate-950/60 overflow-hidden shadow-inner p-2 space-y-1.5">
                 <div className="flex items-center justify-between text-[10px] font-bold text-slate-300 px-0.5">
                   <span className="flex items-center gap-1">
                     <Route size={11} className="text-sky-400" />
-                    <span>Multi-Path Breakdown ({rawPaths.length} Paths)</span>
+                    <span>Multi-Path Breakdown ({origPaths.length} Paths)</span>
                   </span>
                   <span className="text-[8.5px] font-mono text-slate-500">Click row to inspect</span>
                 </div>
@@ -449,16 +398,14 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
                       <tr>
                         <th className="p-1 text-left">Path</th>
                         <th className="p-1 text-center text-slate-400">Pts</th>
-                        <th className="p-1 text-center text-slate-300">RAW</th>
-                        <th className="p-1 text-center text-sky-400">OPT</th>
+                        <th className="p-1 text-center text-slate-300">Orig</th>
                         <th className="p-1 text-center text-emerald-400">POI</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-slate-800/60">
-                      {rawPaths.map((p, idx) => {
-                        const rawPRep = rawReport?.path_reports?.[idx];
-                        const optPRep = optReport?.path_reports?.[idx];
-                        const poiPRep = poiReport?.path_reports?.[idx];
+                      {origPaths.map((p, idx) => {
+                        const rawPRep = origReport?.path_reports?.[idx];
+                        const poiPRep = srcPoiReport?.path_reports?.[idx];
 
                         return (
                           <tr
@@ -485,15 +432,6 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
                               ) : <span className="text-slate-600">-</span>}
                             </td>
                             <td className="p-1 text-center">
-                              {optPRep ? (
-                                <span className={`px-1 py-0.2 rounded text-[8px] font-bold ${
-                                  optPRep.status === 'PASS' ? 'text-sky-400 bg-sky-950/60' : (optPRep.status === 'WARNING' ? 'text-amber-400 bg-amber-950/60' : 'text-rose-400 bg-rose-950/60')
-                                }`}>
-                                  {optPRep.status} {optPRep.issues?.length > 0 && `(${optPRep.issues.length})`}
-                                </span>
-                              ) : <span className="text-slate-600">-</span>}
-                            </td>
-                            <td className="p-1 text-center">
                               {poiPRep ? (
                                 <span className={`px-1 py-0.2 rounded text-[8px] font-bold ${
                                   poiPRep.status === 'PASS' ? 'text-emerald-400 bg-emerald-950/60' : (poiPRep.status === 'WARNING' ? 'text-amber-400 bg-amber-950/60' : 'text-rose-400 bg-rose-950/60')
@@ -512,22 +450,14 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
             )}
 
             {/* Quick Optimization Triggers */}
-            <div className="grid grid-cols-2 gap-2 pt-1">
-              <button
-                onClick={() => onApplyOptimization('opt')}
-                disabled={isOptimizing || !activeTemplate || rawPaths.length === 0}
-                className="py-1.5 px-2 rounded-lg bg-sky-600 hover:bg-sky-500 text-white font-medium text-[10.5px] flex items-center justify-center gap-1 shadow-md shadow-sky-950/40 transition-all disabled:opacity-40"
-              >
-                <Sparkles size={12} className={isOptimizing ? 'animate-spin' : ''} />
-                <span>Auto-Fix Opt</span>
-              </button>
+            <div className="grid grid-cols-1 gap-2 pt-1">
               <button
                 onClick={() => onApplyOptimization('poi')}
-                disabled={isOptimizing || !activeTemplate || rawPaths.length === 0}
+                disabled={isOptimizing || !activeTemplate || origPaths.length === 0}
                 className="py-1.5 px-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-[10.5px] flex items-center justify-center gap-1 shadow-md shadow-emerald-950/40 transition-all disabled:opacity-40"
               >
                 <Compass size={12} className={isOptimizing ? 'animate-spin' : ''} />
-                <span>Optimize POI</span>
+                <span>Optimize POI ({source === 'auto' ? 'Auto' : 'Manual'})</span>
               </button>
             </div>
           </div>
@@ -564,26 +494,22 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
                   <thead className="bg-slate-900/90 text-slate-400 font-mono text-[9px] border-b border-slate-800 sticky top-0">
                     <tr>
                       <th className="p-1.5 text-center">WP</th>
-                      <th className="p-1.5 text-left text-slate-300">RAW Pose</th>
-                      <th className="p-1.5 text-left text-sky-400">OPT Pose / ΔRaw</th>
-                      <th className="p-1.5 text-left text-emerald-400">POI Pose / ΔRaw</th>
+                      <th className="p-1.5 text-left text-slate-300">Orig Pose</th>
+                      <th className="p-1.5 text-left text-emerald-400">POI Pose / ΔOrig</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/60">
                     {currentPaths[selectedPathIndex].points.map((wp, wIdx) => {
                       const pathId = currentPaths[selectedPathIndex]?.path_id;
                       const waypointIndex = wp.index || wIdx + 1;
-                      const rawPath = findPathById(rawPaths, pathId, selectedPathIndex);
-                      const optPath = findPathById(optPaths, pathId, selectedPathIndex);
-                      const poiPath = findPathById(poiPaths, pathId, selectedPathIndex);
+                      const rawPath = findPathById(origPaths, pathId, selectedPathIndex);
+                      const poiPath = findPathById(srcPoiPaths, pathId, selectedPathIndex);
                       const rawWp = findWaypointByIndex(rawPath, waypointIndex, wIdx);
-                      const optWp = findWaypointByIndex(optPath, waypointIndex, wIdx);
                       const poiWp = findWaypointByIndex(poiPath, waypointIndex, wIdx);
 
                       const rawPose = rawWp?.tcp_pose_base || null;
-                      const optPose = optWp?.tcp_pose_base || null;
                       const poiPose = poiWp?.tcp_pose_base || null;
-                      const hasMismatch = !rawWp || (optPaths.length > 0 && !optWp) || (poiPaths.length > 0 && !poiWp);
+                      const hasMismatch = !rawWp || (srcPoiPaths.length > 0 && !poiWp);
 
                       return (
                         <tr key={`${pathId || selectedPathIndex}-${waypointIndex}`} className="hover:bg-slate-800/40 transition-colors group">
@@ -593,10 +519,6 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
                           </td>
                           <td className="p-1.5 text-slate-300 font-mono text-[8.5px]">
                             {poseText(rawPose)}
-                          </td>
-                          <td className="p-1.5 text-sky-300 font-mono text-[8.5px] space-y-0.5">
-                            <div>{poseText(optPose)}</div>
-                            <div>{deltaText(rawPose, optPose)}</div>
                           </td>
                           <td className="p-1.5 text-emerald-300 font-mono text-[8.5px] space-y-0.5">
                             <div>{poseText(poiPose)}</div>
@@ -797,7 +719,7 @@ export const DiagnosticsDashboard: React.FC<DiagnosticsDashboardProps> = ({
             <div className="flex items-center gap-1.5 pt-1">
               <button
                 onClick={() => onApplyOptimization('poi')}
-                disabled={isOptimizing || !activeTemplate || rawPaths.length === 0}
+                disabled={isOptimizing || !activeTemplate || origPaths.length === 0}
                 className="flex-1 py-1.5 px-2 rounded-lg bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-medium text-[10.5px] flex items-center justify-center gap-1 shadow-lg shadow-emerald-950/50 transition-all disabled:opacity-40"
               >
                 <Compass size={12} className={isOptimizing ? 'animate-spin' : ''} />

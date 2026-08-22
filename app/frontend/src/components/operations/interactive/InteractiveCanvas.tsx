@@ -26,8 +26,10 @@ import type {
   SessionData,
 } from './types';
 import { PATH_PALETTE } from './types';
+import { PathStateSwitcher } from './PathStateSwitcher';
 import { SamMaskOverlay } from './SamMaskOverlay';
 import { PathSvgOverlay } from './PathSvgOverlay';
+import { TOOLBAR_TIP_CLASS } from './ToolbarTip';
 
 interface InteractiveCanvasProps {
   imageUrl: string | null;
@@ -269,26 +271,13 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
         </button>
       </div>
 
-      {/* Top Right: Floating 3-State Capsule (RAW / OPT / POI) */}
-      {onSelectActiveState && (
-        <div className="absolute top-2 right-2 z-30 flex items-center bg-slate-950/80 backdrop-blur-md border border-slate-700/60 rounded-full p-0.5 shadow-lg">
-          {(['raw', 'opt', 'poi'] as PathStateType[]).map((st) => (
-            <button
-              key={st}
-              onClick={() => onSelectActiveState(st)}
-              className={`px-2.5 py-0.5 rounded-full text-[10px] font-mono font-semibold transition-all ${
-                activeState === st
-                  ? st === 'poi'
-                    ? 'bg-emerald-500 text-slate-950 shadow-sm'
-                    : st === 'opt'
-                    ? 'bg-sky-500 text-slate-950 shadow-sm'
-                    : 'bg-slate-300 text-slate-950 shadow-sm'
-                  : 'text-slate-400 hover:text-slate-200'
-              }`}
-            >
-              {st.toUpperCase()}
-            </button>
-          ))}
+      {onSelectActiveState && activeState && (
+        <div className="absolute right-2 top-2 z-20 flex items-center gap-0.5 bg-slate-950/70 hover:bg-slate-950/85 backdrop-blur-md border border-white/10 rounded-md px-1 py-0.5 shadow-xl text-slate-300 h-6 select-none transition-all">
+          <PathStateSwitcher
+            activeState={activeState}
+            onSelect={onSelectActiveState}
+            compact
+          />
         </div>
       )}
 
@@ -372,71 +361,43 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
         </div>
       )}
 
-      {/* 3.5 Floating Live Pose HUD: Bottom-left info card during Manual TCP mode */}
-      {manualPathMode && (hoveredWaypoint || currentManualPoints.length > 0 || (mousePixel && liveNormal?.tcpPose)) && (
-        <div className="absolute bottom-14 left-3 z-30 pointer-events-none flex flex-col gap-1 bg-slate-950/90 backdrop-blur-md border border-amber-500/40 rounded-lg px-3 py-1.5 shadow-2xl transition-all select-none">
-          {(() => {
-            const pt = hoveredWaypoint || (currentManualPoints.length > 0 ? currentManualPoints[currentManualPoints.length - 1] : null);
-            const displayPt = pt
-              ? {
-                  title: hoveredWaypoint ? `Point #${pt.index} (Hovered)` : `Point #${pt.index} (Latest)`,
-                  dist: pt.standoff_distance_mm,
-                  tcp: pt.tcp_pose_base,
-                  surf: pt.surface_point_base_mm,
-                  norm: pt.surface_normal_base,
-                }
-              : {
-                  title: 'Cursor Live Pose',
-                  dist: standoffDistMm,
-                  tcp: liveNormal?.tcpPose || { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0 },
-                  surf: liveNormal?.surfPointBase || null,
-                  norm: liveNormal?.normalBase || null,
-                };
-
-            return (
+      {(() => {
+        const pt = hoveredWaypoint || (manualPathMode && currentManualPoints.length > 0 ? currentManualPoints[currentManualPoints.length - 1] : null);
+        const live = !pt && manualPathMode && mousePixel && liveNormal?.tcpPose ? liveNormal : null;
+        if (!pt && !live) return null;
+        const tcp = pt?.tcp_pose_base || live?.tcpPose;
+        if (!tcp) return null;
+        const title = pt
+          ? `P${pt.path_id ?? 1} #${pt.index}`
+          : 'Cursor';
+        const issue = pt
+          ? verificationReport?.path_reports
+              ?.find((r) => r.path_id === (pt.path_id ?? 1))
+              ?.issues?.find((iss) => iss.waypoint_index === pt.index - 1)
+          : null;
+        return (
+          <div className={`absolute left-2 top-10 z-20 flex items-center gap-1.5 h-6 max-w-[calc(100%-1rem)] overflow-hidden ${TOOLBAR_TIP_CLASS} pointer-events-none select-none`}>
+            <Route size={11} className="shrink-0 text-slate-400" />
+            <span className="text-slate-200">{title}</span>
+            <span className="text-white/15">|</span>
+            <span className="font-mono">{tcp.x.toFixed(1)}, {tcp.y.toFixed(1)}, {tcp.z.toFixed(1)}</span>
+            <span className="text-white/15">|</span>
+            <span className="font-mono">{tcp.rx.toFixed(1)}°, {tcp.ry.toFixed(1)}°, {tcp.rz.toFixed(1)}°</span>
+            {pt && (
               <>
-                <div className="flex items-center justify-between gap-3 text-[10px] border-b border-white/10 pb-0.5">
-                  <span className="font-bold text-amber-400 flex items-center gap-1.5">
-                    <Route size={11} className="text-amber-400" />
-                    {displayPt.title}
-                  </span>
-                  <span className="text-amber-300 font-mono text-[9px] bg-amber-950/60 px-1.5 py-0.2 rounded border border-amber-500/30">
-                    Standoff: {displayPt.dist}mm
-                  </span>
-                </div>
-                {displayPt.surf && (
-                  <div className="flex items-center gap-2 text-[9px] font-mono text-slate-400">
-                    <span className="text-slate-500">Surf:</span>
-                    <span className="text-slate-300">
-                      [{Array.isArray(displayPt.surf) ? displayPt.surf.map((v: number) => v.toFixed(1)).join(', ') : '—'}]
-                    </span>
-                    {displayPt.norm && (
-                      <>
-                        <span className="text-slate-600">|</span>
-                        <span className="text-slate-500">Norm:</span>
-                        <span className="text-emerald-400">
-                          [{displayPt.norm.map((v: number) => v.toFixed(2)).join(', ')}]
-                        </span>
-                      </>
-                    )}
-                  </div>
-                )}
-                <div className="flex items-center gap-2 text-[9.5px] font-mono text-slate-300">
-                  <span className="text-slate-400">TCP [mm]:</span>
-                  <span className="text-amber-200 font-bold">
-                    [{displayPt.tcp.x}, {displayPt.tcp.y}, {displayPt.tcp.z}]
-                  </span>
-                  <span className="text-slate-600">|</span>
-                  <span className="text-slate-400">Ori [°]:</span>
-                  <span className="text-slate-200">
-                    [{displayPt.tcp.rx}°, {displayPt.tcp.ry}°, {displayPt.tcp.rz}°]
-                  </span>
-                </div>
+                <span className="text-white/15">|</span>
+                <span className="font-mono text-slate-400">{pt.standoff_distance_mm}mm</span>
               </>
-            );
-          })()}
-        </div>
-      )}
+            )}
+            {issue && (
+              <>
+                <span className="text-white/15">|</span>
+                <span className="truncate text-rose-300">{issue.type}</span>
+              </>
+            )}
+          </div>
+        );
+      })()}
 
       {/* 4. Sleek Minimal Floating Toolbar: SAM Segmentation Mode (h-7 rounded-full icon-only) */}
       {segMode && (
@@ -457,7 +418,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
               <Undo2 size={12} />
             </button>
             <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2 py-0.5 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
                 Undo Point
               </div>
             </div>
@@ -473,7 +434,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
               <RefreshCw size={12} />
             </button>
             <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2 py-0.5 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
                 Reset Points
               </div>
             </div>
@@ -489,7 +450,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
               <Check size={12} />
             </button>
             <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2 py-0.5 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
                 Commit Current Mask
               </div>
             </div>
@@ -507,7 +468,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
               <Trash2 size={12} />
             </button>
             <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2 py-0.5 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
                 Clear All Masks
               </div>
             </div>
@@ -523,7 +484,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
               <Save size={12} />
             </button>
             <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2 py-0.5 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
                 Save Masks to YAML
               </div>
             </div>
@@ -538,7 +499,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
               <X size={12} />
             </button>
             <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2 py-0.5 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
                 Exit Segmentation
               </div>
             </div>
@@ -603,7 +564,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
               <Undo2 size={12} />
             </button>
             <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2 py-0.5 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
                 Undo Waypoint
               </div>
             </div>
@@ -619,7 +580,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
               <RefreshCw size={12} />
             </button>
             <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2 py-0.5 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
                 Clear Current Points
               </div>
             </div>
@@ -635,7 +596,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
               <Check size={12} />
             </button>
             <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2 py-0.5 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
                 {selectedPathIdForEdit ? 'Update Path' : 'Commit New Path'}
               </div>
             </div>
@@ -653,7 +614,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
                 <Trash2 size={12} />
               </button>
               <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-                <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2 py-0.5 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+                <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
                   Delete Path {selectedPathIdForEdit}
                 </div>
               </div>
@@ -670,7 +631,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
               <Save size={12} />
             </button>
             <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2 py-0.5 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
                 Save Paths to YAML
               </div>
             </div>
@@ -685,7 +646,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
               <X size={12} />
             </button>
             <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2 py-0.5 rounded-md shadow-2xl border border-white/10 whitespace-nowrap">
+              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
                 Exit Manual TCP
               </div>
             </div>
