@@ -61,6 +61,44 @@ namespace cr5_kinematics {
   // Fast path: write up to 8 solutions into q_sols[8*6], same layout as inverse().
   int inverse_controller(const double* xyz, const double* rpy, double* q_sols);
 
+  // =========================================================================
+  // PATH-OPT HOT PATHS (used by SprayWaypointOptimizer)
+  // =========================================================================
+
+  // Nearest in-limit IK branch to q_curr. weights may be null (all 1).
+  // Returns 1 if a solution is written to q_out, else 0.
+  int get_best_ik(
+      const double* T,
+      const double* q_curr,
+      const double* joint_min,
+      const double* joint_max,
+      const double* weights,
+      double* q_out);
+
+  // Controller-frame MoveL walk: lerp position, slerp quat, track IK.
+  // Returns 1 if the edge is feasible; writes q_end_out and cost_out.
+  int walk_movel(
+      const double* p_start,
+      const double* p_end,
+      const double* quat1,
+      const double* quat2,
+      const double* q_start,
+      const double* alphas,
+      int n_alphas,
+      const double* q_branch_end,
+      int check_end_branch,
+      double max_jump_rad,
+      double match_rad,
+      const double* joint_min,
+      const double* joint_max,
+      const double* weights,
+      double deg2_from_rad2,
+      double* q_end_out,
+      double* cost_out);
+
+  // n URDF poses (row-major 4×4 packed). q_sols_batch is n*48, n_sols is n.
+  void inverse_batch(const double* T_batch, int n, double* q_sols_batch, int* n_sols);
+
 }
 
 #endif // CR5_KINEMATICS_H

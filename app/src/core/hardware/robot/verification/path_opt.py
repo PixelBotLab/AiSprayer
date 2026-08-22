@@ -42,6 +42,7 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R_scipy
 
 from ..cr5_kinematics import CR5Kinematics, _SHOULDER_HALF_RAD, _SING_SIN
+from ..cr5_ur_kin import D4, D6
 from .path_interpolator import matrix_to_pose_dict, pose_dict_to_matrix
 
 logger = logging.getLogger(__name__)
@@ -111,6 +112,24 @@ def _euler_xyz_deg_from_R(Rm: np.ndarray) -> np.ndarray:
         x = math.atan2(math.copysign(1.0, sy) * float(Rm[0, 1]), float(Rm[1, 1]))
         z = 0.0
     return np.array([math.degrees(x), math.degrees(y), math.degrees(z)], dtype=np.float64)
+
+
+def _euler_xyz_deg_from_R_batch(Rm: np.ndarray) -> np.ndarray:
+    """批量 3×3 → xyz 欧拉角（度），与 _euler_xyz_deg_from_R 同语义。"""
+    sy = np.clip(-Rm[:, 2, 0], -1.0, 1.0)
+    y = np.arcsin(sy)
+    gimbal = np.abs(sy) >= 0.999999
+    x = np.empty(Rm.shape[0], dtype=np.float64)
+    z = np.empty(Rm.shape[0], dtype=np.float64)
+    ok = ~gimbal
+    x[ok] = np.arctan2(Rm[ok, 2, 1], Rm[ok, 2, 2])
+    z[ok] = np.arctan2(Rm[ok, 1, 0], Rm[ok, 0, 0])
+    if np.any(gimbal):
+        sign = np.sign(sy[gimbal])
+        sign[sign == 0.0] = 1.0
+        x[gimbal] = np.arctan2(sign * Rm[gimbal, 0, 1], Rm[gimbal, 1, 1])
+        z[gimbal] = 0.0
+    return np.degrees(np.stack([x, y, z], axis=1))
 
 
 def _quat_from_R(Rm: np.ndarray) -> np.ndarray:
@@ -198,6 +217,25 @@ def _project_R_to_anchor(
     return R_anchor @ _R_from_euler_xyz_deg(float(clipped[0]), float(clipped[1]), float(clipped[2]))
 
 
+def _project_R_to_anchor_batch(
+    R_cands: np.ndarray,
+    R_anchor: np.ndarray,
+    anchor_tol_deg: tuple[float, float, float],
+) -> np.ndarray:
+    """_project_R_to_anchor 的批量版。R_cands shape (N, 3, 3)。"""
+    rel = _euler_xyz_deg_from_R_batch(np.matmul(R_anchor.T, R_cands))
+    rel = (rel + 180.0) % 360.0 - 180.0
+    tol = np.abs(np.asarray(anchor_tol_deg, dtype=np.float64))
+    clipped = np.clip(rel, -tol, tol)
+    need = np.any(np.abs(clipped - rel) > 1e-12, axis=1)
+    if not np.any(need):
+        return R_cands
+    out = np.array(R_cands, dtype=np.float64, copy=True)
+    R_off = R_scipy.from_euler("xyz", clipped[need], degrees=True).as_matrix()
+    out[need] = np.matmul(R_anchor, R_off)
+    return out
+
+
 def _branch_key(q: np.ndarray) -> int:
     """
     与 inverse() 返回列表下标无关的 8 路构型键：肩 × 肘 × 腕。
@@ -239,6 +277,76 @@ def _ctrl_to_urdf_into(T_ctrl: np.ndarray, out: np.ndarray) -> np.ndarray:
     out[3, 2] = 0.0
     out[3, 3] = 1.0
     return out
+
+
+def _ctrl_to_urdf_batch(T_ctrl: np.ndarray) -> np.ndarray:
+    """controller_matrix_to_urdf 的批量版本，T_ctrl shape (N, 4, 4)。"""
+    R = T_ctrl[:, :3, :3]
+    p = T_ctrl[:, :3, 3]
+    out = np.zeros_like(T_ctrl)
+    out[:, 0, 0] = -R[:, 0, 2]
+    out[:, 0, 1] = R[:, 0, 0]
+    out[:, 0, 2] = R[:, 0, 1]
+    out[:, 0, 3] = -p[:, 0]
+    out[:, 1, 0] = -R[:, 1, 2]
+    out[:, 1, 1] = R[:, 1, 0]
+    out[:, 1, 2] = R[:, 1, 1]
+    out[:, 1, 3] = -p[:, 1]
+    out[:, 2, 0] = R[:, 2, 2]
+    out[:, 2, 1] = -R[:, 2, 0]
+    out[:, 2, 2] = -R[:, 2, 1]
+    out[:, 2, 3] = p[:, 2]
+    out[:, 3, 3] = 1.0
+    return out
+
+
+def _precompute_offset_rots(xs: np.ndarray, ys: np.ndarray, zs: np.ndarray) -> np.ndarray:
+    """预计算全部 R_off = Rz @ Ry @ Rx，shape (Nz*Ny*Nx, 3, 3)。"""
+    Rx = _axis_rot_mats(xs, 0)
+    Ry = _axis_rot_mats(ys, 1)
+    Rz = _axis_rot_mats(zs, 2)
+    rzy = Rz[:, None, None, :, :] @ Ry[None, :, None, :, :]
+    return (rzy @ Rx[None, None, :, :, :]).reshape(-1, 3, 3)
+
+
+def _shoulder_ok_batch(T_urdf: np.ndarray) -> np.ndarray:
+    """与 CR5Kinematics._shoulder_q1_half_separation_rad 同一套索引。"""
+    t02 = -T_urdf[:, 0, 0]
+    t03 = -T_urdf[:, 0, 3]
+    t12 = -T_urdf[:, 1, 0]
+    t13 = -T_urdf[:, 1, 3]
+    a = D6 * t12 - t13
+    b = D6 * t02 - t03
+    r = a * a + b * b
+    half = np.zeros(T_urdf.shape[0], dtype=np.float64)
+    valid = r > 1e-16
+    ratio = np.empty_like(r)
+    ratio[valid] = abs(D4) / np.sqrt(r[valid])
+    below = valid & (ratio <= -1.0)
+    mid = valid & (ratio > -1.0) & (ratio < 1.0)
+    half[below] = PI
+    half[mid] = np.arccos(ratio[mid])
+    return half >= _SHOULDER_HALF_RAD
+
+
+def _make_dp_node(
+    T: np.ndarray,
+    quat: np.ndarray,
+    q: np.ndarray,
+    zero_dev: float,
+    geo_deg: float,
+    branch_id: int,
+) -> dict[str, Any]:
+    return {
+        "T": T,
+        "quat": quat,
+        "q": q,
+        "q_branch": q,
+        "zero_dev_cost": zero_dev,
+        "geo_deg": geo_deg,
+        "branch_id": branch_id,
+        "ew_family": branch_id & 3,
+    }
 
 
 def _fast_quat_slerp_into(q1: np.ndarray, q2: np.ndarray, alpha: float, out_R: np.ndarray) -> None:
@@ -390,6 +498,12 @@ class SprayWaypointOptimizer:
         self._T_work = np.eye(4, dtype=np.float64)
         self._T_urdf_work = np.eye(4, dtype=np.float64)
         self._last_dense_report: dict[str, Any] | None = None
+        self._R_off = _precompute_offset_rots(
+            _axis_grid(self.tol_x_deg),
+            _axis_grid(self.tol_y_deg),
+            _axis_grid(self.tol_z_deg),
+        )
+        self._alphas_cache: dict[int, np.ndarray] = {}
 
     def _ik_gun(self, T_gun: np.ndarray) -> list[np.ndarray]:
         """枪尖控制器系 4×4 → 最多 8 组 URDF 关节（弧度）。"""
@@ -411,9 +525,12 @@ class SprayWaypointOptimizer:
         """硬门：URDF 关节限位 + 肩/肘/腕奇异（与校验器同一套 check_singularity_risk）。"""
         if not self.solver.is_joint_valid(q):
             return False
+        qv = np.asarray(q, dtype=np.float64).reshape(-1)
+        if abs(math.sin(float(qv[4]))) < _SING_SIN or abs(math.sin(float(qv[2]))) < _SING_SIN:
+            return False
         if T_urdf is None:
             T_urdf = self.solver.controller_matrix_to_urdf(T_gun)
-        return not self.solver.check_singularity_risk(q, T=T_urdf)["is_singular"]
+        return self.solver.shoulder_q1_half_separation_rad(T_urdf) >= _SHOULDER_HALF_RAD
 
     def _track_ik_step(self, T_ctrl: np.ndarray, prev_q: np.ndarray) -> np.ndarray | None:
         """一次 URDF 转换 + 跟最近支 + 限位/奇异。失败返回 None。"""
@@ -465,100 +582,155 @@ class SprayWaypointOptimizer:
             return np.array(q_sol, dtype=np.float64, copy=True)
         return None
 
+    def _materialize_pack(self, pack: dict[str, Any]) -> list[dict[str, Any]]:
+        """把紧凑候选包展开为 DP 节点 dict（仅自适应回退时调用）。"""
+        nodes: list[dict[str, Any]] = []
+        T_all = pack["T"]
+        quat_all = pack["quat"]
+        geo = pack["geo"]
+        zero = pack["zero"]
+        qs = pack["q"]
+        pose_idx = pack["pose_idx"]
+        branch_id = pack["branch_id"]
+        for m in range(qs.shape[0]):
+            pi = int(pose_idx[m])
+            nodes.append(_make_dp_node(
+                T_all[pi], quat_all[pi], qs[m],
+                float(zero[pi]), float(geo[pi]), int(branch_id[m]),
+            ))
+        return nodes
+
     def _generate_stage_candidates(
         self,
         T_nominal: np.ndarray,
         anchor_rot: Optional[R_scipy] = None,
         anchor_tol_deg: Optional[tuple[float, float, float]] = None,
-    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
         """
         针对单个 Waypoint 生成 DP 节点：
         (姿态网格 × 锚点投影去重) → IK 全解 → 丢掉奇异/超限。
 
-        :return: (fast_candidates, full_candidates)
+        :return: (fast_candidates, full_pack)
         fast_candidates 按肩/肘/腕签名分 8 桶，各留 zero_dev 最优的 top-K；
-        full_candidates 为全量有效候选（本层断连时回退）。
+        full_pack 为全量有效候选的紧凑数组（本层断连时再物化）。
         """
         base_pos = T_nominal[:3, 3]
         R_nom = np.array(T_nominal[:3, :3], dtype=np.float64, copy=True)
-        R_anc = None
+        R_cands = np.matmul(R_nom, self._R_off)
         if anchor_rot is not None and anchor_tol_deg is not None:
             R_anc = np.array(anchor_rot.as_matrix(), dtype=np.float64, copy=True)
-        xs = _axis_grid(self.tol_x_deg)
-        ys = _axis_grid(self.tol_y_deg)
-        zs = _axis_grid(self.tol_z_deg)
-        Rx_mats = _axis_rot_mats(xs, 0)
-        Ry_mats = _axis_rot_mats(ys, 1)
-        Rz_mats = _axis_rot_mats(zs, 2)
+            R_cands = _project_R_to_anchor_batch(R_cands, R_anc, anchor_tol_deg)
 
-        # key=量化四元数 → 投影后重复姿态只留「离名义喷姿测地角最小」的一个
-        unique: dict[tuple, dict[str, Any]] = {}
-        for iz in range(zs.size):
-            Rz = Rz_mats[iz]
-            for iy in range(ys.size):
-                Rzy = Rz @ Ry_mats[iy]
-                for ix in range(xs.size):
-                    # 1. 与 scipy from_euler('xyz') 一致：R_off = Rz @ Ry @ Rx
-                    R_cand = R_nom @ (Rzy @ Rx_mats[ix])
-                    # 2. 锚点硬约束：越界则投影回 Euler 盒边界
-                    if R_anc is not None:
-                        R_cand = _project_R_to_anchor(R_cand, R_anc, anchor_tol_deg)
-                    geo = _geodesic_R_deg(R_nom, R_cand)
-                    q_arr = _quat_from_R(R_cand)
-                    key = _quat_key_arr(q_arr)
-                    prev = unique.get(key)
-                    if prev is not None and geo >= prev["geo_deg"]:
-                        continue
-                    # 3. 零偏代价用投影后的真实工具系偏差，不用裁剪前的 (dx,dy,dz)
-                    e_tool = _euler_xyz_deg_from_R(R_nom.T @ R_cand)
-                    e_tool = (e_tool + 180.0) % 360.0 - 180.0
-                    zero_dev = float(np.dot(self.w_zero_dev, e_tool ** 2))
-                    unique[key] = {
-                        "R": np.array(R_cand, dtype=np.float64, copy=True),
-                        "quat": q_arr,
-                        "geo_deg": geo,
-                        "zero_dev_cost": zero_dev,
-                    }
+        r_all = R_scipy.from_matrix(R_cands)
+        geo_all = np.degrees((R_scipy.from_matrix(R_nom).inv() * r_all).magnitude())
+        quats = np.asarray(r_all.as_quat(), dtype=np.float64)
+        quats = np.where(quats[:, 3:4] < 0.0, -quats, quats)
+        e_tool = _euler_xyz_deg_from_R_batch(np.matmul(R_nom.T, R_cands))
+        e_tool = (e_tool + 180.0) % 360.0 - 180.0
+        zero_all = e_tool ** 2 @ self.w_zero_dev
 
-        full_candidates: list[dict[str, Any]] = []
-        branch_buckets: dict[int, list[dict[str, Any]]] = {b: [] for b in range(8)}
-
-        for item in unique.values():
-            T = np.eye(4, dtype=np.float64)
-            T[:3, :3] = item["R"]
-            T[:3, 3] = base_pos
-            T_urdf = self.solver.controller_matrix_to_urdf(T)
-            sols = self._ik_gun(T)
-            for q_sol in sols:
-                if not self._is_safe_q(q_sol, T, T_urdf=T_urdf):
-                    continue
-                q_sol = np.array(q_sol, dtype=np.float64)
-                b_id = _branch_key(q_sol)
-                node = {
-                    "T": T,
-                    "quat": item["quat"],
-                    "q": q_sol,
-                    "q_branch": q_sol,  # 解析支标识（[-π,π] 代表）
-                    "zero_dev_cost": item["zero_dev_cost"],
-                    "geo_deg": item["geo_deg"],
-                    "branch_id": b_id,
-                    "ew_family": b_id & 3,
-                }
-                full_candidates.append(node)
-                branch_buckets[b_id].append(node)
-
-        # 8 构型桶中各自保留零偏最小的 top-K 个优质姿态
-        fast_candidates: list[dict[str, Any]] = []
-        for b_id, nodes in branch_buckets.items():
-            if not nodes:
+        best: dict[tuple, int] = {}
+        keys = np.round(quats, 5)
+        for i in range(R_cands.shape[0]):
+            key = (float(keys[i, 0]), float(keys[i, 1]), float(keys[i, 2]), float(keys[i, 3]))
+            prev = best.get(key)
+            if prev is not None and geo_all[i] >= geo_all[prev]:
                 continue
-            sorted_nodes = sorted(nodes, key=lambda nd: nd["zero_dev_cost"] + 0.01 * nd["geo_deg"])
-            fast_candidates.extend(sorted_nodes[: self.max_candidates_per_branch])
+            best[key] = i
+        keep_idx = np.fromiter(best.values(), dtype=np.int32, count=len(best))
+        R_keep = R_cands[keep_idx]
+        quat_keep = quats[keep_idx]
+        geo_keep = geo_all[keep_idx]
+        zero_keep = zero_all[keep_idx]
 
-        if not fast_candidates and full_candidates:
-            fast_candidates = full_candidates
+        empty_pack = {
+            "T": np.zeros((0, 4, 4), dtype=np.float64),
+            "quat": np.zeros((0, 4), dtype=np.float64),
+            "geo": np.zeros(0, dtype=np.float64),
+            "zero": np.zeros(0, dtype=np.float64),
+            "q": np.zeros((0, 6), dtype=np.float64),
+            "pose_idx": np.zeros(0, dtype=np.int32),
+            "branch_id": np.zeros(0, dtype=np.int32),
+        }
+        P = int(keep_idx.size)
+        if P == 0:
+            return [], empty_pack
 
-        return fast_candidates, full_candidates
+        T_ctrl = np.zeros((P, 4, 4), dtype=np.float64)
+        T_ctrl[:, 3, 3] = 1.0
+        T_ctrl[:, :3, :3] = R_keep
+        T_ctrl[:, :3, 3] = base_pos
+        T_urdf = _ctrl_to_urdf_batch(T_ctrl)
+
+        if self._ik_override is not None:
+            q_sols = np.zeros((P, 8, 6), dtype=np.float64)
+            n_sols = np.zeros(P, dtype=np.int32)
+            for i in range(P):
+                sols = self._ik_gun(T_ctrl[i])
+                n_sols[i] = min(8, len(sols))
+                for k, sol in enumerate(sols[:8]):
+                    q_sols[i, k] = sol
+        else:
+            q_sols, n_sols = self.solver.inverse_batch(T_urdf)
+
+        shoulder_ok = _shoulder_ok_batch(T_urdf)
+        jmin = self.solver.joint_min - 1e-4
+        jmax = self.solver.joint_max + 1e-4
+        pose_ok = shoulder_ok & (n_sols > 0)
+        if not np.any(pose_ok):
+            return [], empty_pack
+
+        remap = np.full(P, -1, dtype=np.int32)
+        kept_pose_idx = np.where(pose_ok)[0]
+        remap[kept_pose_idx] = np.arange(kept_pose_idx.size, dtype=np.int32)
+
+        idx_p = np.broadcast_to(np.arange(P)[:, None], q_sols.shape[:2])
+        idx_k = np.broadcast_to(np.arange(8)[None, :], q_sols.shape[:2])
+        sol_ok = (idx_k < n_sols[:, None]) & pose_ok[:, None]
+        sol_ok &= np.all(q_sols >= jmin, axis=2) & np.all(q_sols <= jmax, axis=2)
+        sol_ok &= (np.abs(np.sin(q_sols[:, :, 4])) >= _SING_SIN) & (
+            np.abs(np.sin(q_sols[:, :, 2])) >= _SING_SIN
+        )
+        if not np.any(sol_ok):
+            return [], empty_pack
+
+        q_flat = q_sols[sol_ok]
+        pose_idx = remap[idx_p[sol_ok]]
+        qw = _wrap_pi(q_flat)
+        q02 = np.mod(qw, 2.0 * PI)
+        branch_id = (
+            ((qw[:, 0] < 0.0).astype(np.int32) << 2)
+            | ((q02[:, 2] > PI).astype(np.int32) << 1)
+            | (q02[:, 4] > PI).astype(np.int32)
+        )
+
+        pack = {
+            "T": T_ctrl[kept_pose_idx],
+            "quat": quat_keep[kept_pose_idx],
+            "geo": geo_keep[kept_pose_idx],
+            "zero": zero_keep[kept_pose_idx],
+            "q": q_flat,
+            "pose_idx": pose_idx.astype(np.int32, copy=False),
+            "branch_id": branch_id,
+        }
+
+        scores = pack["zero"][pack["pose_idx"]] + 0.01 * pack["geo"][pack["pose_idx"]]
+        fast_candidates: list[dict[str, Any]] = []
+        for b_id in range(8):
+            idx = np.where(pack["branch_id"] == b_id)[0]
+            if idx.size == 0:
+                continue
+            order = idx[np.argsort(scores[idx], kind="stable")]
+            for m in order[: self.max_candidates_per_branch]:
+                pi = int(pack["pose_idx"][m])
+                fast_candidates.append(_make_dp_node(
+                    pack["T"][pi], pack["quat"][pi], pack["q"][m],
+                    float(pack["zero"][pi]), float(pack["geo"][pi]), int(pack["branch_id"][m]),
+                ))
+
+        if not fast_candidates:
+            fast_candidates = self._materialize_pack(pack)
+        return fast_candidates, pack
 
     def _walk_alphas(
         self,
@@ -572,6 +744,15 @@ class SprayWaypointOptimizer:
         check_end_branch: bool,
     ) -> tuple[bool, float, np.ndarray | None]:
         """按 α 序列跟支。check_end_branch 时要求终点落到 node_end 解析支。"""
+        cpp = self.solver.walk_movel_controller(
+            p_start, p_end, q1, q2, q_start, alphas,
+            node_end["q_branch"], check_end_branch,
+            self._max_jump_rad, self._match_rad,
+            self.joint_weights, self._deg2_from_rad2,
+        )
+        if cpp is not None:
+            return cpp
+
         T = self._T_work
         prev_q = q_start
         acc = 0.0
@@ -646,7 +827,10 @@ class SprayWaypointOptimizer:
 
         n_est = round(dist_mm / self.movel_check_spacing_mm)
         n_mid = int(np.clip(n_est, self.num_movel_checks, self.max_movel_checks))
-        alphas_full = np.linspace(0.0, 1.0, n_mid + 2)[1:]
+        alphas_full = self._alphas_cache.get(n_mid)
+        if alphas_full is None:
+            alphas_full = np.linspace(0.0, 1.0, n_mid + 2, dtype=np.float64)[1:]
+            self._alphas_cache[n_mid] = alphas_full
 
         q1 = node_start["quat"]
         q2 = node_end["quat"]
@@ -701,18 +885,18 @@ class SprayWaypointOptimizer:
             rot_a = rot_anchor
             if anchor_poses is not None and len(anchor_poses) == n:
                 rot_a = R_scipy.from_matrix(_waypoint_to_T(anchor_poses[i])[:3, :3])
-            c_fast, c_full = self._generate_stage_candidates(T_nom, rot_a, anchor_tolerances_deg)
-            if not c_fast and not c_full:
+            c_fast, c_pack = self._generate_stage_candidates(T_nom, rot_a, anchor_tolerances_deg)
+            if not c_fast and int(c_pack["q"].shape[0]) == 0:
                 raise RuntimeError(
                     f"Waypoint [{i}] has no non-singular in-limit IK inside the attitude envelope."
                 )
             stages_fast.append(c_fast)
-            stages_full.append(c_full)
+            stages_full.append(c_pack)
 
         stages = [list(s) for s in stages_fast]
         t_cands_ms = (time.time() - t_cands_start) * 1000.0
         total_fast = sum(len(s) for s in stages)
-        total_full = sum(len(s) for s in stages_full)
+        total_full = sum(int(p["q"].shape[0]) for p in stages_full)
         logger.info(
             f"⏱️ [SprayOpt] Stage candidates generated: {n} waypoints, "
             f"fast_candidates={total_fast} (diverse 8-branch pruned), full_nodes={total_full}, elapsed={t_cands_ms:.2f} ms"
@@ -791,12 +975,13 @@ class SprayWaypointOptimizer:
             valid_edges += e_valid
 
             # 2. 自适应回退机制：如果精简候选集未能连通，自动触发回退全量搜索（Fallback to full_stages[i]）
-            if not np.any(np.isfinite(dp_cost[i])) and len(stages_full[i]) > len(stages[i]):
+            full_n = int(stages_full[i]["q"].shape[0])
+            if not np.any(np.isfinite(dp_cost[i])) and full_n > len(stages[i]):
                 logger.warning(
                     f"⚠️ [SprayOpt] Segment {i-1}->{i} failed with pruned candidates ({len(stages[i])}). "
-                    f"Triggering adaptive fallback with ALL {len(stages_full[i])} candidates..."
+                    f"Triggering adaptive fallback with ALL {full_n} candidates..."
                 )
-                stages[i] = stages_full[i]
+                stages[i] = self._materialize_pack(stages_full[i])
                 s_cost, s_parent, s_q, e_tested, e_valid = _eval_segment(stages[i])
                 dp_cost[i] = s_cost
                 dp_parent[i] = s_parent

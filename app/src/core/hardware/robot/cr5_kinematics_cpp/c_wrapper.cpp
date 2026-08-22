@@ -39,4 +39,41 @@ extern "C" {
     int c_inverse_controller(const double* xyz, const double* rpy, double* q_sols) {
         return cr5_kinematics::inverse_controller(xyz, rpy, q_sols);
     }
+    int c_get_best_ik(
+        const double* T,
+        const double* q_curr,
+        const double* joint_min,
+        const double* joint_max,
+        const double* weights,
+        double* q_out
+    ) {
+        return cr5_kinematics::get_best_ik(T, q_curr, joint_min, joint_max, weights, q_out);
+    }
+    int c_walk_movel(
+        const double* p_start,
+        const double* p_end,
+        const double* quat1,
+        const double* quat2,
+        const double* q_start,
+        const double* alphas,
+        int n_alphas,
+        const double* q_branch_end,
+        int check_end_branch,
+        double max_jump_rad,
+        double match_rad,
+        const double* joint_min,
+        const double* joint_max,
+        const double* weights,
+        double deg2_from_rad2,
+        double* q_end_out,
+        double* cost_out
+    ) {
+        return cr5_kinematics::walk_movel(
+            p_start, p_end, quat1, quat2, q_start, alphas, n_alphas,
+            q_branch_end, check_end_branch, max_jump_rad, match_rad,
+            joint_min, joint_max, weights, deg2_from_rad2, q_end_out, cost_out);
+    }
+    void c_inverse_batch(const double* T_batch, int n, double* q_sols_batch, int* n_sols) {
+        cr5_kinematics::inverse_batch(T_batch, n, q_sols_batch, n_sols);
+    }
 }

@@ -38,10 +38,14 @@ import yaml
 from scipy.spatial.transform import Rotation as R_scipy
 
 # 自动定位项目根目录并导入模块
+# 与 app/src/main.py 一致：仓库根用于 app.src.*；app/src 用于 core.*
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "../../../../../"))
-if PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, PROJECT_ROOT)
+APP_SRC = os.path.join(PROJECT_ROOT, "app", "src")
+SRC_DIR = os.path.join(PROJECT_ROOT, "src")
+for _p in (PROJECT_ROOT, APP_SRC, SRC_DIR):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from app.src.core.hardware.robot.cr5_kinematics import CR5Kinematics
 from app.src.core.hardware.robot.cr5_path_verifier import CR5PathVerifier

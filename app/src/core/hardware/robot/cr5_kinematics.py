@@ -101,6 +101,21 @@ def load_cr5_cpp_lib():
     lib.c_forward_controller.restype = None
     lib.c_inverse_controller.argtypes = [dbl_p, dbl_p, dbl_p]
     lib.c_inverse_controller.restype = ctypes.c_int
+    if hasattr(lib, "c_get_best_ik"):
+        lib.c_get_best_ik.argtypes = [dbl_p, dbl_p, dbl_p, dbl_p, dbl_p, dbl_p]
+        lib.c_get_best_ik.restype = ctypes.c_int
+    if hasattr(lib, "c_walk_movel"):
+        lib.c_walk_movel.argtypes = [
+            dbl_p, dbl_p, dbl_p, dbl_p, dbl_p, dbl_p, ctypes.c_int,
+            dbl_p, ctypes.c_int, ctypes.c_double, ctypes.c_double,
+            dbl_p, dbl_p, dbl_p, ctypes.c_double, dbl_p, dbl_p,
+        ]
+        lib.c_walk_movel.restype = ctypes.c_int
+    if hasattr(lib, "c_inverse_batch"):
+        lib.c_inverse_batch.argtypes = [
+            dbl_p, ctypes.c_int, dbl_p, ctypes.POINTER(ctypes.c_int),
+        ]
+        lib.c_inverse_batch.restype = None
     _CPP_LIB = lib
     return lib
 
@@ -247,6 +262,21 @@ class CR5CppKinematics(CR5KinematicsBackend):
         self._rpy_buf = (ctypes.c_double * 3)()
         self._ee_t_buf = (ctypes.c_double * 3)()
         self._ee_r_buf = (ctypes.c_double * 9)()
+        self._q_curr_buf = (ctypes.c_double * 6)()
+        self._q_out_buf = (ctypes.c_double * 6)()
+        self._jmin_buf = (ctypes.c_double * 6)()
+        self._jmax_buf = (ctypes.c_double * 6)()
+        self._w_buf = (ctypes.c_double * 6)()
+        self._p_start_buf = (ctypes.c_double * 3)()
+        self._p_end_buf = (ctypes.c_double * 3)()
+        self._quat1_buf = (ctypes.c_double * 4)()
+        self._quat2_buf = (ctypes.c_double * 4)()
+        self._q_branch_buf = (ctypes.c_double * 6)()
+        self._cost_buf = (ctypes.c_double * 1)()
+        self._alphas_buf = (ctypes.c_double * 128)()
+        self.has_get_best_ik = hasattr(self._lib, "c_get_best_ik")
+        self.has_walk_movel = hasattr(self._lib, "c_walk_movel")
+        self.has_inverse_batch = hasattr(self._lib, "c_inverse_batch")
         # c_inverse has no q6_des; non-zero hint uses the Python analytical path.
         self._python = CR5PythonKinematics()
 
@@ -299,6 +329,100 @@ class CR5CppKinematics(CR5KinematicsBackend):
         self._fill_buf(self._rpy_buf, rpy_deg)
         n = int(self._lib.c_inverse_controller(self._xyz_buf, self._rpy_buf, self._q_sols_buf))
         return self._sols_from_buf(n)
+
+    def get_best_ik(
+        self,
+        T: np.ndarray,
+        q_curr: np.ndarray,
+        joint_min: np.ndarray,
+        joint_max: np.ndarray,
+        weights: np.ndarray | None = None,
+    ) -> np.ndarray | None:
+        if not self.has_get_best_ik:
+            return None
+        self._fill_buf(self._T_buf, np.asarray(T, dtype=np.float64).reshape(-1))
+        self._fill_buf(self._q_curr_buf, q_curr)
+        self._fill_buf(self._jmin_buf, joint_min)
+        self._fill_buf(self._jmax_buf, joint_max)
+        self._fill_buf(self._w_buf, weights if weights is not None else np.ones(6, dtype=np.float64))
+        ok = int(self._lib.c_get_best_ik(
+            self._T_buf, self._q_curr_buf, self._jmin_buf, self._jmax_buf,
+            self._w_buf, self._q_out_buf,
+        ))
+        if not ok:
+            return None
+        return np.array(self._q_out_buf, dtype=np.float64)
+
+    def walk_movel(
+        self,
+        p_start: np.ndarray,
+        p_end: np.ndarray,
+        quat1: np.ndarray,
+        quat2: np.ndarray,
+        q_start: np.ndarray,
+        alphas: np.ndarray,
+        q_branch_end: np.ndarray,
+        check_end_branch: bool,
+        max_jump_rad: float,
+        match_rad: float,
+        joint_min: np.ndarray,
+        joint_max: np.ndarray,
+        weights: np.ndarray,
+        deg2_from_rad2: float,
+    ) -> tuple[bool, float, np.ndarray | None]:
+        if not self.has_walk_movel:
+            return False, np.inf, None
+        n = int(alphas.size)
+        if n > len(self._alphas_buf):
+            self._alphas_buf = (ctypes.c_double * n)()
+        self._fill_buf(self._p_start_buf, p_start)
+        self._fill_buf(self._p_end_buf, p_end)
+        self._fill_buf(self._quat1_buf, quat1)
+        self._fill_buf(self._quat2_buf, quat2)
+        self._fill_buf(self._q_curr_buf, q_start)
+        self._fill_buf(self._q_branch_buf, q_branch_end)
+        self._fill_buf(self._jmin_buf, joint_min)
+        self._fill_buf(self._jmax_buf, joint_max)
+        self._fill_buf(self._w_buf, weights)
+        src = np.ascontiguousarray(alphas, dtype=np.float64).ravel()
+        ctypes.memmove(self._alphas_buf, src.ctypes.data, src.nbytes)
+        ok = int(self._lib.c_walk_movel(
+            self._p_start_buf, self._p_end_buf,
+            self._quat1_buf, self._quat2_buf,
+            self._q_curr_buf, self._alphas_buf, n,
+            self._q_branch_buf, 1 if check_end_branch else 0,
+            float(max_jump_rad), float(match_rad),
+            self._jmin_buf, self._jmax_buf, self._w_buf,
+            float(deg2_from_rad2), self._q_out_buf, self._cost_buf,
+        ))
+        if not ok:
+            return False, np.inf, None
+        return True, float(self._cost_buf[0]), np.array(self._q_out_buf, dtype=np.float64)
+
+    def inverse_batch(self, T_batch: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """T_batch (N,4,4) → (q_sols (N,8,6), n_sols (N,))."""
+        T_batch = np.ascontiguousarray(T_batch, dtype=np.float64).reshape(-1, 4, 4)
+        n = int(T_batch.shape[0])
+        q_sols = np.empty((n, 8, 6), dtype=np.float64)
+        n_sols = np.zeros(n, dtype=np.int32)
+        if n == 0:
+            return q_sols, n_sols
+        if self.has_inverse_batch:
+            self._lib.c_inverse_batch(
+                T_batch.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+                ctypes.c_int(n),
+                q_sols.ctypes.data_as(ctypes.POINTER(ctypes.c_double)),
+                n_sols.ctypes.data_as(ctypes.POINTER(ctypes.c_int)),
+            )
+            return q_sols, n_sols
+        for i in range(n):
+            self._fill_buf(self._T_buf, T_batch[i].reshape(-1))
+            ni = int(self._lib.c_inverse(self._T_buf, self._q_sols_buf))
+            n_sols[i] = ni
+            if ni > 0:
+                raw = np.ctypeslib.as_array(self._q_sols_buf).reshape(8, 6)
+                q_sols[i, :ni] = raw[:ni]
+        return q_sols, n_sols
 
     def forward_all(self, q_urdf: list[float] | np.ndarray) -> list[np.ndarray]:
         return self._python.forward_all(q_urdf)
@@ -450,12 +574,16 @@ class CR5Kinematics:
         stays in limits (same winding as the live robot); otherwise the in-limit
         expanded representative is returned.
         """
+        curr = np.asarray(current_joints, dtype=np.float64)
+        w = np.asarray(weights if weights is not None else [1.0] * 6, dtype=np.float64)
+        impl = getattr(self._impl, "get_best_ik", None)
+        if impl is not None and getattr(self._impl, "has_get_best_ik", False):
+            return impl(T, curr, self.joint_min, self.joint_max, w)
+
         valid_sols = self.solve_ik(T, expand=False)
         if not valid_sols:
             return None
 
-        curr = np.asarray(current_joints, dtype=np.float64)
-        w = np.asarray(weights if weights is not None else [1.0] * 6, dtype=np.float64)
         best_sol = None
         min_dist = float("inf")
         for sol in valid_sols:
@@ -472,6 +600,47 @@ class CR5Kinematics:
                     min_dist = dist
                     best_sol = sol
         return best_sol
+
+    def walk_movel_controller(
+        self,
+        p_start: np.ndarray,
+        p_end: np.ndarray,
+        quat1: np.ndarray,
+        quat2: np.ndarray,
+        q_start: np.ndarray,
+        alphas: np.ndarray,
+        q_branch_end: np.ndarray,
+        check_end_branch: bool,
+        max_jump_rad: float,
+        match_rad: float,
+        weights: np.ndarray,
+        deg2_from_rad2: float,
+    ) -> tuple[bool, float, np.ndarray | None] | None:
+        """C++ MoveL walk. Returns None if the backend has no c_walk_movel."""
+        impl = getattr(self._impl, "walk_movel", None)
+        if impl is None or not getattr(self._impl, "has_walk_movel", False):
+            return None
+        return impl(
+            p_start, p_end, quat1, quat2, q_start, alphas, q_branch_end,
+            check_end_branch, max_jump_rad, match_rad,
+            self.joint_min, self.joint_max, weights, deg2_from_rad2,
+        )
+
+    def inverse_batch(self, T_batch: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Batch URDF IK: T_batch (N,4,4) → (q_sols (N,8,6), n_sols (N,))."""
+        impl = getattr(self._impl, "inverse_batch", None)
+        if impl is not None:
+            return impl(T_batch)
+        T_batch = np.ascontiguousarray(T_batch, dtype=np.float64).reshape(-1, 4, 4)
+        n = int(T_batch.shape[0])
+        q_sols = np.zeros((n, 8, 6), dtype=np.float64)
+        n_sols = np.zeros(n, dtype=np.int32)
+        for i in range(n):
+            sols = self.inverse(T_batch[i])
+            n_sols[i] = len(sols)
+            for k, sol in enumerate(sols[:8]):
+                q_sols[i, k] = sol
+        return q_sols, n_sols
 
     def get_best_ik_controller(
             self,

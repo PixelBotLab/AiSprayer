@@ -8,7 +8,11 @@ import unittest
 import numpy as np
 from scipy.spatial.transform import Rotation as R_scipy
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../")))
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../"))
+_APP_SRC = os.path.join(_REPO_ROOT, "app", "src")
+for _p in (_REPO_ROOT, _APP_SRC):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from app.src.core.hardware.robot.cr5_kinematics import CR5Kinematics
 from app.src.core.hardware.robot.verification.path_opt import (
@@ -16,8 +20,10 @@ from app.src.core.hardware.robot.verification.path_opt import (
     _R_from_euler_xyz_deg,
     _branch_key,
     _euler_xyz_deg_from_R,
+    _euler_xyz_deg_from_R_batch,
     _geodesic_deg,
     _project_R_to_anchor,
+    _project_R_to_anchor_batch,
     _project_to_anchor_envelope,
     _quat_from_R,
     _quat_key_arr,
@@ -198,6 +204,33 @@ class TestSprayWaypointOptimizer(unittest.TestCase):
                 q_ref = -q_ref
             np.testing.assert_allclose(q, q_ref, atol=1e-12)
             self.assertEqual(_quat_key_arr(q), _quat_key_arr(q_ref))
+
+    def test_batch_euler_and_project_match_scalar(self):
+        """批量欧拉/锚点投影应与逐点实现一致。"""
+        angs = np.array([
+            [0.0, 0.0, 0.0],
+            [5.0, -3.0, 10.0],
+            [-5.0, 5.0, 180.0],
+            [10.0, 89.9, 25.0],
+            [-30.0, -90.0, 40.0],
+        ], dtype=np.float64)
+        Rm = np.stack([_R_from_euler_xyz_deg(*a) for a in angs], axis=0)
+        batch = _euler_xyz_deg_from_R_batch(Rm)
+        for i, a in enumerate(angs):
+            scalar = _euler_xyz_deg_from_R(Rm[i])
+            if abs(a[1]) < 89.5:
+                np.testing.assert_allclose(batch[i], scalar, atol=1e-9)
+        R_anc = R_scipy.from_euler("xyz", [30.0, 45.0, 10.0], degrees=True).as_matrix()
+        R_cands = np.stack([
+            R_anc @ _R_from_euler_xyz_deg(2.0, 1.0, 10.0),
+            R_anc @ _R_from_euler_xyz_deg(20.0, 0.0, 0.0),
+            R_anc @ _R_from_euler_xyz_deg(5.0, 89.95, 0.0),
+        ], axis=0)
+        batched = _project_R_to_anchor_batch(R_cands, R_anc, (5.0, 5.0, 180.0))
+        for i in range(R_cands.shape[0]):
+            scalar = _project_R_to_anchor(R_cands[i], R_anc, (5.0, 5.0, 180.0))
+            err = float(np.degrees((R_scipy.from_matrix(batched[i]).inv() * R_scipy.from_matrix(scalar)).magnitude()))
+            self.assertLess(err, 0.15)
 
     def test_project_R_to_anchor_near_gimbal(self):
         """相对旋转 ry≈±90° 时，投影后矩阵重建误差应 < 0.15°（复核文档 3.1）。"""
