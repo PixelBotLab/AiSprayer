@@ -1,16 +1,35 @@
 import os
 import yaml
+import logging
+
+logger = logging.getLogger(__name__)
 
 # 项目根目录 (SprayAnything/)
-# 当前文件位于 src/aisprayer/core/config.py，所以向上三层
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+
 
 class SprayerConfig:
     """
     统一读取和解析 AiSprayer 系统配置 (aisprayer_config.yaml) 及相关引用的配置文件。
+    单例模式：全局共享同一实例，初始化时一次性加载所有配置数据。
     """
-    def __init__(self, config_path="configs/aisprayer_config.yaml"):
+    _instance = None
+
+    def __new__(cls, config_path="configs/aisprayer_config.yaml", force_reload=False):
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
+
+    def __init__(self, config_path="configs/aisprayer_config.yaml", force_reload=False):
+        if getattr(self, "_initialized", False) and not force_reload:
+            return
         self.config_path = self._resolve_path(config_path)
+        self.reload()
+        self._initialized = True
+
+    def reload(self):
+        """重新从磁盘加载 YAML 配置文件与关联标定文件"""
         self.config_data = self._load_yaml(self.config_path)
         
         # 自动加载关联的标定文件 (calibration_result.yaml)
@@ -28,8 +47,12 @@ class SprayerConfig:
     def _load_yaml(self, path):
         if not path or not os.path.exists(path):
             return {}
-        with open(path, "r", encoding="utf-8") as f:
-            return yaml.safe_load(f)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return yaml.safe_load(f) or {}
+        except Exception as e:
+            logger.warning(f"Failed to load yaml config from {path}: {e}")
+            return {}
 
     @property
     def T_camera_to_base(self):
@@ -74,9 +97,14 @@ class SprayerConfig:
 
     @property
     def urdf_path(self):
-        """机器人 URDF 模型文件路径"""
-        path = self.config_data.get("hardware", {}).get("robot", {}).get("robot_urdf")
+        """机器人 URDF 模型文件路径 (绝对路径)"""
+        path = self.config_data.get("hardware", {}).get("robot", {}).get("robot_urdf", "app/urdf/cr5_robot.urdf")
         return self._resolve_path(path)
+
+    @property
+    def robot_urdf(self):
+        """机器人 URDF 模型文件路径别名 (绝对路径)"""
+        return self.urdf_path
 
     @property
     def robot_ip(self):
@@ -118,4 +146,67 @@ class SprayerConfig:
         robot_cfg = self.config_data.get("hardware", {}).get("robot", {})
         speeds = robot_cfg.get("max_joint_speed_deg_s", [180.0, 180.0, 180.0, 180.0, 180.0, 180.0])
         return [float(x) for x in speeds]
+
+    @property
+    def poi_tolerance_rpy_deg(self) -> list[float]:
+        """POI 锚点姿态容差包络 [Rx, Ry, Rz] (度)"""
+        spraying_cfg = self.config_data.get("spraying", {})
+        opt_cfg = self.config_data.get("optimization", {})
+        tol = spraying_cfg.get("poi_tolerance_rpy_deg") or opt_cfg.get("poi_tolerance_rpy_deg") or [10.0, 10.0, 180.0]
+        return [float(v) for v in tol]
+
+    @property
+    def grid_tol_x_deg(self) -> tuple[float, float, float]:
+        """轨迹优化器 X 轴搜索网格 (min, max, step) (度)"""
+        spraying_cfg = self.config_data.get("spraying", {})
+        opt_cfg = self.config_data.get("optimization", {})
+        val = spraying_cfg.get("grid_tol_x_deg") or opt_cfg.get("grid_tol_x_deg") or [-5.0, 5.0, 2.0]
+        return tuple(float(v) for v in val)
+
+    @property
+    def grid_tol_y_deg(self) -> tuple[float, float, float]:
+        """轨迹优化器 Y 轴搜索网格 (min, max, step) (度)"""
+        spraying_cfg = self.config_data.get("spraying", {})
+        opt_cfg = self.config_data.get("optimization", {})
+        val = spraying_cfg.get("grid_tol_y_deg") or opt_cfg.get("grid_tol_y_deg") or [-5.0, 5.0, 2.0]
+        return tuple(float(v) for v in val)
+
+    @property
+    def grid_tol_z_deg(self) -> tuple[float, float, float]:
+        """轨迹优化器 Z 轴搜索网格 (min, max, step) (度)"""
+        spraying_cfg = self.config_data.get("spraying", {})
+        opt_cfg = self.config_data.get("optimization", {})
+        val = spraying_cfg.get("grid_tol_z_deg") or opt_cfg.get("grid_tol_z_deg") or [-180.0, 180.0, 10.0]
+        return tuple(float(v) for v in val)
+
+    def get_optimization_config(self) -> dict:
+        """获取轨迹优化与 POI 容差字典"""
+        return {
+            "poi_tolerance_rpy_deg": self.poi_tolerance_rpy_deg,
+            "grid_tol_x_deg": self.grid_tol_x_deg,
+            "grid_tol_y_deg": self.grid_tol_y_deg,
+            "grid_tol_z_deg": self.grid_tol_z_deg,
+        }
+
+
+# ─── 全局单例对象 (模块导入时完成初始化与加载) ──────────────────────────────────
+config = SprayerConfig()
+sprayer_config = config
+
+
+def get_config() -> SprayerConfig:
+    """获取全局配置单例对象"""
+    return config
+
+
+def get_configured_robot_config(config_path: str = None) -> tuple[str, str]:
+    """统一从全局配置获取 (urdf_abs_path, tcp_target_link)。"""
+    cfg = config if config_path is None else SprayerConfig(config_path=config_path)
+    return cfg.robot_urdf, cfg.robot_tcp
+
+
+def get_configured_optimization_config(config_path: str = None) -> dict:
+    """统一从全局配置获取轨迹优化与 POI 容差配置字典。"""
+    cfg = config if config_path is None else SprayerConfig(config_path=config_path)
+    return cfg.get_optimization_config()
 

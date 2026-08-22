@@ -13,7 +13,7 @@ from typing import Optional
 import numpy as np
 from scipy.spatial.transform import Rotation as R_scipy
 
-from .robot_config import RobotConfig
+from .robot_config import RobotConfig, get_configured_optimization_config
 from .path_interpolator import PathInterpolator, pose_dict_to_matrix, matrix_to_pose_dict
 from .kinematic_chain_verifier import KinematicChainVerifier
 from .path_opt import SprayWaypointOptimizer
@@ -246,13 +246,16 @@ class PoiConstraintOptimizer:
         self.config = robot_config
         self.interpolator = interpolator
         self.verifier = verifier
+        self.opt_cfg = get_configured_optimization_config()
         self.spray_optimizer = SprayWaypointOptimizer(
             solver=self.verifier.solver,
             verifier=self.verifier,
             dense_verify=True,
-            tol_x_deg=(-5.0, 5.0, 2.0),
-            tol_y_deg=(-5.0, 5.0, 2.0),
-            tol_z_deg=(-180.0, 180.0, 10.0),
+            tol_x_deg=self.opt_cfg.get("grid_tol_x_deg", (-5.0, 5.0, 2.0)),
+            tol_y_deg=self.opt_cfg.get("grid_tol_y_deg", (-5.0, 5.0, 2.0)),
+            tol_z_deg=self.opt_cfg.get("grid_tol_z_deg", (-180.0, 180.0, 10.0)),
+            beam_width=32,
+            max_candidates_per_branch=16,
             num_movel_checks=10,
             max_movel_checks=100,
             movel_check_spacing_mm=5.0,
@@ -366,16 +369,60 @@ class PoiConstraintOptimizer:
             "units": "deg",
         }
 
-        report = None
-        if self.verifier is not None:
-            report = self.verifier.verify_all_paths(opt_data)
-            report["poi_config"] = opt_data["poi_config"]
-            report["state_type"] = "poi"
-            report["optimized_paths_available"] = True
-            for i, p_rep in enumerate(report.get("path_reports", [])):
-                if i < len(opt_data["paths"]):
-                    opt_data["paths"][i]["trajectory_q"] = p_rep.get("trajectory_q", [])
-                    opt_data["paths"][i]["trajectory_tcp"] = p_rep.get("trajectory_tcp", [])
-                    opt_data["paths"][i]["total_interpolated"] = p_rep.get("total_interpolated", 0)
+        reports = []
+        overall_status = "PASS"
+        total_issues = 0
+        total_steps = 0
+        total_waypoints = 0
+        singularity_cnt = 0
+        overspeed_cnt = 0
+        unreachable_cnt = 0
+
+        for i, opt_p in enumerate(opt_paths):
+            p_rep = opt_p.get("verification_report")
+            if not p_rep and self.verifier is not None:
+                p_rep = self.verifier.verify_single_path(opt_p)
+            if p_rep:
+                reports.append(p_rep)
+                if p_rep.get("status") == "FAILED":
+                    overall_status = "FAILED"
+                elif p_rep.get("status") == "WARNING" and overall_status != "FAILED":
+                    overall_status = "WARNING"
+                total_issues += len(p_rep.get("issues", []))
+                total_steps += p_rep.get("total_interpolated", 0)
+                total_waypoints += len(opt_p.get("points", []))
+                for iss in p_rep.get("issues", []):
+                    t = iss.get("type", "")
+                    if "SINGULARITY" in t:
+                        singularity_cnt += 1
+                    elif "OVERSPEED" in t:
+                        overspeed_cnt += 1
+                    elif "UNREACHABLE" in t or "DISCONTINUITY" in t or t == "JOINT_LIMIT":
+                        unreachable_cnt += 1
+
+                opt_p["trajectory_q"] = p_rep.get("trajectory_q", [])
+                opt_p["trajectory_tcp"] = p_rep.get("trajectory_tcp", [])
+                opt_p["total_interpolated"] = p_rep.get("total_interpolated", 0)
+
+        report = {
+            "summary": {
+                "status": overall_status,
+                "total_paths": len(opt_paths),
+                "total_waypoints": total_waypoints,
+                "total_steps": total_steps,
+                "total_issues": total_issues,
+                "singularity_count": singularity_cnt,
+                "overspeed_count": overspeed_cnt,
+                "unreachable_count": unreachable_cnt,
+            },
+            "nominal_speed_mm_s": self.interpolator.linear_velocity_mm_s if self.interpolator else 120.0,
+            "slerp_step_mm": self.interpolator.step_size_mm if self.interpolator else 1.5,
+            "max_joint_velocities_deg_s": self.config.max_joint_vel_deg_s.tolist() if self.config else [180.0] * 6,
+            "urdf_tcp": self.config.urdf_tcp if self.config else {},
+            "path_reports": reports,
+            "poi_config": opt_data["poi_config"],
+            "state_type": "poi",
+            "optimized_paths_available": True,
+        }
 
         return opt_data, report

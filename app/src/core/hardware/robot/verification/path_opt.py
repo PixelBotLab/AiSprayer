@@ -330,7 +330,7 @@ class SprayWaypointOptimizer:
         max_joint_jump_deg: float = _BRANCH_JUMP_DEG,
         weight_zero_dev: tuple[float, float, float] = (1.0, 1.0, 0.01),
         joint_weights: Optional[list[float]] = None,
-        beam_width: int = 64,
+        beam_width: int = 32,
         max_candidates_per_branch: int = 16,
         dense_verify: bool = True,
         ik_returns_degrees: bool = False,

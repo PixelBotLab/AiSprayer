@@ -14,35 +14,10 @@ from scipy.spatial.transform import Rotation as R_scipy
 logger = logging.getLogger(__name__)
 
 
-def get_configured_robot_config() -> tuple[str, str]:
-    """
-    Reads hardware.robot.robot_urdf and hardware.robot.robot_tcp from configs/aisprayer_config.yaml.
-    """
-    candidates = [
-        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../../configs/aisprayer_config.yaml")),
-        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../configs/aisprayer_config.yaml")),
-    ]
-    cfg = {}
-    for p in candidates:
-        if os.path.exists(p):
-            try:
-                with open(p, "r", encoding="utf-8") as f:
-                    cfg = yaml.safe_load(f) or {}
-                break
-            except Exception as e:
-                logger.warning(f"Failed to read config from {p}: {e}")
-
-    robot_cfg = cfg.get("hardware", {}).get("robot", {})
-    urdf_rel = robot_cfg.get("robot_urdf", "app/urdf/cr5_robot.urdf")
-    tcp_target = robot_cfg.get("robot_tcp", "spray_nozzle_link")
-
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../.."))
-    if os.path.isabs(urdf_rel):
-        urdf_abs = urdf_rel
-    else:
-        urdf_abs = os.path.join(project_root, urdf_rel)
-
-    return urdf_abs, tcp_target
+from core.config import (
+    get_configured_robot_config,
+    get_configured_optimization_config,
+)
 
 
 def load_limits_from_urdf(urdf_path: str = None) -> dict:

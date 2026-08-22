@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 import os
 import math
@@ -16,7 +16,7 @@ from core.vision.point_cloud_processor import depth_to_pcd
 from apps.interactive.sam_service import sam_service
 from apps.interactive.reconstruction_service import reconstruction_service
 from apps.interactive.manual_path_service import manual_path_service
-from apps.interactive.path_verification_service import path_verification_service
+from apps.interactive.path_verification_service import path_verification_service, DEFAULT_POI_TOLERANCE_RPY_DEG
 
 
 router = APIRouter(prefix="/api/interactive", tags=["Interactive"])
@@ -373,7 +373,7 @@ def get_session_data(name: str):
 
 class PoiConstraintConfig(BaseModel):
     ref_rpy_deg: list[float] | None = None  # e.g. [0.0, 0.0, 0.0]
-    tolerance_rpy_deg: list[float] = [10.0, 10.0, 180.0]  # [tol_rx, tol_ry, tol_rz]
+    tolerance_rpy_deg: list[float] = Field(default_factory=lambda: list(DEFAULT_POI_TOLERANCE_RPY_DEG))  # [tol_rx, tol_ry, tol_rz]
     anchor_source: str | None = None  # 'home' | 'live' | 'manual'
 
 
@@ -499,6 +499,7 @@ def get_robot_anchor_pose(source: str = "home"):
         "is_connected": robot_service._is_connected,
         "rpy_deg": selected_rpy,
         "xyz_mm": selected_xyz,
+        "default_tolerance_rpy_deg": list(DEFAULT_POI_TOLERANCE_RPY_DEG),
         "home_pose": {
             "xyz_mm": home_xyz,
             "rpy_deg": home_rpy,

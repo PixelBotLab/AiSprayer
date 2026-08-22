@@ -737,12 +737,6 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
 
       await fetchTemplateFiles(activeTemplate);
       setShowDiagnostics(true);
-      setModalConfig({
-        isOpen: true,
-        title: `${mode.toUpperCase()} Optimization Applied`,
-        message: `Generated ${mode.toUpperCase()} paths and updated diagnostics report.`,
-        type: 'alert',
-      });
     } catch (err: any) {
       setModalConfig({
         isOpen: true,
@@ -767,13 +761,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         ...prev,
         anchor_source: data.source || source,
         ref_rpy_deg: data.rpy_deg || prev.ref_rpy_deg,
+        tolerance_rpy_deg: data.default_tolerance_rpy_deg || prev.tolerance_rpy_deg,
       }));
-      setModalConfig({
-        isOpen: true,
-        title: 'Anchor Pose Updated',
-        message: `Captured ${source.toUpperCase()} pose: [${data.rpy_deg.map((v: number) => v.toFixed(1)).join(', ')}]°`,
-        type: 'alert',
-      });
+      console.log(`[POI] Captured ${source.toUpperCase()} anchor pose: [${(data.rpy_deg || []).map((v: number) => v.toFixed(1)).join(', ')}]°`);
     } catch (err: any) {
       setModalConfig({
         isOpen: true,
