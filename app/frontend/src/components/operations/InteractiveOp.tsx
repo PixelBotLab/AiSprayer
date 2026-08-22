@@ -90,6 +90,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const [committedMasks, setCommittedMasks] = useState<MaskData[]>([]);
   const [savedMasks, setSavedMasks] = useState<MaskData[]>([]);
   const [showMasksOverlay, setShowMasksOverlay] = useState<boolean>(true);
+  const [isSamInitializing, setIsSamInitializing] = useState<boolean>(false);
 
   // ─── 4. Manual / Auto × Orig / POI path state ────────────────────────────
   const [activeState, setActiveState] = useState<PathStateType>('raw');
@@ -448,17 +449,21 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       setCommittedMasks([]);
     }
 
+    setIsSamInitializing(true);
+
     try {
       await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/sam/init`, {
         method: 'POST',
       });
     } catch (err) {
       console.warn('Failed to init SAM session:', err);
+    } finally {
+      setIsSamInitializing(false);
     }
   };
 
   const handleSegImageClick = async (e: MouseEvent<SVGSVGElement>) => {
-    if (!segMode || !natSize || !activeTemplate || isSpacePressed) return;
+    if (!segMode || !natSize || !activeTemplate || isSpacePressed || isSamInitializing) return;
     const rect = e.currentTarget.getBoundingClientRect();
     const x = Math.round(((e.clientX - rect.left) / rect.width) * natSize.w);
     const y = Math.round(((e.clientY - rect.top) / rect.height) * natSize.h);

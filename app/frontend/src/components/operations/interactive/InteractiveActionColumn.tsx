@@ -6,6 +6,8 @@ import {
   Box,
   RefreshCw,
   X,
+  Wand2,
+  MousePointer2,
 } from 'lucide-react';
 
 interface InteractiveActionColumnProps {
@@ -23,59 +25,18 @@ interface InteractiveActionColumnProps {
   onTriggerAutoPath: () => void;
 }
 
-// Wide-stance Jeans with crisp Waypoint nodes & scan paths
-const JeansWaypointIcon: React.FC<{ size?: number; className?: string }> = ({ size = 18, className = "text-emerald-400" }) => (
-  <svg
-    width={size}
-    height={size}
-    viewBox="0 0 24 24"
-    fill="none"
-    xmlns="http://www.w3.org/2000/svg"
-    className={className}
-  >
-    {/* Wide-stance Pants Outline (A-Frame Spread Legs) */}
-    <path
-      d="M5.5 2.5h13l2.5 19h-5.2l-3.8-10.5-3.8 10.5H3L5.5 2.5z"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      fill="currentColor"
-      fillOpacity="0.12"
-    />
+const AutoPathIcon: React.FC<{ size?: number; className?: string }> = ({ size = 18, className = "text-emerald-400" }) => (
+  <div className={`flex items-center gap-0.5 ${className}`}>
+    <Wand2 size={size * 0.9} strokeWidth={2.5} />
+    <Route size={size * 0.9} strokeWidth={2.5} className="rotate-90" />
+  </div>
+);
 
-    {/* Waistband stitch */}
-    <path
-      d="M5.8 6.5h12.4"
-      stroke="currentColor"
-      strokeWidth="1.2"
-      strokeOpacity="0.5"
-    />
-
-    {/* Left Leg Waypoint Trajectory (Zigzag + Node Dots) */}
-    <path
-      d="M6 9.5l3 3.5-3 4"
-      stroke="#38bdf8"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />
-    <circle cx="6" cy="9.5" r="1.4" fill="#38bdf8" />
-    <circle cx="9" cy="13" r="1.4" fill="#38bdf8" />
-    <circle cx="6" cy="17" r="1.4" fill="#38bdf8" />
-
-    {/* Right Leg Waypoint Trajectory (Zigzag + Node Dots) */}
-    <path
-      d="M18 9.5l-3 3.5 3 4"
-      stroke="#38bdf8"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    />
-    <circle cx="18" cy="9.5" r="1.4" fill="#38bdf8" />
-    <circle cx="15" cy="13" r="1.4" fill="#38bdf8" />
-    <circle cx="18" cy="17" r="1.4" fill="#38bdf8" />
-  </svg>
+const ManualPathIcon: React.FC<{ size?: number; className?: string }> = ({ size = 18, className = "text-amber-400" }) => (
+  <div className={`flex items-center gap-0.5 ${className}`}>
+    <MousePointer2 size={size * 0.9} strokeWidth={2.5} />
+    <Route size={size * 0.9} strokeWidth={2.5} className="rotate-90" />
+  </div>
 );
 
 export const InteractiveActionColumn: React.FC<InteractiveActionColumnProps> = ({
@@ -154,7 +115,7 @@ export const InteractiveActionColumn: React.FC<InteractiveActionColumnProps> = (
           disabled={!hasImage || busy || segMode || manualPathMode}
           className="w-full h-8 bg-gradient-to-r from-slate-800 to-slate-900 hover:from-slate-700 hover:to-slate-800 text-slate-200 rounded-lg shadow transition-all flex items-center justify-center active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed border border-slate-700 hover:border-slate-600"
         >
-          {isAutoGenerating ? <RefreshCw size={14} className="animate-spin text-emerald-400" /> : <JeansWaypointIcon size={16} className="text-emerald-400" />}
+          {isAutoGenerating ? <RefreshCw size={14} className="animate-spin text-emerald-400" /> : <AutoPathIcon size={16} className="text-emerald-400" />}
         </button>
         <div className="absolute top-full mt-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
           <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
@@ -174,7 +135,7 @@ export const InteractiveActionColumn: React.FC<InteractiveActionColumnProps> = (
               : 'bg-gradient-to-r from-slate-800 to-slate-900 hover:from-slate-700 hover:to-slate-800 text-slate-200 border-slate-700 hover:border-slate-600'
           }`}
         >
-          {manualPathMode ? <X size={14} className="text-rose-400" /> : <Route size={14} className="text-amber-400" />}
+          {manualPathMode ? <X size={14} className="text-rose-400" /> : <ManualPathIcon size={14} className="text-amber-400" />}
         </button>
         <div className="absolute top-full mt-2 right-0 hidden group-hover:flex flex-col items-end pointer-events-none z-50">
           <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
