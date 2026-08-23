@@ -10,6 +10,8 @@ from core.hardware.camera.factory import get_camera
 logger = logging.getLogger(__name__)
 
 HW_FRAME_RATE = 15.0
+CAMERA_TIMEOUT_MS = 1000
+STATS_INTERVAL = 10.0
 CORNER_DETECTION_HZ = HW_FRAME_RATE
 
 
@@ -66,16 +68,14 @@ class CameraService:
             
         try:
             logger.info(f"Initializing {camera_type} camera...")
-            self._cam = get_camera(camera_type, fps=int(HW_FRAME_RATE))
+            self._cam = get_camera(camera_type, fps=int(HW_FRAME_RATE), timeout_ms=CAMERA_TIMEOUT_MS)
             self._cam.start()
+            logger.info("Camera started successfully.")
         except Exception as e:
-            logger.error(f"Failed to start camera {camera_type}: {e}")
+            logger.warning(f"Initial camera start for {camera_type} failed ({e}), auto-reconnect will retry in background.")
             self._cam = None
             self._last_online_state = False
-            self._notify_status()
-            return False
             
-        logger.info("Camera started successfully.")
         self._stop_event.clear()
         self._is_streaming = True
         self._frame_thread = threading.Thread(target=self._update_frame, daemon=True)
@@ -94,6 +94,7 @@ class CameraService:
             self._cam is not None 
             and self._is_streaming 
             and (self._latest_color_frame is not None)
+            and getattr(self._cam, "_running", False)
             and (now - self._last_frame_time < 3.0 if self._last_frame_time > 0 else False)
         )
         return {
@@ -133,13 +134,44 @@ class CameraService:
         self._notify_status()
 
     def _update_frame(self):
-        """Dedicated high-speed reader loop to prevent USB buffer overflow."""
+        """Dedicated high-speed reader loop with automatic reconnection."""
         while self._is_streaming and not self._stop_event.is_set():
+            # If camera is missing or not running, attempt auto-reconnect
+            if self._cam is None or not getattr(self._cam, "_running", True):
+                if self._last_online_state:
+                    self._last_online_state = False
+                    self._notify_status()
+
+                # Safely clean up dead camera instance
+                if self._cam is not None:
+                    try:
+                        self._cam.stop()
+                    except Exception:
+                        pass
+                    self._cam = None
+
+                logger.info(f"Camera offline. Attempting to reconnect ({self._camera_type})...")
+                if self._stop_event.wait(1.5):
+                    break
+
+                try:
+                    new_cam = get_camera(self._camera_type, fps=int(HW_FRAME_RATE), timeout_ms=CAMERA_TIMEOUT_MS)
+                    new_cam.start()
+                    self._cam = new_cam
+                    logger.info(f"Camera ({self._camera_type}) successfully reconnected!")
+                except Exception as e:
+                    logger.debug(f"Camera reconnect attempt failed: {e}")
+                    continue
+
             camera = self._cam
             if camera is None:
-                break
+                continue
+
             try:
-                color, depth = camera.get_frame()
+                # In calibration mode, only 2D color images are needed for chessboard detection,
+                # so disable depth alignment to save CPU and minimize latency.
+                need_depth = not self._draw_calibration_corners
+                color, depth = camera.get_frame(enable_depth=need_depth, timeout_ms=CAMERA_TIMEOUT_MS)
                 if color is not None:
                     frame_time = time.time()
                     self._latest_color_frame = color
@@ -147,41 +179,7 @@ class CameraService:
                     self._last_frame_time = frame_time
                     self._fps_frame_count += 1
                     
-                    now = time.time()
-                    if now - self._fps_last_log_time >= 5.0:
-                        elapsed = now - self._fps_last_log_time
-                        
-                        detect_times = self._detect_times
-                        draw_times = self._draw_times
-                        self._detect_times = []
-                        self._draw_times = []
-                        
-                        if detect_times:
-                            avg_det = sum(detect_times) / len(detect_times)
-                            max_det = max(detect_times)
-                            min_det = min(detect_times)
-                            det_stats = f" | Detect(ms): avg={avg_det:.1f} min={min_det:.1f} max={max_det:.1f}"
-                        else:
-                            det_stats = ""
-                            
-                        if draw_times:
-                            avg_draw = sum(draw_times) / len(draw_times)
-                            max_draw = max(draw_times)
-                            min_draw = min(draw_times)
-                            draw_stats = f" | Draw(ms): avg={avg_draw:.1f} min={min_draw:.1f} max={max_draw:.1f}"
-                        else:
-                            draw_stats = ""
-
-                        logger.info(
-                            f"[FPS Monitor] Camera Read: {self._fps_frame_count/elapsed:.1f} fps | "
-                            f"Corner Detect: {self._fps_detect_count/elapsed:.1f} fps | "
-                            f"Found: {self._fps_found_count/elapsed:.1f} fps"
-                            f"{det_stats}{draw_stats}"
-                        )
-                        self._fps_frame_count = 0
-                        self._fps_detect_count = 0
-                        self._fps_found_count = 0
-                        self._fps_last_log_time = now
+                    self._log_fps_stats(time.time())
                         
                     if not self._last_online_state:
                         self._last_online_state = True
@@ -190,17 +188,8 @@ class CameraService:
                     if self._last_online_state and time.time() - self._last_frame_time >= 3.0:
                         self._last_online_state = False
                         self._notify_status()
-                    if self._stop_event.wait(0.05):
+                    if self._stop_event.wait(0.01):
                         break
-                        
-                if camera is not self._cam or not getattr(camera, "_running", True):
-                    self._is_streaming = False
-                    self._cam = None
-                    self._latest_color_frame = None
-                    self._latest_depth_frame = None
-                    self._last_online_state = False
-                    self._notify_status()
-                    break
             except Exception as e:
                 logger.warning(f"Failed to grab frame: {e}")
                 if self._last_online_state:
@@ -209,10 +198,48 @@ class CameraService:
                 if self._stop_event.wait(0.25):
                     break
 
+    def _log_fps_stats(self, now: float):
+        """Logs FPS and latency statistics periodically."""
+        elapsed = now - self._fps_last_log_time
+        if elapsed < STATS_INTERVAL:
+            return
+
+        detect_times = self._detect_times
+        draw_times = self._draw_times
+        self._detect_times = []
+        self._draw_times = []
+
+        if detect_times:
+            avg_det = sum(detect_times) / len(detect_times)
+            max_det = max(detect_times)
+            min_det = min(detect_times)
+            det_stats = f" | Detect(ms): avg={avg_det:.1f} min={min_det:.1f} max={max_det:.1f}"
+        else:
+            det_stats = ""
+
+        if draw_times:
+            avg_draw = sum(draw_times) / len(draw_times)
+            max_draw = max(draw_times)
+            min_draw = min(draw_times)
+            draw_stats = f" | Draw(ms): avg={avg_draw:.1f} min={min_draw:.1f} max={max_draw:.1f}"
+        else:
+            draw_stats = ""
+
+        logger.info(
+            f"[FPS Monitor] Camera Read: {self._fps_frame_count/elapsed:.1f} fps | "
+            f"Corner Detect: {self._fps_detect_count/elapsed:.1f} fps | "
+            f"Found: {self._fps_found_count/elapsed:.1f} fps"
+            f"{det_stats}{draw_stats}"
+        )
+        self._fps_frame_count = 0
+        self._fps_detect_count = 0
+        self._fps_found_count = 0
+        self._fps_last_log_time = now
+
     def _corner_detector_loop(self):
         """Asynchronously detects chessboard corners in background without blocking the video stream."""
-        cv2.setNumThreads(4)
-        cv2.ocl.setUseOpenCL(False)
+        cv2.setNumThreads(2)
+        #cv2.ocl.setUseOpenCL(False)
         
         last_detection_interval = 1.0 / CORNER_DETECTION_HZ
         from core.config import config

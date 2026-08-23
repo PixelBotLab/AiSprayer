@@ -31,14 +31,25 @@ const CalibrationOp: React.FC = () => {
     });
   };
 
-  const fetchSessions = async () => {
+  const fetchSessions = async (preferredSession?: string) => {
     try {
       const res = await fetch(`${API_BASE}/api/calib/sessions`);
       if (res.ok) {
         const data = await res.json();
-        setSessions(data.sessions || []);
-        if (data.sessions?.length > 0 && !activeSession) {
-          setActiveSession(data.sessions[0]);
+        const list: string[] = data.sessions || [];
+        setSessions(list);
+        if (list.length > 0) {
+          const target = (preferredSession && list.includes(preferredSession))
+            ? preferredSession
+            : (activeSession && list.includes(activeSession))
+            ? activeSession
+            : list[0];
+          setActiveSession(target);
+          fetchSessionData(target);
+        } else {
+          setActiveSession(null);
+          setActiveImage(null);
+          setSessionData({ samples: [], result: null });
         }
       }
     } catch (err) {
@@ -100,6 +111,15 @@ const CalibrationOp: React.FC = () => {
     fetchSessionData(activeSession);
   }, [activeSession]);
 
+  useEffect(() => {
+    if (activeImage) {
+      const el = document.getElementById(`sample-thumb-${activeImage}`);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      }
+    }
+  }, [activeImage]);
+
   const handleCreateSession = async () => {
     try {
       const res = await fetch(`${API_BASE}/api/calib/sessions/new`, { method: 'POST' });
@@ -113,22 +133,25 @@ const CalibrationOp: React.FC = () => {
     }
   };
 
-  const handleDeleteSession = () => {
-    if (!activeSession) return;
+  const handleDeleteSession = (sessionToDelete?: string | React.MouseEvent) => {
+    const targetSession = typeof sessionToDelete === 'string' ? sessionToDelete : activeSession;
+    if (!targetSession) return;
     setModalConfig({
       isOpen: true,
       type: 'confirm',
       title: 'Delete Calibration Session',
-      message: `Are you sure you want to permanently delete session "${activeSession}"? All captured samples and calibration results will be removed.`,
+      message: `Are you sure you want to permanently delete session "${targetSession}"? All captured samples and calibration results will be removed.`,
       confirmText: 'Delete Session',
       isDanger: true,
       onConfirm: async () => {
         try {
-          const res = await fetch(`${API_BASE}/api/calib/sessions/${activeSession}`, { method: 'DELETE' });
+          const res = await fetch(`${API_BASE}/api/calib/sessions/${targetSession}`, { method: 'DELETE' });
           if (res.ok) {
-            setActiveSession(null);
-            setActiveImage(null);
-            setSessionData({ samples: [], result: null });
+            if (activeSession === targetSession) {
+              setActiveSession(null);
+              setActiveImage(null);
+              setSessionData({ samples: [], result: null });
+            }
             fetchSessions();
           }
         } catch (err) {
@@ -233,43 +256,74 @@ const CalibrationOp: React.FC = () => {
   };
 
   return (
-    <div className="w-full h-full flex flex-col bg-slate-900/80 rounded-xl border border-slate-800 shadow-xl overflow-hidden backdrop-blur-sm relative">
+    <div className="w-full h-full flex flex-col bg-slate-950 overflow-hidden relative font-sans select-none rounded-xl border border-slate-800">
       
       {/* Custom Sleek Modal */}
       <CustomModal config={modalConfig} onClose={() => setModalConfig(prev => ({ ...prev, isOpen: false }))} />
 
       {/* TOP BAR: Sessions */}
-      <div className="h-14 shrink-0 border-b border-slate-800 bg-slate-950/50 flex items-center px-3 gap-2">
-        <button onClick={() => scrollTabs('left')} className="p-1 hover:bg-slate-800 rounded text-slate-500 hover:text-slate-300">
-          <ChevronLeft size={16} />
-        </button>
-        
-        <div ref={scrollRef} className="flex-1 flex items-center overflow-x-hidden gap-2 scroll-smooth">
-          {sessions.map(session => (
-            <button
-              key={session}
-              onClick={() => setActiveSession(session)}
-              className={`px-4 h-8 shrink-0 rounded-md text-xs font-medium border transition-colors ${
-                activeSession === session
-                  ? 'bg-blue-600/20 text-blue-400 border-blue-500/50 shadow-[0_0_8px_rgba(59,130,246,0.3)]'
-                  : 'bg-slate-800 border-slate-700 text-slate-400 hover:text-slate-200 hover:bg-slate-700'
-              }`}
-            >
-              {session}
-            </button>
-          ))}
-        </div>
-
-        <button onClick={() => scrollTabs('right')} className="p-1 hover:bg-slate-800 rounded text-slate-500 hover:text-slate-300">
-          <ChevronRight size={16} />
-        </button>
-        
-        <div className="w-px h-6 bg-slate-700 mx-1 shrink-0" />
+      <div className="h-9 bg-slate-900 border-b border-slate-800 flex items-center px-2 justify-between select-none shrink-0 z-10 gap-1.5">
+        {/* Left Action: New Session Button */}
         <button
           onClick={handleCreateSession}
-          className="px-4 h-8 shrink-0 rounded-md text-xs font-medium border border-emerald-500/30 bg-emerald-600/10 text-emerald-400 hover:bg-emerald-600/20 transition-colors flex items-center gap-2"
+          className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-sky-400 border border-slate-700 shrink-0 transition-colors flex items-center gap-1 text-xs font-medium px-2"
+          title="Create New Session"
         >
-          <FolderPlus size={14} /> New
+          <FolderPlus size={13} />
+          <span>New</span>
+        </button>
+
+        <div className="h-4 w-[1px] bg-slate-800 shrink-0" />
+
+        {/* Left Scroll Arrow */}
+        <button
+          onClick={() => scrollTabs('left')}
+          className="p-1 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded transition-colors shrink-0"
+          title="Scroll Left"
+        >
+          <ChevronLeft size={15} />
+        </button>
+        
+        {/* Center Sessions Container */}
+        <div
+          ref={scrollRef}
+          className="flex-1 flex items-center gap-1.5 overflow-x-hidden py-0.5 scroll-smooth"
+        >
+          {sessions.map((session) => {
+            const isActive = activeSession === session;
+            return (
+              <div
+                key={session}
+                className={`group flex items-center gap-1.5 px-2.5 py-0.5 rounded-md text-xs font-medium transition-all shrink-0 cursor-pointer border ${
+                  isActive
+                    ? 'bg-sky-950/80 text-sky-300 border-sky-500/50 shadow-sm'
+                    : 'bg-slate-800/60 text-slate-400 border-transparent hover:bg-slate-800 hover:text-slate-200'
+                }`}
+                onClick={() => setActiveSession(session)}
+              >
+                <span>{session}</span>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleDeleteSession(session);
+                  }}
+                  className="opacity-0 group-hover:opacity-100 hover:text-rose-400 p-0.5 rounded transition-opacity"
+                  title="Delete Session"
+                >
+                  <Trash2 size={11} />
+                </button>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* Right Scroll Arrow */}
+        <button
+          onClick={() => scrollTabs('right')}
+          className="p-1 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded transition-colors shrink-0"
+          title="Scroll Right"
+        >
+          <ChevronRight size={15} />
         </button>
       </div>
 
@@ -279,7 +333,11 @@ const CalibrationOp: React.FC = () => {
         {/* Left Column: Big Image Viewer */}
         <div className="flex-1 flex flex-col border-r border-slate-800 relative bg-black">
           {activeImageUrl ? (
-            <img src={activeImageUrl} className="w-full h-full object-contain" alt="calibration sample" />
+            <img 
+              src={activeImageUrl} 
+              className="w-full h-full object-contain select-none" 
+              alt="calibration sample" 
+            />
           ) : (
             <div className="w-full h-full flex items-center justify-center text-slate-700">
               <ImageIcon size={48} className="opacity-20" />
@@ -311,6 +369,7 @@ const CalibrationOp: React.FC = () => {
             sessionData.samples.map(sample => (
               <div 
                 key={sample.id}
+                id={`sample-thumb-${sample.filename}`}
                 onClick={() => setActiveImage(sample.filename)}
                 className={`w-full shrink-0 rounded border overflow-hidden flex flex-col bg-slate-900 cursor-pointer transition-all relative group ${
                   activeImage === sample.filename 

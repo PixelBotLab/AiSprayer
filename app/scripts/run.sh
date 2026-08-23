@@ -39,8 +39,8 @@ if [ -n "$SUDO_USER" ]; then
 fi
 
 echo "[0/2] Cleaning up any existing AiSprayer processes..."
-pkill -f "python3 main.py" 2>/dev/null
-pkill -f "vite" 2>/dev/null
+pkill -9 -f "main.py" 2>/dev/null
+pkill -9 -f "vite" 2>/dev/null
 
 echo "Checking and freeing ports 8000 and 5173..."
 lsof -t -i :8000 | xargs -r kill -9 2>/dev/null
@@ -81,26 +81,34 @@ echo "Frontend: http://$LAN_IP:5173  (http://localhost:5173)"
 echo "Press Ctrl+C to stop both processes."
 echo "=========================================="
 
-# Trap SIGINT and SIGTERM to kill background processes gracefully
+# Trap SIGINT, SIGTERM, and EXIT to kill background processes
 cleanup() {
+    trap - SIGINT SIGTERM EXIT
     echo ""
     echo "Stopping AiSprayer..."
-    echo "Killing Backend (PID: $BACKEND_PID)..."
-    kill $BACKEND_PID 2>/dev/null
-    pkill -f "python3 main.py" 2>/dev/null
     
-    echo "Killing Frontend (PID: $FRONTEND_PID)..."
-    kill $FRONTEND_PID 2>/dev/null
-    pkill -f "vite" 2>/dev/null
+    # 1. Graceful termination
+    [ -n "$BACKEND_PID" ] && kill -TERM "$BACKEND_PID" 2>/dev/null
+    [ -n "$FRONTEND_PID" ] && kill -TERM "$FRONTEND_PID" 2>/dev/null
     
+    # 2. Forceful termination after brief pause
+    sleep 0.5
+    [ -n "$BACKEND_PID" ] && kill -9 "$BACKEND_PID" 2>/dev/null
+    [ -n "$FRONTEND_PID" ] && kill -9 "$FRONTEND_PID" 2>/dev/null
+    pkill -9 -f "main.py" 2>/dev/null
+    pkill -9 -f "vite" 2>/dev/null
+    
+    # 3. Forcefully free ports
     echo "Forcefully freeing ports 8000 and 5173..."
     lsof -t -i :8000 | xargs -r kill -9 2>/dev/null
     lsof -t -i :5173 | xargs -r kill -9 2>/dev/null
     
-    # Restoring file ownership to target user so root files are never left behind
-    echo "🛡️ Restoring file permissions in data/ and logs/ to user '$TARGET_USER'..."
-    chown -R "$TARGET_USER:$TARGET_GROUP" "$ROOT_DATA_DIR" "$DATA_DIR" "$LOG_DIR" 2>/dev/null || true
-    chmod -R u+rwX,g+rwX,a+rwX "$ROOT_DATA_DIR" "$DATA_DIR" "$LOG_DIR" 2>/dev/null || true
+    # 4. Restoring file ownership to target user so root files are never left behind
+    if [ -n "$SUDO_USER" ]; then
+        echo "🛡️ Restoring file permissions in data/ and logs/ to user '$TARGET_USER'..."
+        chown -R "$TARGET_USER:$TARGET_GROUP" "$ROOT_DATA_DIR" "$DATA_DIR" "$LOG_DIR" 2>/dev/null || true
+        chmod -R u+rwX,g+rwX,a+rwX "$ROOT_DATA_DIR" "$DATA_DIR" "$LOG_DIR" 2>/dev/null || true
+    fi
 
     # Double check and verify ports are free
     if lsof -t -i :8000 >/dev/null || lsof -t -i :5173 >/dev/null; then

@@ -28,8 +28,9 @@ class CalibrationService:
         self.calib_dir = os.path.abspath(os.path.join(PROJECT_ROOT, "..", "data", "calib"))
         os.makedirs(self.calib_dir, exist_ok=True)
         
-        # In-memory store for live progress tracking
+        # In-memory store for live progress tracking and corner image caching
         self.progress_states = {}
+        self._corner_images_cache = {}
 
         
         # Load config to get default board and camera params
@@ -106,77 +107,100 @@ class CalibrationService:
         session_path = os.path.join(self.calib_dir, session_id)
         if os.path.exists(session_path):
             shutil.rmtree(session_path)
+            self._corner_images_cache = {
+                k: v for k, v in self._corner_images_cache.items() if not k.startswith(f"{session_id}/")
+            }
             return True
         return False
 
     def get_session_data(self, session_id: str) -> Dict[str, Any]:
         session_path = os.path.join(self.calib_dir, session_id)
         yaml_file = os.path.join(session_path, "calibration_info.yaml")
-        
-        data = {"samples": [], "result": None, "mode": "eye-to-hand"}
+        res_file = os.path.join(session_path, "calibration_result.yaml")
 
-        if os.path.exists(yaml_file):
-            with open(yaml_file, "r", encoding='utf-8') as f:
-                yaml_data = yaml.safe_load(f) or {}
-                data["mode"] = yaml_data.get("calibration_mode", "eye-to-hand")
-                
-                old_samples = yaml_data.get("samples", [])
-                formatted_samples = []
-                for s in old_samples:
-                    pose = s.get("robot_pose", {})
-                    pose_list = [pose.get("x", 0), pose.get("y", 0), pose.get("z", 0),
-                                 pose.get("a", 0), pose.get("b", 0), pose.get("c", 0)]
-                    formatted_samples.append({
-                        "id": s.get("id", 0),
-                        "filename": s.get("image_file", ""),
-                        "pose": pose_list
-                    })
-                data["samples"] = formatted_samples
+        if not os.path.exists(yaml_file):
+            raise Exception(f"Session {session_id} does not exist.")
 
-        if os.path.exists(os.path.join(session_path, "calibration_result.yaml")):
-            with open(os.path.join(session_path, "calibration_result.yaml"), "r", encoding='utf-8') as f:
-                yaml_res = yaml.safe_load(f) or {}
-                data["result"] = yaml_res
+        with open(yaml_file, 'r', encoding='utf-8') as f:
+            info = yaml.safe_load(f) or {}
 
-        return data
+        mode = info.get("calibration_mode", "eye-to-hand")
+        raw_samples = info.get("samples", [])
+        formatted_samples = []
+        for s in raw_samples:
+            pose = s.get("robot_pose", {})
+            rx = pose.get("rx", pose.get("a", 0.0))
+            ry = pose.get("ry", pose.get("b", 0.0))
+            rz = pose.get("rz", pose.get("c", 0.0))
+            pose_list = [
+                pose.get("x", 0.0),
+                pose.get("y", 0.0),
+                pose.get("z", 0.0),
+                rx,
+                ry,
+                rz
+            ]
+            formatted_samples.append({
+                "id": s.get("id", len(formatted_samples) + 1),
+                "filename": s.get("image_file", s.get("filename", "")),
+                "image_file": s.get("image_file", s.get("filename", "")),
+                "pose": pose_list,
+                "robot_pose": pose
+            })
+
+        result_data = None
+        if os.path.exists(res_file):
+            with open(res_file, 'r', encoding='utf-8') as f:
+                result_data = yaml.safe_load(f)
+
+        return {
+            "session_id": session_id,
+            "mode": mode,
+            "samples": formatted_samples,
+            "result": result_data
+        }
 
     def add_sample(self, session_id: str, image: np.ndarray, robot_pose: List[float]) -> int:
         session_path = os.path.join(self.calib_dir, session_id)
         if not os.path.exists(session_path):
             raise Exception(f"Session {session_id} does not exist.")
-
+            
         yaml_file = os.path.join(session_path, "calibration_info.yaml")
-
         if not os.path.exists(yaml_file):
             raise Exception(f"Session {session_id} is missing calibration_info.yaml")
 
-        with open(yaml_file, "r", encoding='utf-8') as f:
-            cap_info = yaml.safe_load(f)
+        with open(yaml_file, 'r', encoding='utf-8') as f:
+            info = yaml.safe_load(f)
 
-        samples = cap_info.get("samples", [])
-        # We 1-index for UI display consistency in older app, or just len + 1
-        count = len(samples) + 1
-        img_name = f"image_{count:03d}.png"
-        img_path = os.path.join(session_path, img_name)
+        samples = info.get("samples", [])
+        sample_id = len(samples) + 1
+        img_filename = f"image_{sample_id:03d}.png"
+        img_path = os.path.join(session_path, img_filename)
 
-        # Save image
         cv2.imwrite(img_path, image)
 
-        # Update metadata
-        sample = {
-            "id": count,
-            "image_file": img_name,
+        # Pose format: [x, y, z, rx, ry, rz]
+        sample_entry = {
+            "id": sample_id,
+            "image_file": img_filename,
             "robot_pose": {
-                "x": round(robot_pose[0], 3), "y": round(robot_pose[1], 3), "z": round(robot_pose[2], 3),
-                "a": round(robot_pose[3], 5), "b": round(robot_pose[4], 5), "c": round(robot_pose[5], 5)
-            }
+                "x": float(robot_pose[0]),
+                "y": float(robot_pose[1]),
+                "z": float(robot_pose[2]),
+                "rx": float(robot_pose[3]),
+                "ry": float(robot_pose[4]),
+                "rz": float(robot_pose[5])
+            },
+            "timestamp": datetime.now().isoformat()
         }
-        cap_info["samples"].append(sample)
 
-        with open(yaml_file, "w", encoding='utf-8') as f:
-            yaml.dump(cap_info, f, default_flow_style=False)
+        samples.append(sample_entry)
+        info["samples"] = samples
 
-        return len(cap_info["samples"])
+        with open(yaml_file, 'w', encoding='utf-8') as f:
+            yaml.dump(info, f, default_flow_style=False)
+
+        return len(samples)
 
     def run_calibration(self, session_id: str, progress_callback=None) -> Dict[str, Any]:
         session_path = os.path.join(self.calib_dir, session_id)
@@ -220,6 +244,9 @@ class CalibrationService:
 
         all_samples = []
 
+        # Avoid thread over-subscription on RK3588
+        cv2.setNumThreads(2)
+
         for idx, s in enumerate(info["samples"]):
             # Update progress
             safe_callback(idx + 1, total_samples, s["image_file"], "processing")
@@ -227,12 +254,14 @@ class CalibrationService:
             pose = s["robot_pose"]
             if any(abs(v) > 2500 for v in [pose['x'], pose['y'], pose['z']]):
                 logger.warning(f"Skipped sample {s['id']} (invalid position)")
+                time.sleep(0.06)
                 continue
 
             img_path = os.path.join(session_path, s["image_file"])
             img = cv2.imread(img_path)
             if img is None:
                 logger.warning(f"Skipped sample {s['id']} (image load failed)")
+                time.sleep(0.06)
                 continue
 
             ret, corners = cv2.findChessboardCorners(img, pattern_size, None)
@@ -248,8 +277,21 @@ class CalibrationService:
                     "t_cb": tvec.flatten(), 
                     "pose": pose
                 })
+                # Draw corners and cache the rendered image for instant frontend retrieval
+                cv2.drawChessboardCorners(img, pattern_size, corners, ret)
+                cv2.putText(img, f"SAMPLE {idx+1}/{total_samples}: FOUND", (20, 40),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0), 2, cv2.LINE_AA)
             else:
                 logger.warning(f"Failed to extract corners from sample {s['id']}")
+                cv2.putText(img, f"SAMPLE {idx+1}/{total_samples}: NOT FOUND", (20, 40),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 255), 2, cv2.LINE_AA)
+
+            success, buffer = cv2.imencode('.jpg', img)
+            if success:
+                self._corner_images_cache[f"{session_id}/{s['image_file']}"] = buffer.tobytes()
+
+            # Yield CPU so SSE stream and frontend can smoothly render the current frame with detected corners
+            time.sleep(0.2)
 
         safe_callback(total_samples, total_samples, "", "optimizing")
         
@@ -322,22 +364,30 @@ class CalibrationService:
         
     def stream_progress(self, session_id: str):
         """Generator for Server-Sent Events (SSE) that yields progress updates."""
+        last_sent = None
         while True:
             state = self.progress_states.get(session_id)
             if not state:
                 yield f"data: {json.dumps({'status': 'waiting'})}\n\n"
             else:
-                yield f"data: {json.dumps(state)}\n\n"
+                curr = (state.get("current"), state.get("status"), state.get("filename"))
+                if curr != last_sent:
+                    last_sent = curr
+                    yield f"data: {json.dumps(state)}\n\n"
                 
                 if state.get("status") in ["completed", "error"]:
                     # Clean up and exit
                     if session_id in self.progress_states:
                         del self.progress_states[session_id]
                     break
-            time.sleep(0.1)
+            time.sleep(0.03)
 
     def get_image_with_corners(self, session_id: str, filename: str) -> bytes:
         """Loads an image, attempts to find and draw chessboard corners, and returns JPEG bytes."""
+        cache_key = f"{session_id}/{filename}"
+        if hasattr(self, "_corner_images_cache") and cache_key in self._corner_images_cache:
+            return self._corner_images_cache[cache_key]
+
         session_path = os.path.join(self.calib_dir, session_id)
         img_path = os.path.join(session_path, filename)
         yaml_file = os.path.join(session_path, "calibration_info.yaml")

@@ -32,10 +32,11 @@ logger = logging.getLogger(__name__)
 class OrbbecDriver:
     """Orbbec Gemini 336 相机原生驱动"""
 
-    def __init__(self, width=1280, height=800, fps=30):
+    def __init__(self, width=1280, height=800, fps=30, timeout_ms=500):
         self.width = width
         self.height = height
         self.fps = fps
+        self.timeout_ms = timeout_ms
         self.model_name = "orbbec"
         self.pipeline = None
         self.config = None
@@ -112,7 +113,7 @@ class OrbbecDriver:
             
             # 预热
             for _ in range(10):
-                self.pipeline.wait_for_frames(200)
+                self.pipeline.wait_for_frames(self.timeout_ms)
             
             print(f"Orbbec 相机已启动: {self.width}x{self.height}")
             
@@ -123,7 +124,7 @@ class OrbbecDriver:
         self._consecutive_failures += 1
         if self._consecutive_failures == 1 or self._consecutive_failures % 20 == 0:
             logger.warning(f"获取帧失败（连续 {self._consecutive_failures} 次）: {reason}")
-        if self._consecutive_failures >= 20 and self._running:
+        if self._consecutive_failures >= 30 and self._running:
             logger.error("相机连续取帧失败，停止当前 Orbbec 管线")
             self._running = False
             pipeline = self.pipeline
@@ -134,26 +135,30 @@ class OrbbecDriver:
             except Exception as e:
                 logger.warning(f"Orbbec 设备已断开，跳过管线停止: {e}")
 
-    def get_frame(self):
-        """获取一帧彩色图和深度图"""
+    def get_frame(self, enable_depth: bool = True, timeout_ms: int = None):
+        """获取一帧彩色图和深度图 (支持通过参数控制是否需要深度对齐及指定超时)"""
         if not self._running:
             return None, None
 
+        timeout = timeout_ms if timeout_ms is not None else self.timeout_ms
         try:
-            frames = self.pipeline.wait_for_frames(200)
+            frames = self.pipeline.wait_for_frames(timeout)
             if frames is None:
                 self._record_frame_failure("wait_for_frames returned no frames")
                 return None, None
 
-            # 深度对齐到彩色
-            aligned_frames = self.align_filter.process(frames)
-            if aligned_frames is None:
-                self._record_frame_failure("alignment returned no frames")
-                return None, None
-            aligned_frames = aligned_frames.as_frame_set()
+            if enable_depth:
+                # 深度对齐到彩色
+                aligned_frames = self.align_filter.process(frames)
+                if aligned_frames is None:
+                    self._record_frame_failure("alignment returned no frames")
+                    return None, None
+                frame_set = aligned_frames.as_frame_set()
+            else:
+                frame_set = frames.as_frame_set() if hasattr(frames, "as_frame_set") else frames
 
             # 解析彩色
-            color_frame = aligned_frames.get_color_frame()
+            color_frame = frame_set.get_color_frame()
             if color_frame is None:
                 self._record_frame_failure("color frame is missing")
                 return None, None
@@ -176,8 +181,12 @@ class OrbbecDriver:
             else:
                 return None, None
 
+            if not enable_depth:
+                self._consecutive_failures = 0
+                return color_image, None
+
             # 解析深度
-            depth_frame = aligned_frames.get_depth_frame()
+            depth_frame = frame_set.get_depth_frame()
             if depth_frame is None:
                 return color_image, None
             

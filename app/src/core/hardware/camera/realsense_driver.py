@@ -65,26 +65,30 @@ class RealSenseDriver:
         except Exception as e:
             raise RuntimeError(f"RealSense 相机启动失败: {e}")
 
-    def get_frame(self):
-        """获取一帧对齐后的彩色图和深度图"""
+    def get_frame(self, enable_depth: bool = True, timeout_ms: int = None):
+        """获取一帧对齐后的彩色图和深度图 (支持参数指定是否需要深度及指定超时)"""
         if not self._running:
             return None, None
 
+        timeout = timeout_ms if timeout_ms is not None else 5000
         try:
-            frames = self.pipeline.wait_for_frames(5000)
+            frames = self.pipeline.wait_for_frames(timeout)
             if not frames:
                 return None, None
                 
-            # 深度对齐到彩色
-            aligned = self.align.process(frames)
-            color_frame = aligned.get_color_frame()
-            depth_frame = aligned.get_depth_frame()
+            if enable_depth:
+                aligned = self.align.process(frames)
+                color_frame = aligned.get_color_frame()
+                depth_frame = aligned.get_depth_frame()
+            else:
+                color_frame = frames.get_color_frame()
+                depth_frame = None
 
-            if not color_frame or not depth_frame:
+            if not color_frame:
                 return None, None
 
             color_image = np.asanyarray(color_frame.get_data())
-            depth_image = np.asanyarray(depth_frame.get_data())
+            depth_image = np.asanyarray(depth_frame.get_data()) if depth_frame else None
             return color_image, depth_image
             
         except Exception as e:

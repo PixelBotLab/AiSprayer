@@ -281,14 +281,22 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   }, [isSpacePressed]);
 
   // ─── Templates API & Atomic Synchronization ─────────────────────────────
-  const fetchTemplates = async () => {
+  const fetchTemplates = async (preferredTemplate?: string) => {
     try {
       const res = await fetch(`${API_BASE}/api/interactive/templates`);
       if (!res.ok) return;
       const data = await res.json();
-      setTemplates(data.templates || []);
-      if (!activeTemplate && data.templates && data.templates.length > 0) {
-        handleSelectTemplate(data.templates[0]);
+      const list: string[] = data.templates || [];
+      setTemplates(list);
+      if (list.length > 0) {
+        // Automatically select preferred template if valid, otherwise select the latest template (list[0])
+        const target = (preferredTemplate && list.includes(preferredTemplate))
+          ? preferredTemplate
+          : list[0];
+        handleSelectTemplate(target);
+      } else {
+        setActiveTemplate(null);
+        if (onTemplateChange) onTemplateChange(null);
       }
     } catch (err) {
       console.error('Failed to fetch templates:', err);
@@ -1192,7 +1200,8 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         onSelectTemplate={handleSelectTemplate}
         onOpenCreateTemplateModal={() => {
           const now = new Date();
-          const defaultName = now.toISOString().replace(/[-:T]/g, '_').slice(0, 15);
+          const pad = (n: number) => String(n).padStart(2, '0');
+          const defaultName = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
           setModalConfig({
             isOpen: true,
             title: 'Create New Template',
@@ -1208,8 +1217,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                   body: JSON.stringify({ name }),
                 });
                 if (!res.ok) throw new Error('Failed to create template');
-                await fetchTemplates();
-                await handleSelectTemplate(name);
+                await fetchTemplates(name);
               } catch (err: any) {
                 alert(err.message);
               }
