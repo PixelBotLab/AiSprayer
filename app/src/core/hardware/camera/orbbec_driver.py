@@ -32,9 +32,10 @@ logger = logging.getLogger(__name__)
 class OrbbecDriver:
     """Orbbec Gemini 336 相机原生驱动"""
 
-    def __init__(self, width=1280, height=800):
+    def __init__(self, width=1280, height=800, fps=30):
         self.width = width
         self.height = height
+        self.fps = fps
         self.model_name = "orbbec"
         self.pipeline = None
         self.config = None
@@ -43,6 +44,7 @@ class OrbbecDriver:
         self.color_distortion = None
         self._depth_enabled = False
         self._running = False
+        self._consecutive_failures = 0
 
     def start(self):
         """启动相机"""
@@ -61,14 +63,19 @@ class OrbbecDriver:
                 try:
                     # 尝试不同格式 (RGB 是生产首选，MJPG/YUYV 作为备份)
                     for fmt in [OBFormat.RGB, OBFormat.MJPG, OBFormat.YUYV]:
-                        try:
-                            color_profile = color_profile_list.get_video_stream_profile(w, h, fmt)
-                            if color_profile: 
-                                print(f"[+] 成功匹配彩色流模式: {w}x{h} ({fmt})")
-                                break
-                        except Exception as e:
-                            print(f"    [-] 尝试 {w}x{h} ({fmt}) 失败: {e}")
-                            continue
+                        # 优先尝试指定的 fps，最后尝试默认帧率
+                        for fps_val in [self.fps, 0]:
+                            try:
+                                if fps_val == 0:
+                                    color_profile = color_profile_list.get_video_stream_profile(w, h, fmt)
+                                else:
+                                    color_profile = color_profile_list.get_video_stream_profile(w, h, fmt, fps_val)
+                                if color_profile: 
+                                    print(f"[+] 成功匹配彩色流模式: {w}x{h} ({fmt}) @ {color_profile.get_fps()}fps")
+                                    break
+                            except Exception as e:
+                                continue
+                        if color_profile: break
                     if color_profile: break
                     print(f"[-] 分辨率 {w}x{h} 在当前设备上所有格式均不可用。")
                 except Exception as e:
@@ -112,6 +119,21 @@ class OrbbecDriver:
         except Exception as e:
             raise RuntimeError(f"相机初始化失败: {e}")
 
+    def _record_frame_failure(self, reason: str):
+        self._consecutive_failures += 1
+        if self._consecutive_failures == 1 or self._consecutive_failures % 20 == 0:
+            logger.warning(f"获取帧失败（连续 {self._consecutive_failures} 次）: {reason}")
+        if self._consecutive_failures >= 20 and self._running:
+            logger.error("相机连续取帧失败，停止当前 Orbbec 管线")
+            self._running = False
+            pipeline = self.pipeline
+            self.pipeline = None
+            try:
+                if pipeline:
+                    pipeline.stop()
+            except Exception as e:
+                logger.warning(f"Orbbec 设备已断开，跳过管线停止: {e}")
+
     def get_frame(self):
         """获取一帧彩色图和深度图"""
         if not self._running:
@@ -120,17 +142,20 @@ class OrbbecDriver:
         try:
             frames = self.pipeline.wait_for_frames(200)
             if frames is None:
+                self._record_frame_failure("wait_for_frames returned no frames")
                 return None, None
 
             # 深度对齐到彩色
             aligned_frames = self.align_filter.process(frames)
             if aligned_frames is None:
+                self._record_frame_failure("alignment returned no frames")
                 return None, None
             aligned_frames = aligned_frames.as_frame_set()
 
             # 解析彩色
             color_frame = aligned_frames.get_color_frame()
             if color_frame is None:
+                self._record_frame_failure("color frame is missing")
                 return None, None
             
             color_data = np.frombuffer(color_frame.get_data(), dtype=np.uint8)
@@ -159,10 +184,11 @@ class OrbbecDriver:
             depth_data = np.frombuffer(depth_frame.get_data(), dtype=np.uint16)
             depth_image = depth_data.reshape((depth_frame.get_height(), depth_frame.get_width()))
 
+            self._consecutive_failures = 0
             return color_image, depth_image
 
         except Exception as e:
-            logger.warning(f"获取帧失败: {e}")
+            self._record_frame_failure(str(e))
             return None, None
 
     def get_intrinsics(self):
@@ -176,6 +202,11 @@ class OrbbecDriver:
         return k, d
 
     def stop(self):
-        if self._running and self.pipeline:
-            self.pipeline.stop()
-            self._running = False
+        pipeline = self.pipeline
+        self.pipeline = None
+        self._running = False
+        if pipeline:
+            try:
+                pipeline.stop()
+            except Exception as e:
+                logger.debug(f"Orbbec pipeline already stopped: {e}")

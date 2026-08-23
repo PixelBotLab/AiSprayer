@@ -7,6 +7,13 @@ import logging.handlers
 import uvicorn
 from fastapi.staticfiles import StaticFiles
 
+# Production startup must use one server process. Thread pools are limited below
+# before importing OpenCV/PyTorch-backed application modules.
+for _name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(_name, "1")
+os.environ.setdefault("OPENCV_FOR_THREADS_NUM", "1")
+os.environ.setdefault("OPENCV_NUM_THREADS", "1")
+
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "app/src"))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "src")) # Add original src for aisprayer module
@@ -118,4 +125,4 @@ def read_root():
     return {"message": "AiSprayer Backend is running!"}
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True, log_config=None)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False, log_config=None)

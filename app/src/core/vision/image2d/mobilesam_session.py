@@ -4,6 +4,13 @@ import numpy as np
 import cv2
 from pathlib import Path
 
+# MobileSAM is an interactive feature; it must not consume all CPU cores.
+torch.set_num_threads(1)
+try:
+    torch.set_num_interop_threads(1)
+except RuntimeError:
+    pass
+
 # Adjust paths based on the project structure
 REPO_ROOT = Path(__file__).resolve().parents[5]
 MOBILESAM_DIR = REPO_ROOT / "third_party" / "MobileSAM"

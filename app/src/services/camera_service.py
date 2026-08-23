@@ -2,14 +2,16 @@ import cv2
 import threading
 import logging
 import time
-import os
-import sys
 from typing import Optional, Generator, Callable, List
 import numpy as np
 
 from core.hardware.camera.factory import get_camera
 
 logger = logging.getLogger(__name__)
+
+HW_FRAME_RATE = 15.0
+CORNER_DETECTION_HZ = HW_FRAME_RATE
+
 
 class CameraService:
     def __init__(self):
@@ -19,17 +21,23 @@ class CameraService:
         self._is_streaming = False
         self._frame_thread = None
         self._corner_thread = None
+        self._stop_event = threading.Event()
+        
         self._draw_calibration_corners = False
         self._cached_corners = None
         self._cached_corners_time: float = 0.0
         self._last_frame_time: float = 0.0
         self._camera_type: str = "orbbec"
         self._last_online_state: bool = False
+        
         self._fps_frame_count = 0
         self._fps_detect_count = 0
         self._fps_found_count = 0
+        self._detect_times = []
+        self._draw_times = []
         self._fps_last_log_time = time.time()
         self._status_callbacks: List[Callable] = []
+        logger.info("CameraService initialized.")
 
     def register_status_callback(self, cb: Callable):
         if cb not in self._status_callbacks:
@@ -51,10 +59,14 @@ class CameraService:
         self._camera_type = camera_type
         if self._is_streaming:
             self.stop_stream()
+        if ((self._frame_thread and self._frame_thread.is_alive()) or
+                (self._corner_thread and self._corner_thread.is_alive())):
+            logger.error("Cannot start camera while previous camera threads are still alive")
+            return False
             
         try:
             logger.info(f"Initializing {camera_type} camera...")
-            self._cam = get_camera(camera_type)
+            self._cam = get_camera(camera_type, fps=int(HW_FRAME_RATE))
             self._cam.start()
         except Exception as e:
             logger.error(f"Failed to start camera {camera_type}: {e}")
@@ -64,6 +76,7 @@ class CameraService:
             return False
             
         logger.info("Camera started successfully.")
+        self._stop_event.clear()
         self._is_streaming = True
         self._frame_thread = threading.Thread(target=self._update_frame, daemon=True)
         self._frame_thread.start()
@@ -93,15 +106,25 @@ class CameraService:
 
     def stop_stream(self):
         self._is_streaming = False
-        if self._frame_thread:
-            self._frame_thread.join(timeout=1.0)
+        self._stop_event.set()
+        camera = self._cam
+        if camera:
+            try:
+                camera.stop()
+            except Exception:
+                logger.exception("Failed to stop camera driver")
+        if self._frame_thread and self._frame_thread is not threading.current_thread():
+            self._frame_thread.join(timeout=5.0)
+        if self._corner_thread and self._corner_thread is not threading.current_thread():
+            self._corner_thread.join(timeout=5.0)
+        frame_thread_alive = self._frame_thread is not None and self._frame_thread.is_alive()
+        corner_thread_alive = self._corner_thread is not None and self._corner_thread.is_alive()
+        if frame_thread_alive or corner_thread_alive:
+            logger.error("Camera threads did not stop cleanly; refusing restart")
+        else:
             self._frame_thread = None
-        if self._corner_thread:
-            self._corner_thread.join(timeout=1.0)
             self._corner_thread = None
-        if self._cam:
-            self._cam.stop()
-            self._cam = None
+        self._cam = None
         self._latest_color_frame = None
         self._latest_depth_frame = None
         self._cached_corners = None
@@ -110,108 +133,132 @@ class CameraService:
         self._notify_status()
 
     def _update_frame(self):
-        while self._is_streaming and self._cam:
+        """Dedicated high-speed reader loop to prevent USB buffer overflow."""
+        while self._is_streaming and not self._stop_event.is_set():
+            camera = self._cam
+            if camera is None:
+                break
             try:
-                color, depth = self._cam.get_frame()
+                color, depth = camera.get_frame()
                 if color is not None:
+                    frame_time = time.time()
                     self._latest_color_frame = color
                     self._latest_depth_frame = depth
-                    self._last_frame_time = time.time()
-                    
+                    self._last_frame_time = frame_time
                     self._fps_frame_count += 1
+                    
                     now = time.time()
                     if now - self._fps_last_log_time >= 5.0:
                         elapsed = now - self._fps_last_log_time
-                        logger.info(f"[FPS Monitor] Camera Read: {self._fps_frame_count/elapsed:.1f} fps | Corner Processed: {self._fps_detect_count/elapsed:.1f} fps | Found: {self._fps_found_count/elapsed:.1f} fps")
+                        
+                        detect_times = self._detect_times
+                        draw_times = self._draw_times
+                        self._detect_times = []
+                        self._draw_times = []
+                        
+                        if detect_times:
+                            avg_det = sum(detect_times) / len(detect_times)
+                            max_det = max(detect_times)
+                            min_det = min(detect_times)
+                            det_stats = f" | Detect(ms): avg={avg_det:.1f} min={min_det:.1f} max={max_det:.1f}"
+                        else:
+                            det_stats = ""
+                            
+                        if draw_times:
+                            avg_draw = sum(draw_times) / len(draw_times)
+                            max_draw = max(draw_times)
+                            min_draw = min(draw_times)
+                            draw_stats = f" | Draw(ms): avg={avg_draw:.1f} min={min_draw:.1f} max={max_draw:.1f}"
+                        else:
+                            draw_stats = ""
+
+                        logger.info(
+                            f"[FPS Monitor] Camera Read: {self._fps_frame_count/elapsed:.1f} fps | "
+                            f"Corner Detect: {self._fps_detect_count/elapsed:.1f} fps | "
+                            f"Found: {self._fps_found_count/elapsed:.1f} fps"
+                            f"{det_stats}{draw_stats}"
+                        )
                         self._fps_frame_count = 0
                         self._fps_detect_count = 0
                         self._fps_found_count = 0
                         self._fps_last_log_time = now
-
+                        
                     if not self._last_online_state:
                         self._last_online_state = True
                         self._notify_status()
                 else:
-                    if self._last_online_state and (time.time() - self._last_frame_time >= 3.0):
+                    if self._last_online_state and time.time() - self._last_frame_time >= 3.0:
                         self._last_online_state = False
                         self._notify_status()
-                    time.sleep(0.005)
+                    if self._stop_event.wait(0.05):
+                        break
+                        
+                if camera is not self._cam or not getattr(camera, "_running", True):
+                    self._is_streaming = False
+                    self._cam = None
+                    self._latest_color_frame = None
+                    self._latest_depth_frame = None
+                    self._last_online_state = False
+                    self._notify_status()
+                    break
             except Exception as e:
                 logger.warning(f"Failed to grab frame: {e}")
                 if self._last_online_state:
                     self._last_online_state = False
                     self._notify_status()
-                time.sleep(0.01)
+                if self._stop_event.wait(0.25):
+                    break
 
     def _corner_detector_loop(self):
-        """Asynchronously and efficiently detects chessboard corners without blocking the video stream."""
-        import cv2
-        from services.setting_service import SettingService
+        """Asynchronously detects chessboard corners in background without blocking the video stream."""
+        cv2.setNumThreads(4)
+        cv2.ocl.setUseOpenCL(False)
         
-        # Limit OpenCV to 1 thread in background to avoid starving the CPU
-        cv2.setNumThreads(1)
+        last_detection_interval = 1.0 / CORNER_DETECTION_HZ
+        from core.config import config
+        cols = config.calib_board_cols
+        rows = config.calib_board_rows
+        pattern_size = (cols - 1, rows - 1)
         
-        last_setting_time = 0
-        cols, rows = 9, 12
-        pattern_size = (8, 11)
+        last_detection_time = 0.0
+        flags = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_FAST_CHECK + cv2.CALIB_CB_NORMALIZE_IMAGE
         
-        last_processed_frame_time = 0
-        
-        while self._is_streaming:
+        while self._is_streaming and not self._stop_event.is_set():
             if not self._draw_calibration_corners:
                 self._cached_corners = None
-                time.sleep(0.15)
+                time.sleep(0.1)
                 continue
-                
-            current_frame_time = self._last_frame_time
-            if current_frame_time <= last_processed_frame_time:
-                time.sleep(0.02)
+
+            now = time.time()
+            if now - last_detection_time < last_detection_interval:
+                time.sleep(0.005)
                 continue
-                
-            last_processed_frame_time = current_frame_time
+
             frame = self.get_latest_frame()
             if frame is None:
-                time.sleep(0.05)
+                time.sleep(0.01)
                 continue
-                
-            try:
-                if time.time() - last_setting_time > 3.0:
-                    from core.config import config
-                    cols = config.calib_board_cols
-                    rows = config.calib_board_rows
-                    pattern_size = (cols - 1, rows - 1)
-                    last_setting_time = time.time()
 
-                h, w = frame.shape[:2]
-                # Use original size for best detection reliability as requested by user
-                scale = 1.0
-                small_w = w
-                small_h = h
-                
-                small = cv2.resize(frame, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
-                gray_small = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
-                
-                flags = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_FAST_CHECK + cv2.CALIB_CB_NORMALIZE_IMAGE
-                ret, corners_small = cv2.findChessboardCorners(gray_small, pattern_size, flags=flags)
+            last_detection_time = time.time()
+            corners = None
+            try:
+                t_start_det = time.time()
+                gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                ret, corners = cv2.findChessboardCorners(gray, pattern_size, flags=flags)
+                t_end_det = time.time()
+                self._detect_times.append((t_end_det - t_start_det) * 1000.0)
                 self._fps_detect_count += 1
                 
-                if ret and corners_small is not None:
+                if ret and corners is not None:
                     self._fps_found_count += 1
-                    # Scale corners back to original full resolution
-                    corners_full = corners_small * float(scale)
-                    self._cached_corners = corners_full
+                    self._cached_corners = corners
                     self._cached_corners_time = time.time()
-                    sleep_time = 0.08  # Run fast (12 Hz) when tracking
                 else:
                     if time.time() - self._cached_corners_time > 0.5:
                         self._cached_corners = None
-                    sleep_time = 0.5  # Run slow (2 Hz) when searching to save CPU
             except Exception as e:
                 logger.debug(f"Corner detection error: {e}")
                 self._cached_corners = None
-                sleep_time = 0.5
-                
-            time.sleep(sleep_time)
 
     def get_latest_frame(self) -> Optional[np.ndarray]:
         return self._latest_color_frame
@@ -226,54 +273,55 @@ class CameraService:
 
     def set_calibration_mode(self, enabled: bool):
         self._draw_calibration_corners = enabled
+        logger.info(f"Set calibration mode: {enabled}")
         if not enabled:
             self._cached_corners = None
 
     def generate_mjpeg_stream(self) -> Generator[bytes, None, None]:
+        """Streams real-time MJPEG with overlaid calibration corners using lightweight CPU encoding."""
         from core.config import config
         cols = config.calib_board_cols
         rows = config.calib_board_rows
         pattern_size = (cols - 1, rows - 1)
-
+        
         encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 80]
         last_encoded_frame_time = 0
         last_yield_time = 0
+        stream_interval = 1.0 / HW_FRAME_RATE
 
         while self._is_streaming:
-            if time.time() - last_yield_time < 0.066:
-                time.sleep(0.01)
-                continue
-                
             current_frame_time = self._last_frame_time
             if current_frame_time <= last_encoded_frame_time:
-                time.sleep(0.01)
+                time.sleep(0.005)
+                continue
+                
+            frame = self.get_latest_frame()
+            if frame is None:
+                time.sleep(0.005)
                 continue
                 
             last_encoded_frame_time = current_frame_time
-            frame = self.get_latest_frame()
-            if frame is not None:
-                # If calibration mode is active and corners are fresh, overlay them
-                if self._draw_calibration_corners and self._cached_corners is not None:
-                    if time.time() - self._cached_corners_time < 0.6:
-                        display_frame = frame.copy()
-                        cv2.drawChessboardCorners(display_frame, pattern_size, self._cached_corners, True)
-                    else:
-                        display_frame = frame
-                else:
-                    display_frame = frame
 
-                ret_enc, buffer = cv2.imencode('.jpg', display_frame, encode_param)
-                if ret_enc:
-                    frame_bytes = buffer.tobytes()
-                    try:
-                        yield (b'--frame\r\n'
-                               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-                        last_yield_time = time.time()
-                    except GeneratorExit:
-                        break
-                    except Exception:
-                        break
-            
-            time.sleep(0.033) # 30 FPS stream
+            # If calibration mode is on and corners are found, overlay corners (< 1ms)
+            if self._draw_calibration_corners and self._cached_corners is not None and (time.time() - self._cached_corners_time < 0.6):
+                display_frame = frame.copy()
+                t_start_draw = time.time()
+                cv2.drawChessboardCorners(display_frame, pattern_size, self._cached_corners, True)
+                t_end_draw = time.time()
+                self._draw_times.append((t_end_draw - t_start_draw) * 1000.0)
+            else:
+                display_frame = frame
+
+            ret_enc, buffer = cv2.imencode('.jpg', display_frame, encode_param)
+            if ret_enc:
+                frame_bytes = buffer.tobytes()
+                try:
+                    yield (b'--frame\r\n'
+                           b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+                    last_yield_time = time.time()
+                except GeneratorExit:
+                    break
+                except Exception:
+                    break
 
 camera_service = CameraService()
