@@ -34,7 +34,7 @@ const Layout: React.FC<LayoutProps> = ({
     const connectWs = () => {
       if (isDisposed) return;
       try {
-        ws = new WebSocket(`${WS_BASE}/api/system/camera/ws`);
+        ws = new WebSocket(`${WS_BASE}/api/camera/ws`);
         ws.onopen = () => {};
         ws.onmessage = (event) => {
           try {

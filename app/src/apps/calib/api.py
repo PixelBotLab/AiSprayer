@@ -9,7 +9,7 @@ import os
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "app/src"))
 
-from services.camera_service import camera_service
+from apps.camera.services.camera_service import camera_service
 from services.robot_service import robot_service
 from apps.calib.services.calibration_service import calibration_service
 
@@ -36,13 +36,6 @@ class SpeedReq(BaseModel):
     acc_l: float
     speed_j: float
     acc_j: float
-
-@calib_router.get("/camera/stream")
-def camera_stream():
-    if not camera_service.is_streaming():
-        if not camera_service.start_stream("orbbec"):
-            raise HTTPException(status_code=500, detail="Could not open camera")
-    return StreamingResponse(camera_service.generate_mjpeg_stream(), media_type="multipart/x-mixed-replace; boundary=frame")
 
 @calib_router.post("/robot/connect")
 def connect_robot(req: ConnectRobotReq):
@@ -218,14 +211,12 @@ def get_session(session_id: str):
 
 @calib_router.post("/sessions/{session_id}/samples")
 def add_sample(session_id: str):
-    frame = camera_service.get_latest_frame()
     pose, err = robot_service.get_current_pose()
-    
-    if frame is None or pose is None:
-        raise HTTPException(status_code=400, detail=f"Frame or pose missing: {err}")
+    if pose is None:
+        raise HTTPException(status_code=400, detail=f"Robot pose missing: {err}")
         
     try:
-        count = calibration_service.add_sample(session_id, frame, pose)
+        count = calibration_service.add_sample(session_id, pose)
         return {"samples_count": count}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))

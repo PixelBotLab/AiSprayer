@@ -179,8 +179,8 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
   };
 
   const getFileBadge = (fileName: string) => {
-    if (fileName === 'scan.jpg') return { label: 'RGB', color: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' };
-    if (fileName === 'scan.depth.npy' || fileName === 'scan.depth.bin') return { label: 'DEPTH', color: 'bg-cyan-500/10 text-cyan-400 border-cyan-500/30' };
+    if (fileName === 'scan.color.jpg' || fileName === 'scan.jpg') return { label: 'RGB', color: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' };
+    if (fileName === 'scan.depth.png' || fileName === 'scan.depth.npy' || fileName === 'scan.depth.bin') return { label: 'DEPTH', color: 'bg-cyan-500/10 text-cyan-400 border-cyan-500/30' };
     if (fileName === 'scan.masks.yaml') return { label: 'MASKS', color: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30' };
     if (fileName.includes('auto.poi.path')) return { label: 'AUTO POI', color: 'bg-teal-500/20 text-teal-300 border-teal-500/40' };
     if (fileName.includes('manual.poi.path') || fileName.includes('poi.path')) return { label: 'MANUAL POI', color: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40' };
@@ -222,7 +222,7 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
       icon: Camera,
       iconColor: 'text-blue-400',
       badgeColor: 'bg-blue-500/10 text-blue-400 border-blue-500/30',
-      files: validFiles.filter((f) => ['scan.jpg', 'scan.depth.npy', 'scan.depth.bin', 'scan.pcd', 'scan.params.yaml'].includes(f.name)),
+      files: validFiles.filter((f) => ['scan.color.jpg', 'scan.jpg', 'scan.depth.png', 'scan.depth.npy', 'scan.depth.bin', 'scan.params.yaml'].includes(f.name)),
     },
     {
       id: 'segment',
@@ -249,7 +249,7 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
       files: validFiles.filter(
         (f) =>
           !f.name.includes('path') &&
-          !['scan.jpg', 'scan.depth.npy', 'scan.depth.bin', 'scan.pcd', 'scan.params.yaml', 'scan.masks.yaml', 'scan.masks.jpg'].includes(f.name) &&
+          !['scan.color.jpg', 'scan.jpg', 'scan.depth.png', 'scan.depth.npy', 'scan.depth.bin', 'scan.params.yaml', 'scan.masks.yaml', 'scan.masks.jpg'].includes(f.name) &&
           !f.name.startsWith('scan.mesh') &&
           !f.name.includes('.ply') &&
           !f.name.includes('.stl')

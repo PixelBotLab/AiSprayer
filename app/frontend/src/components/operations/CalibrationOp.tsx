@@ -68,7 +68,7 @@ const CalibrationOp: React.FC = () => {
     }
 
     // Enable calibration mode for live camera feed
-    fetch(`${API_BASE}/api/system/camera/calibration_mode`, {
+    fetch(`${API_BASE}/api/camera/calibration_mode`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ enabled: true })
@@ -76,7 +76,7 @@ const CalibrationOp: React.FC = () => {
 
     return () => {
       calibrationModeTimeout = setTimeout(() => {
-        fetch(`${API_BASE}/api/system/camera/calibration_mode`, {
+        fetch(`${API_BASE}/api/camera/calibration_mode`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ enabled: false })

@@ -57,7 +57,7 @@ class InteractiveReconstructionService:
                                 
                             err = data.get("metadata", {}).get("reprojection_error_mm", 0.0)
                             desc = f"{sess} (Reprojection Error: {err:.3f} mm)"
-                            logger.debug(f"Loaded latest calibration from: {res_path} ({desc})")
+                            logger.info(f"Loaded latest calibration from: {res_path} ({desc})")
                             return T, intr_k, desc
                     except Exception as e:
                         logger.warning(f"Error reading calibration file {res_path}: {e}")
@@ -68,7 +68,7 @@ class InteractiveReconstructionService:
             if cfg.T_camera_to_base is not None:
                 T = np.array(cfg.T_camera_to_base, dtype=np.float64)
                 desc = f"Global config ({cfg.calib_path})"
-                logger.debug(f"Loaded calibration from global config: {desc}")
+                logger.info(f"Loaded calibration from global config: {desc}")
                 return T, None, desc
         except Exception as e:
             logger.warning(f"Error reading global SprayerConfig calibration: {e}")
@@ -126,22 +126,32 @@ class InteractiveReconstructionService:
         logger.info(f"==================================================")
 
         # 1. Check required files
-        depth_path = os.path.join(template_path, "scan.depth.npy")
+        depth_png_path = os.path.join(template_path, "scan.depth.png")
+        depth_npy_path = os.path.join(template_path, "scan.depth.npy")
         masks_path = os.path.join(template_path, "scan.masks.yaml")
         params_path = os.path.join(template_path, "scan.params.yaml")
-        color_path = os.path.join(template_path, "scan.jpg")
+        color_jpg_path = os.path.join(template_path, "scan.color.jpg")
+        color_legacy_path = os.path.join(template_path, "scan.jpg")
+        color_path = color_jpg_path if os.path.exists(color_jpg_path) else (color_legacy_path if os.path.exists(color_legacy_path) else None)
 
-        if not os.path.exists(depth_path):
-            logger.error(f"Reconstruction failed: 'scan.depth.npy' not found in {template_path}")
-            raise FileNotFoundError("Depth data 'scan.depth.npy' not found. Please capture data first.")
+        depth_path = depth_png_path if os.path.exists(depth_png_path) else (depth_npy_path if os.path.exists(depth_npy_path) else None)
+
+        if not depth_path:
+            logger.error(f"Reconstruction failed: 'scan.depth.png' not found in {template_path}")
+            raise FileNotFoundError("Depth data 'scan.depth.png' not found. Please capture data first.")
 
         if not os.path.exists(masks_path):
             logger.error(f"Reconstruction failed: 'scan.masks.yaml' not found in {template_path}")
             raise FileNotFoundError("Segmentation data 'scan.masks.yaml' not found. Please segment and save masks first.")
 
-        # 2. Load Depth Image
+        # 2. Load Depth Image (16-bit)
         try:
-            depth_image = np.load(depth_path)
+            if depth_path.endswith('.npy'):
+                depth_image = np.load(depth_path)
+            else:
+                depth_image = cv2.imread(depth_path, cv2.IMREAD_UNCHANGED)
+            if depth_image is None:
+                raise ValueError(f"cv2.imread returned None for {depth_path}")
             h, w = depth_image.shape
             logger.info(f"Loaded depth map: {w}x{h} (min={depth_image.min()}mm, max={depth_image.max()}mm)")
         except Exception as e:

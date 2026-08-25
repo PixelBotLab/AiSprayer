@@ -77,13 +77,13 @@ class DobotDriver(BaseRobotDriver):
                 r = self.dashboard.DisableRobot()
                 logger.info(f"DisableRobot: {r}")
                 self.dashboard.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Error closing Dobot dashboard: {e}")
         if self._connected and self.move:
             try:
                 self.move.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Error closing Dobot move socket: {e}")
         self._connected = False
 
     def _start_feedback_thread(self):
@@ -108,8 +108,8 @@ class DobotDriver(BaseRobotDriver):
         if self.feedback:
             try:
                 self.feedback.close()
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(f"Error closing feedback socket: {e}")
             self.feedback = None
 
     def _feedback_loop(self):

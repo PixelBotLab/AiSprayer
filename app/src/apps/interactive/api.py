@@ -9,10 +9,8 @@ import logging
 import cv2
 import numpy as np
 import yaml
-import open3d as o3d
 from services.camera_service import camera_service
 from services.robot_service import robot_service
-from core.vision.point_cloud_processor import depth_to_pcd
 from apps.interactive.sam_service import sam_service
 from apps.interactive.reconstruction_service import reconstruction_service
 from apps.interactive.manual_path_service import manual_path_service
@@ -127,49 +125,38 @@ def capture_template_data(name: str):
     if not os.path.exists(template_path):
         raise HTTPException(status_code=404, detail="Template not found")
         
-    color_frame = camera_service.get_latest_frame()
-    depth_frame = camera_service.get_latest_depth()
-    if color_frame is None or depth_frame is None:
-        logger.error(f"Capture failed for template '{name}': Camera frames not available.")
-        raise HTTPException(status_code=503, detail="Camera frames not available")
-        
-    intr_k, intr_d = camera_service.get_intrinsics()
-    if intr_k is None:
+    intr_dict = camera_service.get_intrinsics_dict()
+    if not intr_dict or not intr_dict.get("intrinsic_matrix"):
         logger.error(f"Capture failed for template '{name}': Camera intrinsics not available.")
-        raise HTTPException(status_code=503, detail="Camera intrinsics not available")
+        raise HTTPException(status_code=503, detail="Camera intrinsics not available (camera offline)")
         
     try:
-        logger.info(f"Starting data capture for template '{name}'...")
-        # Save color image
-        color_path = os.path.join(template_path, "scan.jpg")
-        cv2.imwrite(color_path, color_frame)
-        logger.info(f"Saved color image: {color_path} ({color_frame.shape[1]}x{color_frame.shape[0]})")
-        
-        # Save depth data
-        depth_path = os.path.join(template_path, "scan.depth.npy")
-        np.save(depth_path, depth_frame)
-        logger.info(f"Saved depth matrix: {depth_path}")
-        
-        # Convert to point cloud and save
-        intr_list = intr_k.tolist()
-        intr_params = [intr_list[0][0], intr_list[1][1], intr_list[0][2], intr_list[1][2]]
-        points = depth_to_pcd(depth_frame, intr_params)
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(points)
-        pcd_path = os.path.join(template_path, "scan.pcd")
-        o3d.io.write_point_cloud(pcd_path, pcd)
-        logger.info(f"Saved 3D point cloud: {pcd_path} ({len(points)} points)")
-        
-        # Save metadata / params
+        logger.info(f"Starting hardware data capture for template '{name}'...")
+        # 1. 触发 C++ 底层硬件异步无损直接保存 scan.color.jpg 与 scan.depth.png
+        save_res = camera_service.save_frame(
+            save_dir=template_path,
+            color_filename="scan.color.jpg",
+            depth_filename="scan.depth.png",
+            color_format="jpg",
+            save_color=True,
+            save_depth=True,
+            save_info_yaml=False
+        )
+        if not save_res:
+            raise HTTPException(status_code=500, detail="Hardware camera frame capture failed")
+
+        # 2. 动态保存相机参数元数据 (无 hardcode，直接来自驱动/硬件配置)
         meta = {
             "version": "1.0",
             "template_name": name,
             "timestamp": time.time(),
             "camera_params": {
-                "intrinsic_matrix": intr_list,
-                "distortion_coeffs": intr_d.tolist() if intr_d is not None else [],
-                "width": color_frame.shape[1],
-                "height": color_frame.shape[0]
+                "camera_model": intr_dict.get("camera_model", "Orbbec"),
+                "intrinsic_matrix": intr_dict.get("intrinsic_matrix", []),
+                "distortion_coeffs": intr_dict.get("distortion_coeffs", []),
+                "width": intr_dict.get("width", 1280),
+                "height": intr_dict.get("height", 800),
+                "depth_scale": intr_dict.get("depth_scale", 1.0)
             }
         }
         params_path = os.path.join(template_path, "scan.params.yaml")
@@ -381,7 +368,8 @@ def get_session_data(name: str):
         fx, fy = float(k_matrix[0, 0]), float(k_matrix[1, 1])
         cx, cy = float(k_matrix[0, 2]), float(k_matrix[1, 2])
     else:
-        fx, fy, cx, cy = 900.0, 900.0, 640.0, 400.0
+        fx, fy = 611.68, 611.69
+        cx, cy = float(w) / 2.0, float(h) / 2.0
 
     # Convert transform: translate meters -> mm
     T_base_camera = T_cam_to_base_m.copy()
@@ -565,8 +553,9 @@ def get_template_summary(name: str):
     files.sort(key=lambda x: x["ctime"], reverse=True)
 
     file_set = {f["name"] for f in files}
-    has_image = "scan.jpg" in file_set
-    has_depth = "scan.depth.npy" in file_set or "scan.depth.png" in file_set
+    image_filename = "scan.color.jpg" if "scan.color.jpg" in file_set else ("scan.jpg" if "scan.jpg" in file_set else None)
+    has_image = image_filename is not None
+    has_depth = "scan.depth.png" in file_set or "scan.depth.npy" in file_set
     has_mesh = "scan.mesh.ply" in file_set or "scan.mesh.stl" in file_set
 
     t1 = time.time()
@@ -608,6 +597,7 @@ def get_template_summary(name: str):
         "template": name,
         "files": files,
         "has_image": has_image,
+        "image_filename": image_filename,
         "has_depth": has_depth,
         "has_mesh": has_mesh,
         "masks": masks_data,

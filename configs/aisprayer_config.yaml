@@ -4,12 +4,36 @@
 hardware:
   camera:
     model: "orbbec"             # 可选: orbbec, realsense
+    width: 1280
+    height: 800
+    fps: 15
+    enable_depth_align: true    # 启用深度图到彩色图 D2C 对齐
+    
+    # 视频流与硬件硬解/硬编码参数
+    streaming:
+      app: "live"
+      stream_id: "orbbec_color"
+      width: 1280
+      height: 800
+      fps: 30
+      bitrate_kbps: 2500        # H.264 目标码率 (2.5Mbps)
+      gop: 30                   # 1秒关键帧间隔
+    
+    # 微服务服务端口与运行参数
+    server:
+      http_port: 18080          # 相机微服务 REST API 监听端口
+      zlm_http_port: 8008       # WebRTC / HTTP-FLV 监听端口 (独立端口，避免与 FastAPI 8000 冲突)
+      rtsp_port: 8554           # RTSP 监听端口
+      rtmp_port: 1935           # RTMP 监听端口
+      stats_interval_sec: 10    # C++微服务周期性性能/健康统计打印间隔 (秒, 0 表示静默)
+      data_root: "data"         # 相对项目根目录的落地存储目录
+
   robot:
     type: "dobot"               # 可选: inexbot, dobot
     ip: "192.168.5.1"           # 机械臂控制器 IP
     port: 29999                 # 机械臂控制端口 (dobot 默认 29999, inexbot 默认 6001)
-    global_speed_factor: 50    # 示教/远程/运行全局速度百分比 (startup 时 set_speed)
-    max_tcp_speed_mm_s: 2000          # robot cr5最大线速度为2000mm/s, 在控制软件中设置
+    global_speed_factor: 50     # 示教/远程/运行全局速度百分比 (startup 时 set_speed)
+    max_tcp_speed_mm_s: 2000    # robot cr5最大线速度为2000mm/s, 在控制软件中设置
     max_joint_speed_deg_s: [180, 180, 180, 180, 180, 180]  # robot cr5最大关节速度为180度/s, 在控制软件中设置
     robot_urdf: "app/urdf/cr5_robot.urdf" # cr5_robot.urdf/cr5_robot_with_gun.urdf
     robot_tcp: "spray_nozzle_link"
@@ -45,16 +69,12 @@ calib:
   # RootPoint 安全点位数据库路径
   root_points_path: "data/calib/root_points.yaml"
 
-  # 自动对准参数 (Aligner)
-  #align:
-  #  safe_pose: [460.0, 125.0, 1077.0, -3.141, 0.0, 0.0]  # 安全过渡点 [X, Y, Z, A, B, C]
-  #  speed: 50                   # 运动速度 (mm/s)
 # 4. 喷涂作业参数 (Spraying)
 spraying:
-  standoff_dist_mm: 150.0 # 默认喷涂靶距 / TCP standoff 距离 (mm)
-  velocity: 150.0        # 喷涂移动速度 (mm/s)
-  slerp_step_mm: 2.0     # 仿真与运动学验证插值步长 (mm)
-  tool_num: 0            # 默认工具号
+  standoff_dist_mm: 150.0       # 默认喷涂靶距 / TCP standoff 距离 (mm)
+  velocity: 150.0               # 喷涂移动速度 (mm/s)
+  slerp_step_mm: 2.0            # 仿真与运动学验证插值步长 (mm)
+  tool_num: 0                   # 默认工具号
 
   # POI 锚点姿态容差包络 [Rx, Ry, Rz] (单位: ±度, 页面默认值)
   poi_tolerance_rpy_deg: [10.0, 10.0, 180.0]
@@ -62,4 +82,4 @@ spraying:
   # 轨迹优化器候选姿态搜索网格 [min, max, step] (单位: 度)
   grid_tol_x_deg: [-5.0, 5.0, 2.0]       # 绕工具 X 轴倾斜容差与采样步长
   grid_tol_y_deg: [-5.0, 5.0, 2.0]       # 绕工具 Y 轴倾斜容差与采样步长
-  grid_tol_z_deg: [-180.0, 180.0, 10.0]   # 绕工具 Z 轴自旋容差与采样步长
+  grid_tol_z_deg: [-180.0, 180.0, 10.0]  # 绕工具 Z 轴自旋容差与采样步长

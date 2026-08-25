@@ -359,7 +359,8 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       setAutoPoiReport(summary.auto_poi_report || null);
 
       if (summary.has_image) {
-        const newImgUrl = `${API_BASE}/templates/${templateName}/scan.jpg?v=${Date.now()}`;
+        const imgName = summary.image_filename || 'scan.color.jpg';
+        const newImgUrl = `${API_BASE}/templates/${templateName}/${imgName}?v=${Date.now()}`;
         // Image-First barrier: Preload image before dropping backdrop
         await new Promise<void>((resolve) => {
           const img = new Image();

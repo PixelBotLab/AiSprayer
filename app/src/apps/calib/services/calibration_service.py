@@ -19,7 +19,7 @@ from apps.calib.services.calib_solver import (
 )
 from scipy.spatial.transform import Rotation as R_tool
 
-from services.camera_service import camera_service
+from apps.camera.services.camera_service import camera_service
 
 logger = logging.getLogger(__name__)
 
@@ -57,21 +57,20 @@ class CalibrationService:
         b_cfg = self.config.get("calib", {}).get("board", {})
         h_cfg = self.config.get("hardware", {})
         
-        # Get real camera intrinsic via camera_service if connected
-        K, D = camera_service.get_intrinsics()
-        cam_width = 1280
-        cam_height = 800
-        intrinsic_matrix = [[611.68, 0.0, 643.42], [0.0, 611.69, 405.15], [0.0, 0.0, 1.0]]
+        # Get real camera intrinsic & resolution via camera_service if connected
+        intr_dict = camera_service.get_intrinsics_dict()
+        cam_width = h_cfg.get("camera", {}).get("resolution", {}).get("width", 1280)
+        cam_height = h_cfg.get("camera", {}).get("resolution", {}).get("height", 800)
+        intrinsic_matrix = [[611.68, 0.0, float(cam_width) / 2.0], [0.0, 611.69, float(cam_height) / 2.0], [0.0, 0.0, 1.0]]
         distortion_coeffs = [-0.032, 0.034, 0.0003, 0.0003, -0.011]
         
-        if K is not None and D is not None:
-            intrinsic_matrix = K.tolist()
-            distortion_coeffs = D.flatten().tolist()
-            if camera_service._cam:
-                cam_width = getattr(camera_service._cam, "width", 1280)
-                cam_height = getattr(camera_service._cam, "height", 800)
+        if intr_dict and intr_dict.get("intrinsic_matrix"):
+            intrinsic_matrix = intr_dict["intrinsic_matrix"]
+            distortion_coeffs = intr_dict.get("distortion_coeffs", [])
+            cam_width = intr_dict.get("width", cam_width)
+            cam_height = intr_dict.get("height", cam_height)
         else:
-            logger.warning("Camera not connected. Using default intrinsic values for calibration session.")
+            logger.warning("Camera offline. Using config fallback values for calibration session.")
             
         board_rows = b_cfg.get("rows", 12)
         board_cols = b_cfg.get("cols", 9)
@@ -160,7 +159,7 @@ class CalibrationService:
             "result": result_data
         }
 
-    def add_sample(self, session_id: str, image: np.ndarray, robot_pose: List[float]) -> int:
+    def add_sample(self, session_id: str, robot_pose: List[float]) -> int:
         session_path = os.path.join(self.calib_dir, session_id)
         if not os.path.exists(session_path):
             raise Exception(f"Session {session_id} does not exist.")
@@ -175,9 +174,18 @@ class CalibrationService:
         samples = info.get("samples", [])
         sample_id = len(samples) + 1
         img_filename = f"image_{sample_id:03d}.png"
-        img_path = os.path.join(session_path, img_filename)
 
-        cv2.imwrite(img_path, image)
+        # 触发 C++ 底层异步无锁直接写盘保存样本图片 (Zero-Copy)
+        save_res = camera_service.save_frame(
+            save_dir=session_path,
+            color_filename=img_filename,
+            save_color=True,
+            save_depth=False,
+            save_info_yaml=False,
+            color_format="png"
+        )
+        if not save_res:
+            raise Exception("Failed to trigger camera hardware frame persistence.")
 
         # Pose format: [x, y, z, rx, ry, rz]
         sample_entry = {

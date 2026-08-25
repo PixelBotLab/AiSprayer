@@ -68,11 +68,12 @@ from services.log_service import ws_log_handler, log_service
 logging.getLogger().addHandler(ws_log_handler)
 
 from db.database import engine, Base
+from apps.camera.api import camera_router
 from apps.calib.api import calib_router
 from apps.system.api import sys_router
 from apps.interactive.api import router as interactive_router
 from contextlib import asynccontextmanager
-from services.camera_service import camera_service
+from apps.camera.services.camera_service import camera_service
 from services.robot_service import robot_service
 
 # Create DB tables
@@ -109,6 +110,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(camera_router)
 app.include_router(calib_router)
 app.include_router(sys_router)
 app.include_router(interactive_router)

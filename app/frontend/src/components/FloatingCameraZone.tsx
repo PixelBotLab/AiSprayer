@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { Camera, Maximize2, Minimize2, Crosshair, GripHorizontal, X } from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { Camera, Maximize2, Minimize2, Crosshair, GripHorizontal, X, Zap } from 'lucide-react';
+import mpegts from 'mpegts.js';
 import { API_BASE } from '../config';
 
 interface FloatingCameraZoneProps {
@@ -7,18 +8,107 @@ interface FloatingCameraZoneProps {
 }
 
 const FloatingCameraZone: React.FC<FloatingCameraZoneProps> = ({ onClose }) => {
-  const [resolution, setResolution] = useState<{width: number, height: number} | null>(null);
-  const [streamUrl, setStreamUrl] = useState(`${API_BASE}/api/calib/camera/stream`);
-  
+  const [resolution, setResolution] = useState<{ width: number; height: number } | null>(null);
+  const [isStreaming, setIsStreaming] = useState(false);
+
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const playerRef = useRef<mpegts.Player | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
+
   // Floating window state
   const [position, setPosition] = useState({ x: 24, y: 24 });
   const [size, setSize] = useState({ w: 380, h: 280 });
   const [isDragging, setIsDragging] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
   const [isMaximized, setIsMaximized] = useState(false);
-  
+
   const dragRef = useRef({ startX: 0, startY: 0, initialX: 0, initialY: 0 });
   const resizeRef = useRef({ startX: 0, startY: 0, initialW: 0, initialH: 0 });
+
+  // Stream Connection Setup (Zero-CPU RK3588 MPP Hardware Accelerated via MSE / FLV)
+  const startStream = useCallback(() => {
+    if (!videoRef.current || !mpegts.isSupported()) {
+      console.warn('mpegts.js is not supported on this browser');
+      return;
+    }
+
+    if (playerRef.current) {
+      try {
+        playerRef.current.destroy();
+      } catch {
+        // ignore
+      }
+      playerRef.current = null;
+    }
+
+    try {
+      const flvUrl = `${API_BASE}/api/camera/flv`;
+      const player = mpegts.createPlayer(
+        {
+          type: 'flv',
+          isLive: true,
+          url: flvUrl
+        },
+        {
+          enableWorker: true,
+          enableStashBuffer: false,
+          stashInitialSize: 128,
+          liveBufferLatencyChasing: true,
+          liveBufferLatencyMaxLatency: 0.8,
+          liveBufferLatencyMinRemain: 0.1,
+          autoCleanupSourceBuffer: true
+        }
+      );
+
+      playerRef.current = player;
+      player.attachMediaElement(videoRef.current);
+      player.load();
+      const playRes = player.play();
+      if (playRes && typeof (playRes as Promise<void>).catch === 'function') {
+        (playRes as Promise<void>).catch((e: unknown) => {
+          console.warn('Auto play blocked or failed:', e);
+        });
+      }
+
+      player.on(mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
+        console.warn('Stream player error:', errorType, errorDetail, errorInfo);
+        setIsStreaming(false);
+        if (!reconnectTimerRef.current) {
+          reconnectTimerRef.current = window.setTimeout(() => {
+            reconnectTimerRef.current = null;
+            startStream();
+          }, 2000);
+        }
+      });
+    } catch (err) {
+      console.error('Failed to initialize mpegts stream player:', err);
+      if (!reconnectTimerRef.current) {
+        reconnectTimerRef.current = window.setTimeout(() => {
+          reconnectTimerRef.current = null;
+          startStream();
+        }, 2000);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    startStream();
+
+    return () => {
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      if (playerRef.current) {
+        try {
+          playerRef.current.destroy();
+        } catch {
+          // ignore
+        }
+        playerRef.current = null;
+      }
+    };
+  }, [startStream]);
 
   // Handle Dragging
   const handleDragStart = (e: React.MouseEvent) => {
@@ -81,8 +171,8 @@ const FloatingCameraZone: React.FC<FloatingCameraZoneProps> = ({ onClose }) => {
   }, [isDragging, isResizing]);
 
   const containerClasses = isMaximized
-    ? "fixed inset-4 md:inset-6 z-[100] bg-slate-900/98 rounded-xl border border-slate-700/80 shadow-2xl overflow-hidden flex flex-col transition-all duration-200 backdrop-blur-xl animate-in zoom-in-95 duration-150"
-    : "absolute bg-slate-900/95 rounded-xl border border-slate-700/90 shadow-2xl overflow-hidden flex flex-col z-50 transition-shadow duration-200 backdrop-blur-md animate-in fade-in duration-150";
+    ? 'fixed inset-4 md:inset-6 z-[100] bg-slate-900/98 rounded-xl border border-slate-700/80 shadow-2xl overflow-hidden flex flex-col transition-all duration-200 backdrop-blur-xl animate-in zoom-in-95 duration-150'
+    : 'absolute bg-slate-900/95 rounded-xl border border-slate-700/90 shadow-2xl overflow-hidden flex flex-col z-50 transition-shadow duration-200 backdrop-blur-md animate-in fade-in duration-150';
 
   const containerStyles = isMaximized
     ? {}
@@ -97,8 +187,10 @@ const FloatingCameraZone: React.FC<FloatingCameraZoneProps> = ({ onClose }) => {
   return (
     <div className={containerClasses} style={containerStyles}>
       {/* Draggable Header */}
-      <div 
-        className={`shrink-0 px-3.5 py-2 flex justify-between items-center bg-gradient-to-b from-slate-800 to-slate-900 border-b border-slate-700 select-none ${isMaximized ? '' : 'cursor-move'}`}
+      <div
+        className={`shrink-0 px-3.5 py-2 flex justify-between items-center bg-gradient-to-b from-slate-800 to-slate-900 border-b border-slate-700 select-none ${
+          isMaximized ? '' : 'cursor-move'
+        }`}
         onMouseDown={handleDragStart}
       >
         <div className="flex items-center gap-2">
@@ -106,8 +198,15 @@ const FloatingCameraZone: React.FC<FloatingCameraZoneProps> = ({ onClose }) => {
           <h2 className="font-medium text-slate-100 text-xs drop-shadow-md">
             Live Stream {isMaximized ? '(Fullscreen)' : ''}
           </h2>
+
+          {/* Stream Mode Badge */}
+          <span className="flex items-center gap-0.5 px-1.5 py-0.5 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded text-[9px] font-mono tracking-tight font-semibold">
+            <Zap size={9} className="text-emerald-400 fill-emerald-400" />
+            MPP HW
+          </span>
+
           <span className="relative flex h-1.5 w-1.5 ml-1">
-            {resolution ? (
+            {isStreaming ? (
               <>
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
                 <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.7)]"></span>
@@ -124,11 +223,11 @@ const FloatingCameraZone: React.FC<FloatingCameraZoneProps> = ({ onClose }) => {
             className={`transition-colors rounded p-1 hover:bg-slate-700 hover:text-white ${
               isMaximized ? 'bg-blue-600/30 text-blue-300' : ''
             }`}
-            title={isMaximized ? "Exit Fullscreen" : "Fullscreen"}
+            title={isMaximized ? 'Exit Fullscreen' : 'Fullscreen'}
           >
             {isMaximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
           </button>
-          
+
           {onClose && (
             <button
               onClick={onClose}
@@ -138,63 +237,64 @@ const FloatingCameraZone: React.FC<FloatingCameraZoneProps> = ({ onClose }) => {
               <X size={14} />
             </button>
           )}
-          
+
           {!isMaximized && <GripHorizontal size={14} className="opacity-50" />}
         </div>
       </div>
-      
+
       {/* Video Content */}
       <div className="flex-1 bg-black flex items-center justify-center relative overflow-hidden group">
         {/* Resolution Overlay */}
         {resolution && (
-          <div className="absolute bottom-3 left-3 z-20 bg-slate-900/70 backdrop-blur-md px-2 py-1 rounded border border-slate-700/50 text-[10px] font-mono text-emerald-400 shadow pointer-events-none">
-            {resolution.width}×{resolution.height}
+          <div className="absolute bottom-3 left-3 z-20 bg-slate-900/70 backdrop-blur-md px-2 py-1 rounded border border-slate-700/50 text-[10px] font-mono text-emerald-400 shadow pointer-events-none flex items-center gap-1.5">
+            <span>
+              {resolution.width}×{resolution.height}
+            </span>
+            <span className="text-slate-400 font-sans text-[9px]">H.264 HW</span>
           </div>
         )}
 
-        {/* Real Camera Stream */}
-        <img 
-          src={streamUrl} 
-          alt="Camera Stream" 
-          className="absolute inset-0 w-full h-full object-contain z-0 transition-opacity duration-300 pointer-events-none"
-          onError={(e) => {
-            e.currentTarget.style.opacity = '0';
-            setResolution(null);
-            const fallback = document.getElementById('camera-fallback');
-            if (fallback) fallback.style.display = 'flex';
-            
-            setTimeout(() => {
-              setStreamUrl(`${API_BASE}/api/calib/camera/stream?t=${Date.now()}`);
-            }, 3000);
-          }}
-          onLoad={(e) => {
-            e.currentTarget.style.opacity = '1';
+        {/* Hardware Accelerated WebRTC Video Element */}
+        <video
+          ref={videoRef}
+          autoPlay
+          playsInline
+          muted
+          className={`absolute inset-0 w-full h-full object-contain z-0 pointer-events-none transition-opacity duration-300 ${
+            isStreaming ? 'opacity-100' : 'opacity-0'
+          }`}
+          onLoadedMetadata={(e) => {
+            const vid = e.currentTarget;
             setResolution({
-              width: e.currentTarget.naturalWidth,
-              height: e.currentTarget.naturalHeight
+              width: vid.videoWidth,
+              height: vid.videoHeight
             });
-            const fallback = document.getElementById('camera-fallback');
-            if (fallback) fallback.style.display = 'none';
+            setIsStreaming(true);
           }}
         />
-        
+
         {/* Camera Reticle Overlay */}
         <div className="absolute inset-0 border-[1px] border-blue-500/10 m-3 rounded pointer-events-none z-10">
           <div className="absolute top-0 left-0 w-6 h-6 border-t-2 border-l-2 border-blue-500/40 rounded-tl"></div>
           <div className="absolute top-0 right-0 w-6 h-6 border-t-2 border-r-2 border-blue-500/40 rounded-tr"></div>
           <div className="absolute bottom-0 left-0 w-6 h-6 border-b-2 border-l-2 border-blue-500/40 rounded-bl"></div>
           <div className="absolute bottom-0 right-0 w-6 h-6 border-b-2 border-r-2 border-blue-500/40 rounded-br"></div>
-          <Crosshair className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-blue-500/20 w-10 h-10" strokeWidth={1} />
+          <Crosshair
+            className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 text-blue-500/20 w-10 h-10"
+            strokeWidth={1}
+          />
         </div>
-        
-        <div id="camera-fallback" className="text-slate-500 flex flex-col items-center z-0 transition-opacity duration-300 pointer-events-none">
-          <Camera size={36} strokeWidth={1} className="mb-2 opacity-20" />
-          <p className="text-xs tracking-wide">Waiting for camera signal...</p>
-        </div>
+
+        {!isStreaming && (
+          <div className="text-slate-500 flex flex-col items-center z-0 pointer-events-none">
+            <Camera size={36} strokeWidth={1} className="mb-2 opacity-20" />
+            <p className="text-xs tracking-wide">Connecting WebRTC Hardware Stream...</p>
+          </div>
+        )}
 
         {/* Resize Handle */}
         {!isMaximized && (
-          <div 
+          <div
             className="absolute bottom-0 right-0 w-5 h-5 cursor-se-resize flex items-end justify-end p-1 z-30 group"
             onMouseDown={handleResizeStart}
           >
@@ -207,3 +307,4 @@ const FloatingCameraZone: React.FC<FloatingCameraZoneProps> = ({ onClose }) => {
 };
 
 export default FloatingCameraZone;
+

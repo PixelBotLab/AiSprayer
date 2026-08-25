@@ -5,6 +5,7 @@ __pycache__/
 .Python
 env/
 build/
+bin/
 develop-eggs/
 dist/
 downloads/
@@ -67,3 +68,6 @@ data/runs/0/output/
 # 模型文件 (可选：如果模型很大不建议进 Git，可以保持忽略)
 # models/*.pt
 # models/*.onnx
+
+third_party/install
+third_party/src

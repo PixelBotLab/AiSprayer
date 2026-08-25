@@ -38,13 +38,15 @@ class SAMService:
         return self.sessions[template_name]
 
     def init_template(self, template_path: str, template_name: str) -> bool:
-        """Loads scan.jpg for the template and sets it in the predictor."""
-        image_path = os.path.join(template_path, "scan.jpg")
-        if not os.path.exists(image_path):
-            logger.warning(f"[SAM] Image not found for template '{template_name}': {image_path}")
+        """Loads scan.color.jpg (or legacy scan.jpg) for the template and sets it in the predictor."""
+        color_jpg = os.path.join(template_path, "scan.color.jpg")
+        legacy_jpg = os.path.join(template_path, "scan.jpg")
+        image_path = color_jpg if os.path.exists(color_jpg) else (legacy_jpg if os.path.exists(legacy_jpg) else None)
+        if not image_path:
+            logger.warning(f"[SAM] Image not found for template '{template_name}' (checked scan.color.jpg and scan.jpg)")
             return False
             
-        logger.info(f"[SAM] Loading scan.jpg for template '{template_name}'...")
+        logger.info(f"[SAM] Loading {os.path.basename(image_path)} for template '{template_name}'...")
         t0 = time.time()
         image_bgr = cv2.imread(image_path)
         if image_bgr is None:
