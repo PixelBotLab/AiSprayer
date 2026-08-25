@@ -43,13 +43,9 @@ bool ZlmStreamer::init(const AppConfig& config) {
     uint16_t rtsp_p = mk_rtsp_server_start(config_.rtsp_port, 0);
     LOG_INFO("ZLM", "Started RTSP server on port: ", rtsp_p);
 
-    // Start WebRTC / HTTP Server
+    // Start HTTP-FLV Server
     uint16_t http_p = mk_http_server_start(config_.zlm_http_port, 0);
-    LOG_INFO("ZLM", "Started ZLM HTTP/WebRTC server on port: ", http_p);
-
-    // Start RTC Server for WebRTC
-    uint16_t rtc_p = mk_rtc_server_start(config_.zlm_http_port);
-    LOG_INFO("ZLM", "Started WebRTC RTC server on port: ", rtc_p);
+    LOG_INFO("ZLM", "Started ZLM HTTP/FLV server on port: ", http_p);
 
     // Start RTMP Server
     uint16_t rtmp_p = mk_rtmp_server_start(config_.rtmp_port, 0);

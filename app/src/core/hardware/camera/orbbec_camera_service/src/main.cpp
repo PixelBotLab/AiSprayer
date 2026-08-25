@@ -283,7 +283,7 @@ int main(int argc, char** argv) {
             LOG_INFO("Status", "  * [Total Pipeline]: ", ss_total.str());
             LOG_INFO("Status", "  Hardware Engines: RGA2D=ACTIVE | MPP=ACTIVE | Mali-GPU=", 
                      (corner_detector->isGpuAccelerated() ? "ACTIVE (OpenCL)" : "Disabled"));
-            LOG_INFO("Status", "  Endpoints: WebRTC: ", s_info.webrtc_url, " | RTSP: ", s_info.rtsp_url);
+            LOG_INFO("Status", "  Endpoints: HTTP-FLV: ", s_info.http_flv_url, " | RTSP: ", s_info.rtsp_url);
 
             stats.reset();
             last_log_time = now;
