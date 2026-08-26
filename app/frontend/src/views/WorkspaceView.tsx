@@ -109,7 +109,7 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({
         </div>
 
         {/* Bottom Left: Console Log Zone */}
-        <div className="h-[350px] shrink-0 min-h-0">
+        <div className="h-[420px] shrink-0 min-h-0">
           <ConsoleLogZone />
         </div>
       </div>
