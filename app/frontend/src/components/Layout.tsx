@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Settings, Crosshair, Route, ListTodo, Maximize2, Minimize2, Camera, SprayCan, Sparkles } from 'lucide-react';
+import { Settings, Crosshair, Route, ListTodo, Maximize2, Minimize2, Camera } from 'lucide-react';
 import { WS_BASE } from '../config';
 
 interface LayoutProps {
@@ -9,6 +9,50 @@ interface LayoutProps {
   isCameraVisible?: boolean;
   setIsCameraVisible?: (visible: boolean) => void;
 }
+
+// Dedicated SVG Logo representing AI Robotic Spraying (Articulated Robot Arm + Atomizing Spray Gun + AI Sparkle)
+const AiRobotSprayerLogo: React.FC<{ size?: number; className?: string }> = ({ size = 22, className = '' }) => (
+  <svg
+    width={size}
+    height={size}
+    viewBox="0 0 24 24"
+    fill="none"
+    xmlns="http://www.w3.org/2000/svg"
+    className={className}
+  >
+    {/* Base Pedestal */}
+    <path d="M2.5 21H8.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    <circle cx="5.5" cy="18" r="1.5" stroke="currentColor" strokeWidth="1.5" fill="currentColor" fillOpacity="0.25" />
+
+    {/* Robot Arm Joint 1 -> Elbow Joint 2 */}
+    <path d="M5.5 16.5L8.5 11" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    <circle cx="8.5" cy="11" r="1.5" stroke="currentColor" strokeWidth="1.5" fill="currentColor" fillOpacity="0.35" />
+
+    {/* Elbow Joint 2 -> Wrist Joint 3 */}
+    <path d="M9.8 10L14 7.2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    <circle cx="14" cy="7.2" r="1.2" stroke="currentColor" strokeWidth="1.5" fill="currentColor" fillOpacity="0.45" />
+
+    {/* Spray Gun End-Effector */}
+    <path d="M14.5 5.8L17.2 7.5L16 9.5L13.3 7.8Z" fill="currentColor" />
+    <path d="M17.2 7.5L19 6.2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+
+    {/* Atomized Spray Fan Jet & Droplets */}
+    <path d="M20 4.8L23.5 2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeDasharray="1 1.5" />
+    <path d="M20.5 6.2H24" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    <path d="M20 7.8L23.5 10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeDasharray="1 1.5" />
+    <circle cx="22.5" cy="4.2" r="0.6" fill="currentColor" />
+    <circle cx="23.5" cy="6.2" r="0.6" fill="currentColor" />
+    <circle cx="22.5" cy="8.5" r="0.6" fill="currentColor" />
+
+    {/* AI Intelligence Sparkle */}
+    <path
+      d="M9 1.5L9.6 3L11.1 3.6L9.6 4.2L9 5.7L8.4 4.2L6.9 3.6L8.4 3L9 1.5Z"
+      fill="#FBBF24"
+      stroke="#F59E0B"
+      strokeWidth="0.4"
+    />
+  </svg>
+);
 
 const Layout: React.FC<LayoutProps> = ({ 
   children, 
@@ -110,9 +154,8 @@ const Layout: React.FC<LayoutProps> = ({
       >
         <div className="border-b border-slate-800 p-5 shrink-0 flex items-center justify-center">
           <div className="flex items-center justify-center relative group">
-            <div className="flex shrink-0 h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 shadow-lg shadow-blue-500/25 ml-[-4px] relative">
-              <SprayCan size={18} className="text-white" />
-              <Sparkles size={9} className="absolute top-1 right-1 text-amber-300 fill-amber-300 animate-pulse" />
+            <div className="flex shrink-0 h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 shadow-lg shadow-blue-500/25 ml-[-4px]">
+              <AiRobotSprayerLogo size={21} className="text-white" />
             </div>
             <div className={tooltipClass}>
               AiSprayer
