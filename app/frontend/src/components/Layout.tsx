@@ -10,8 +10,8 @@ interface LayoutProps {
   setIsCameraVisible?: (visible: boolean) => void;
 }
 
-// Dedicated SVG Logo representing AI Robotic Spraying (Bold Industrial Robot Arm + Spray Gun + AI Sparkle)
-const AiRobotSprayerLogo: React.FC<{ size?: number; className?: string }> = ({ size = 22, className = '' }) => (
+// Professional AI Robotic Spraying (AiSprayer) Brand Logo
+const AiRobotSprayerLogo: React.FC<{ size?: number; className?: string }> = ({ size = 24, className = '' }) => (
   <svg
     width={size}
     height={size}
@@ -20,42 +20,43 @@ const AiRobotSprayerLogo: React.FC<{ size?: number; className?: string }> = ({ s
     xmlns="http://www.w3.org/2000/svg"
     className={className}
   >
-    {/* 1. Heavy Industrial Pedestal Base */}
-    <rect x="2" y="19.5" width="8.5" height="2.5" rx="1" fill="currentColor" />
-    <path d="M4 19.5V17H8.5V19.5" fill="currentColor" />
+    {/* 1. Heavy Industrial Base Pedestal */}
+    <path d="M2.5 21.5H9.5" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+    <path d="M4 21.5V18.5H8V21.5" fill="currentColor" />
 
-    {/* 2. Heavy Shoulder Joint */}
-    <circle cx="6.2" cy="15" r="2.8" fill="currentColor" />
-    <circle cx="6.2" cy="15" r="1.1" fill="#1e293b" />
+    {/* 2. Shoulder Revolute Joint */}
+    <circle cx="6" cy="16" r="2.4" stroke="currentColor" strokeWidth="1.8" fill="currentColor" fillOpacity="0.25" />
+    <circle cx="6" cy="16" r="0.8" fill="currentColor" />
 
-    {/* 3. Thick Upper Arm Link */}
-    <path d="M6.2 15L9.6 8.8" stroke="currentColor" strokeWidth="3.6" strokeLinecap="round" />
+    {/* 3. Articulated Upper Arm Link */}
+    <path d="M6 16L10.5 9" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
 
-    {/* 4. Heavy Elbow Joint */}
-    <circle cx="9.6" cy="8.8" r="2.6" fill="currentColor" />
-    <circle cx="9.6" cy="8.8" r="1.0" fill="#1e293b" />
+    {/* 4. Elbow Joint with AI Neural Pulse Ring */}
+    <circle cx="10.5" cy="9" r="2.2" stroke="currentColor" strokeWidth="1.8" fill="currentColor" fillOpacity="0.25" />
+    <circle cx="10.5" cy="9" r="0.8" fill="#FBBF24" />
 
-    {/* 5. Thick Forearm Link */}
-    <path d="M9.6 8.8L14.2 6.4" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round" />
+    {/* 5. Forearm Manipulator Link */}
+    <path d="M10.5 9L15.5 6.5" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
 
-    {/* 6. Solid Spray Gun End-Effector */}
-    <path d="M13.6 4.4L17.6 6.8L16.2 9.2L12.2 6.8Z" fill="currentColor" />
-    <rect x="16.8" y="5.6" width="2.4" height="2.6" rx="0.5" transform="rotate(-30 16.8 5.6)" fill="currentColor" />
+    {/* 6. Precision Spray Gun End-Effector */}
+    <path d="M14.5 4.5L18 6.5L16.5 9L13 7Z" fill="currentColor" />
+    <path d="M18 6.5L19.5 5.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
 
-    {/* 7. Atomized Spray Fan Jet & Droplets */}
-    <path d="M19.6 4.2L23.6 2" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
-    <path d="M20 6.5H24" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
-    <path d="M19.6 8.8L23.6 11" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
-    <circle cx="21.2" cy="2.8" r="0.9" fill="currentColor" />
-    <circle cx="23.2" cy="6.5" r="0.9" fill="currentColor" />
-    <circle cx="21.2" cy="10.2" r="0.9" fill="currentColor" />
+    {/* 7. Atomized Spray Fan Cone & Fine Mist Particles */}
+    <path d="M20.2 4.2L23.8 2" stroke="#38BDF8" strokeWidth="1.8" strokeLinecap="round" strokeDasharray="1.5 1.5" />
+    <path d="M20.5 6.2H24" stroke="#38BDF8" strokeWidth="2" strokeLinecap="round" />
+    <path d="M20.2 8.2L23.8 10.4" stroke="#38BDF8" strokeWidth="1.8" strokeLinecap="round" strokeDasharray="1.5 1.5" />
+    
+    <circle cx="21.8" cy="2.8" r="0.75" fill="#38BDF8" />
+    <circle cx="23.2" cy="6.2" r="0.75" fill="#38BDF8" />
+    <circle cx="21.8" cy="9.6" r="0.75" fill="#38BDF8" />
 
-    {/* 8. Glowing AI Star (Prominent Gold Sparkle) */}
+    {/* 8. AI Intelligence Star (Top Golden Sparkle) */}
     <path
-      d="M9 1L9.9 2.8L11.7 3.6L9.9 4.4L9 6.2L8.1 4.4L6.3 3.6L8.1 2.8L9 1Z"
+      d="M10.5 1L11.3 2.6L12.9 3.4L11.3 4.2L10.5 5.8L9.7 4.2L8.1 3.4L9.7 2.6L10.5 1Z"
       fill="#FBBF24"
       stroke="#F59E0B"
-      strokeWidth="0.5"
+      strokeWidth="0.4"
     />
   </svg>
 );
