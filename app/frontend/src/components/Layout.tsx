@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Settings, Crosshair, Route, ListTodo, Maximize2, Minimize2, Camera } from 'lucide-react';
+import { Settings, Crosshair, Route, ListTodo, Maximize2, Minimize2, Camera, SprayCan, Sparkles } from 'lucide-react';
 import { WS_BASE } from '../config';
 
 interface LayoutProps {
@@ -110,10 +110,9 @@ const Layout: React.FC<LayoutProps> = ({
       >
         <div className="border-b border-slate-800 p-5 shrink-0 flex items-center justify-center">
           <div className="flex items-center justify-center relative group">
-            <div className="flex shrink-0 h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 shadow-lg shadow-blue-500/20 ml-[-4px]">
-              <svg className="h-5 w-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
-              </svg>
+            <div className="flex shrink-0 h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 shadow-lg shadow-blue-500/25 ml-[-4px] relative">
+              <SprayCan size={18} className="text-white" />
+              <Sparkles size={9} className="absolute top-1 right-1 text-amber-300 fill-amber-300 animate-pulse" />
             </div>
             <div className={tooltipClass}>
               AiSprayer
