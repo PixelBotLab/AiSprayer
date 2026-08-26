@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Settings, Crosshair, MousePointer2, GitBranch, Box, Maximize2, Minimize2, Camera } from 'lucide-react';
+import { Settings, Crosshair, Route, GitBranch, Box, Maximize2, Minimize2, Camera } from 'lucide-react';
 import { WS_BASE } from '../config';
 
 interface LayoutProps {
@@ -18,7 +18,7 @@ const Layout: React.FC<LayoutProps> = ({
   setIsCameraVisible 
 }) => {
   const tabs = [
-    { id: 'interactive', label: 'Interactive Teach', icon: MousePointer2 },
+    { id: 'interactive', label: 'Interactive Teach', icon: Route },
     { id: 'auto_planner', label: '3D Auto Planner', icon: GitBranch },
     { id: 'digital_twin', label: 'Digital Twin', icon: Box },
     { id: 'calib', label: 'Calibration', icon: Crosshair },
