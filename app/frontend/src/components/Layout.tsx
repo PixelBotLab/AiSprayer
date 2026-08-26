@@ -18,7 +18,7 @@ const Layout: React.FC<LayoutProps> = ({
   setIsCameraVisible 
 }) => {
   const tabs = [
-    { id: 'interactive', label: 'Interactive Teach', icon: Route },
+    { id: 'interactive', label: 'Interactive Teach', icon: Route, iconClassName: 'rotate-90' },
     { id: 'auto_planner', label: '3D Auto Planner', icon: GitBranch },
     { id: 'digital_twin', label: 'Digital Twin', icon: Box },
     { id: 'calib', label: 'Calibration', icon: Crosshair },
@@ -138,7 +138,7 @@ const Layout: React.FC<LayoutProps> = ({
               >
                 <div className="shrink-0 flex items-center justify-center relative ml-[-2px]">
                   {isActive && <div className="absolute -left-3 w-1 h-5 bg-blue-500 rounded-r-full"></div>}
-                  <Icon size={18} className={isActive ? "text-blue-400" : "text-slate-500 group-hover:text-slate-300"} />
+                  <Icon size={18} className={`${tab.iconClassName || ''} ${isActive ? "text-blue-400" : "text-slate-500 group-hover:text-slate-300"}`} />
                 </div>
                 <div className={tooltipClass}>
                   {tab.label}
