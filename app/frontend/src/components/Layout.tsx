@@ -10,53 +10,50 @@ interface LayoutProps {
   setIsCameraVisible?: (visible: boolean) => void;
 }
 
-// Professional AI Robotic Spraying (AiSprayer) Brand Logo
-const AiRobotSprayerLogo: React.FC<{ size?: number; className?: string }> = ({ size = 24, className = '' }) => (
+// Clean Fine-Line Flat Logo representing AI Robotic Spraying (AiSprayer)
+const AiRobotSprayerLogo: React.FC<{ size?: number; className?: string }> = ({ size = 25, className = '' }) => (
   <svg
     width={size}
     height={size}
     viewBox="0 0 24 24"
     fill="none"
-    xmlns="http://www.w3.org/2000/svg"
+    stroke="currentColor"
+    strokeWidth="1.5"
+    strokeLinecap="round"
+    strokeLinejoin="round"
     className={className}
   >
-    {/* 1. Heavy Industrial Base Pedestal */}
-    <path d="M2.5 21.5H9.5" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
-    <path d="M4 21.5V18.5H8V21.5" fill="currentColor" />
+    {/* 1. Flat Base & Mounting Pedestal */}
+    <path d="M2 21h7.5" />
+    <path d="M3.8 21v-2.8h3.8v2.8" />
 
     {/* 2. Shoulder Revolute Joint */}
-    <circle cx="6" cy="16" r="2.4" stroke="currentColor" strokeWidth="1.8" fill="currentColor" fillOpacity="0.25" />
-    <circle cx="6" cy="16" r="0.8" fill="currentColor" />
+    <circle cx="5.7" cy="15.2" r="2" />
 
     {/* 3. Articulated Upper Arm Link */}
-    <path d="M6 16L10.5 9" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+    <path d="M5.7 13.2L9.5 6.5" />
 
-    {/* 4. Elbow Joint with AI Neural Pulse Ring */}
-    <circle cx="10.5" cy="9" r="2.2" stroke="currentColor" strokeWidth="1.8" fill="currentColor" fillOpacity="0.25" />
-    <circle cx="10.5" cy="9" r="0.8" fill="#FBBF24" />
+    {/* 4. Elbow Joint */}
+    <circle cx="9.5" cy="6.5" r="1.8" />
 
-    {/* 5. Forearm Manipulator Link */}
-    <path d="M10.5 9L15.5 6.5" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+    {/* 5. Forearm Link */}
+    <path d="M11.3 6.5H15.5" />
 
-    {/* 6. Precision Spray Gun End-Effector */}
-    <path d="M14.5 4.5L18 6.5L16.5 9L13 7Z" fill="currentColor" />
-    <path d="M18 6.5L19.5 5.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+    {/* 6. Spray Gun Nozzle End-Effector */}
+    <path d="M15.5 4.8v3.4l2.6-1.7z" />
+    <path d="M18.1 6.5h1.4" />
 
-    {/* 7. Atomized Spray Fan Cone & Fine Mist Particles */}
-    <path d="M20.2 4.2L23.8 2" stroke="#38BDF8" strokeWidth="1.8" strokeLinecap="round" strokeDasharray="1.5 1.5" />
-    <path d="M20.5 6.2H24" stroke="#38BDF8" strokeWidth="2" strokeLinecap="round" />
-    <path d="M20.2 8.2L23.8 10.4" stroke="#38BDF8" strokeWidth="1.8" strokeLinecap="round" strokeDasharray="1.5 1.5" />
-    
-    <circle cx="21.8" cy="2.8" r="0.75" fill="#38BDF8" />
-    <circle cx="23.2" cy="6.2" r="0.75" fill="#38BDF8" />
-    <circle cx="21.8" cy="9.6" r="0.75" fill="#38BDF8" />
+    {/* 7. Fine-Line Atomized Spray Fan Jet & Mist */}
+    <path d="M20.2 4.3L23.5 2.2" stroke="#38bdf8" strokeDasharray="1.5 1.5" />
+    <path d="M20.5 6.5H23.8" stroke="#38bdf8" />
+    <path d="M20.2 8.7L23.5 10.8" stroke="#38bdf8" strokeDasharray="1.5 1.5" />
 
     {/* 8. AI Intelligence Star (Top Golden Sparkle) */}
     <path
-      d="M10.5 1L11.3 2.6L12.9 3.4L11.3 4.2L10.5 5.8L9.7 4.2L8.1 3.4L9.7 2.6L10.5 1Z"
+      d="M9.5 1L10.2 2.4L11.6 3.1L10.2 3.8L9.5 5.2L8.8 3.8L7.4 3.1L8.8 2.4Z"
       fill="#FBBF24"
       stroke="#F59E0B"
-      strokeWidth="0.4"
+      strokeWidth="0.3"
     />
   </svg>
 );
@@ -162,7 +159,7 @@ const Layout: React.FC<LayoutProps> = ({
         <div className="border-b border-slate-800 p-5 shrink-0 flex items-center justify-center">
           <div className="flex items-center justify-center relative group">
             <div className="flex shrink-0 h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 shadow-lg shadow-blue-500/25 ml-[-4px]">
-              <AiRobotSprayerLogo size={21} className="text-white" />
+              <AiRobotSprayerLogo size={24} className="text-white" />
             </div>
             <div className={tooltipClass}>
               AiSprayer
