@@ -10,7 +10,7 @@ interface LayoutProps {
   setIsCameraVisible?: (visible: boolean) => void;
 }
 
-// Dedicated SVG Logo representing AI Robotic Spraying (Articulated Robot Arm + Atomizing Spray Gun + AI Sparkle)
+// Dedicated SVG Logo representing AI Robotic Spraying (Bold Industrial Robot Arm + Spray Gun + AI Sparkle)
 const AiRobotSprayerLogo: React.FC<{ size?: number; className?: string }> = ({ size = 22, className = '' }) => (
   <svg
     width={size}
@@ -20,36 +20,42 @@ const AiRobotSprayerLogo: React.FC<{ size?: number; className?: string }> = ({ s
     xmlns="http://www.w3.org/2000/svg"
     className={className}
   >
-    {/* Base Pedestal */}
-    <path d="M2.5 21H8.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-    <circle cx="5.5" cy="18" r="1.5" stroke="currentColor" strokeWidth="1.5" fill="currentColor" fillOpacity="0.25" />
+    {/* 1. Heavy Industrial Pedestal Base */}
+    <rect x="2" y="19.5" width="8.5" height="2.5" rx="1" fill="currentColor" />
+    <path d="M4 19.5V17H8.5V19.5" fill="currentColor" />
 
-    {/* Robot Arm Joint 1 -> Elbow Joint 2 */}
-    <path d="M5.5 16.5L8.5 11" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-    <circle cx="8.5" cy="11" r="1.5" stroke="currentColor" strokeWidth="1.5" fill="currentColor" fillOpacity="0.35" />
+    {/* 2. Heavy Shoulder Joint */}
+    <circle cx="6.2" cy="15" r="2.8" fill="currentColor" />
+    <circle cx="6.2" cy="15" r="1.1" fill="#1e293b" />
 
-    {/* Elbow Joint 2 -> Wrist Joint 3 */}
-    <path d="M9.8 10L14 7.2" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-    <circle cx="14" cy="7.2" r="1.2" stroke="currentColor" strokeWidth="1.5" fill="currentColor" fillOpacity="0.45" />
+    {/* 3. Thick Upper Arm Link */}
+    <path d="M6.2 15L9.6 8.8" stroke="currentColor" strokeWidth="3.6" strokeLinecap="round" />
 
-    {/* Spray Gun End-Effector */}
-    <path d="M14.5 5.8L17.2 7.5L16 9.5L13.3 7.8Z" fill="currentColor" />
-    <path d="M17.2 7.5L19 6.2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    {/* 4. Heavy Elbow Joint */}
+    <circle cx="9.6" cy="8.8" r="2.6" fill="currentColor" />
+    <circle cx="9.6" cy="8.8" r="1.0" fill="#1e293b" />
 
-    {/* Atomized Spray Fan Jet & Droplets */}
-    <path d="M20 4.8L23.5 2.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeDasharray="1 1.5" />
-    <path d="M20.5 6.2H24" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-    <path d="M20 7.8L23.5 10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeDasharray="1 1.5" />
-    <circle cx="22.5" cy="4.2" r="0.6" fill="currentColor" />
-    <circle cx="23.5" cy="6.2" r="0.6" fill="currentColor" />
-    <circle cx="22.5" cy="8.5" r="0.6" fill="currentColor" />
+    {/* 5. Thick Forearm Link */}
+    <path d="M9.6 8.8L14.2 6.4" stroke="currentColor" strokeWidth="3.2" strokeLinecap="round" />
 
-    {/* AI Intelligence Sparkle */}
+    {/* 6. Solid Spray Gun End-Effector */}
+    <path d="M13.6 4.4L17.6 6.8L16.2 9.2L12.2 6.8Z" fill="currentColor" />
+    <rect x="16.8" y="5.6" width="2.4" height="2.6" rx="0.5" transform="rotate(-30 16.8 5.6)" fill="currentColor" />
+
+    {/* 7. Atomized Spray Fan Jet & Droplets */}
+    <path d="M19.6 4.2L23.6 2" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+    <path d="M20 6.5H24" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
+    <path d="M19.6 8.8L23.6 11" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+    <circle cx="21.2" cy="2.8" r="0.9" fill="currentColor" />
+    <circle cx="23.2" cy="6.5" r="0.9" fill="currentColor" />
+    <circle cx="21.2" cy="10.2" r="0.9" fill="currentColor" />
+
+    {/* 8. Glowing AI Star (Prominent Gold Sparkle) */}
     <path
-      d="M9 1.5L9.6 3L11.1 3.6L9.6 4.2L9 5.7L8.4 4.2L6.9 3.6L8.4 3L9 1.5Z"
+      d="M9 1L9.9 2.8L11.7 3.6L9.9 4.4L9 6.2L8.1 4.4L6.3 3.6L8.1 2.8L9 1Z"
       fill="#FBBF24"
       stroke="#F59E0B"
-      strokeWidth="0.4"
+      strokeWidth="0.5"
     />
   </svg>
 );
