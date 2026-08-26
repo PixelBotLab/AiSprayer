@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { ListTodo } from 'lucide-react';
 import FloatingCameraZone from '../components/FloatingCameraZone';
 import RobotZone from '../components/RobotZone';
 import ConsoleLogZone from '../components/ConsoleLogZone';
@@ -80,10 +81,13 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({
             onSimulationJointsChange={(joints) => setSimJoints(joints)}
           />
         );
-      case 'auto_planner':
-        return <div className="p-8 text-slate-400 bg-slate-900/50 rounded-xl border border-slate-800 w-full h-full flex items-center justify-center">3D Auto Planner (Coming Soon)</div>;
-      case 'digital_twin':
-        return <div className="p-8 text-slate-400 bg-slate-900/50 rounded-xl border border-slate-800 w-full h-full flex items-center justify-center">3D Digital Twin (Coming Soon)</div>;
+      case 'task':
+        return (
+          <div className="p-8 text-slate-400 bg-slate-900/50 rounded-xl border border-slate-800 w-full h-full flex flex-col items-center justify-center gap-3">
+            <ListTodo size={36} className="text-slate-500" />
+            <span className="text-sm font-medium">Task Management & Execution (Coming Soon)</span>
+          </div>
+        );
       default:
         return null;
     }

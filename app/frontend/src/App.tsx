@@ -12,7 +12,7 @@ function App() {
       case 'config':
         return <ConfigView />;
       default:
-        // All other tabs (calib, interactive, auto_planner, digital_twin) 
+        // All other tabs (calib, interactive, task) 
         // share the unified WorkspaceView layout
         return (
           <WorkspaceView 
