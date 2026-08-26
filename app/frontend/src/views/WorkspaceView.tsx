@@ -61,7 +61,7 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({
     return () => wsRef.current?.close();
   }, []);
 
-  const effectiveRobotState: RobotState = simJoints
+  const effectiveRobotState: RobotState = (activeTab === 'interactive' && simJoints)
     ? { ...robotState, joint: simJoints }
     : robotState;
 
@@ -112,11 +112,11 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({
 
       {/* Right Column (40% width) - Robot Zone Full Height with Reconstructed 3D Mesh & 3D TCP Paths */}
       <div className="flex-[2] flex flex-col gap-6 min-w-0 h-full">
-        {/* Full Right: Robot Zone */}
+        {/* Full Right: Robot Zone (Only show workpiece mesh & paths when in Interactive tab) */}
         <div className="flex-1 min-h-0">
           <RobotZone 
             robotState={effectiveRobotState} 
-            activeTemplate={activeTemplate}
+            activeTemplate={activeTab === 'interactive' ? activeTemplate : null}
             meshVersion={meshVersion}
             pathsVersion={pathsVersion}
             pathState={activePathState}
