@@ -2,6 +2,16 @@
 import numpy as np
 from scipy.spatial.transform import Rotation as R_tool
 
+def _get_pose_rot(pose):
+    """
+    Safely extract rotation angles from pose dict, supporting both new format (rx, ry, rz)
+    and legacy format (a, b, c).
+    """
+    rx = pose.get("rx", pose.get("a", 0.0))
+    ry = pose.get("ry", pose.get("b", 0.0))
+    rz = pose.get("rz", pose.get("c", 0.0))
+    return float(rx), float(ry), float(rz)
+
 def clean_calibration_data(all_samples, threshold=0.05, log_callback=None):
     """
     清洗标定采样数据。
@@ -40,8 +50,8 @@ def clean_calibration_data(all_samples, threshold=0.05, log_callback=None):
                 log_callback(f"  [KEEP] Sample {s['id']}: Displacement ratio = {ratio:.3f}")
         else:
             # 检查姿态是否发生了显著旋转（欧拉角差异评估）
-            r_base = np.array([base["pose"]["a"], base["pose"]["b"], base["pose"]["c"]])
-            r_curr = np.array([s["pose"]["a"], s["pose"]["b"], s["pose"]["c"]])
+            r_base = np.array(_get_pose_rot(base["pose"]))
+            r_curr = np.array(_get_pose_rot(s["pose"]))
             rot_diff = np.linalg.norm(r_curr - r_base)
             
             if rot_diff > 0.05:  # 旋转差异大于 ~3 度
@@ -70,9 +80,9 @@ def evaluate_data_diversity(samples):
     pos_x = [s["pose"]["x"] for s in samples]
     pos_y = [s["pose"]["y"] for s in samples]
     pos_z = [s["pose"]["z"] for s in samples]
-    rot_a = [s["pose"]["a"] for s in samples]
-    rot_b = [s["pose"]["b"] for s in samples]
-    rot_c = [s["pose"]["c"] for s in samples]
+    rot_a = [s["pose"].get("rx", s["pose"].get("a", 0.0)) for s in samples]
+    rot_b = [s["pose"].get("ry", s["pose"].get("b", 0.0)) for s in samples]
+    rot_c = [s["pose"].get("rz", s["pose"].get("c", 0.0)) for s in samples]
 
     # 判断旋转欧拉角输入是弧度还是角度
     is_radians = np.max(np.abs([rot_a, rot_b, rot_c])) < 7.0
@@ -135,7 +145,8 @@ def optimize_extrinsics_solve(samples):
                 # 转换机器人欧拉角至旋转矩阵列表
                 R_bt_list = []
                 for s in samples:
-                    euler_angles = [s["pose"]['a'] * s_vec[0], s["pose"]['b'] * s_vec[1], s["pose"]['c'] * s_vec[2]]
+                    rx, ry, rz = _get_pose_rot(s["pose"])
+                    euler_angles = [rx * s_vec[0], ry * s_vec[1], rz * s_vec[2]]
                     R_bt_list.append(R_tool.from_euler(order, euler_angles).as_matrix())
             except:
                 continue
@@ -205,7 +216,8 @@ def calculate_rotation_error(samples, best_res):
     # 1. 计算每个采样点下的末端到标定板的齐次变换矩阵
     for s in samples:
         p = s["pose"]
-        euler_angles = [p['a'] * s_vec[0], p['b'] * s_vec[1], p['c'] * s_vec[2]]
+        rx, ry, rz = _get_pose_rot(p)
+        euler_angles = [rx * s_vec[0], ry * s_vec[1], rz * s_vec[2]]
         R_bt = R_tool.from_euler(order, euler_angles).as_matrix()
         
         T_bt = np.eye(4)

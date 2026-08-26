@@ -8,8 +8,8 @@ from scipy.spatial.transform import Rotation as R_tool
 # 1. 路径锚定策略 (无论从哪个目录执行，都能准确找到项目根目录)
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
 sys.path.append(os.path.join(PROJECT_ROOT, "src"))
+sys.path.append(os.path.join(PROJECT_ROOT, "app/src"))
 
-from aisprayer.core.hardware.camera.factory import get_camera
 from aisprayer.utils.config_helper import load_config as load_global_config, get_abs_path
 
 def parse_args():
@@ -17,6 +17,13 @@ def parse_args():
     parser.add_argument("--config", default=os.path.join(PROJECT_ROOT, "configs/aisprayer_config.yaml"), help="配置文件路径")
     parser.add_argument("--data", help="指定待处理的采集目录路径 (如 data/calib/calib_20260505)。若不指定则自动使用最新目录。")
     return parser.parse_args()
+
+def _get_pose_rot(pose):
+    """Safely extract rotation angles from pose dict, supporting rx/ry/rz and a/b/c."""
+    rx = pose.get("rx", pose.get("a", 0.0))
+    ry = pose.get("ry", pose.get("b", 0.0))
+    rz = pose.get("rz", pose.get("c", 0.0))
+    return float(rx), float(ry), float(rz)
 
 def create_rotation_matrix(a, b, c, order, s=(1,1,1)):
     return R_tool.from_euler(order, [a*s[0], b*s[1], c*s[2]]).as_matrix()
@@ -124,8 +131,8 @@ def clean_data(all_samples, threshold=0.05):
             print(f"  [KEEP] Sample {s['id']}: 位移比例 = {ratio:.3f}")
         else:
             # 特殊处理：如果有明显的旋转 (角度变化 > 0.05 rad)，即使比例偏离也建议保留
-            r_base = np.array([base["pose"]["a"], base["pose"]["b"], base["pose"]["c"]])
-            r_curr = np.array([s["pose"]["a"], s["pose"]["b"], s["pose"]["c"]])
+            r_base = np.array(_get_pose_rot(base["pose"]))
+            r_curr = np.array(_get_pose_rot(s["pose"]))
             rot_diff = np.linalg.norm(r_curr - r_base)
             
             if rot_diff > 0.05: # 约 3 度以上旋转
@@ -148,9 +155,9 @@ def evaluate_diversity(samples):
     pos_x = [s["pose"]["x"] for s in samples]
     pos_y = [s["pose"]["y"] for s in samples]
     pos_z = [s["pose"]["z"] for s in samples]
-    rot_a = [s["pose"]["a"] for s in samples]
-    rot_b = [s["pose"]["b"] for s in samples]
-    rot_c = [s["pose"]["c"] for s in samples]
+    rot_a = [s["pose"].get("rx", s["pose"].get("a", 0.0)) for s in samples]
+    rot_b = [s["pose"].get("ry", s["pose"].get("b", 0.0)) for s in samples]
+    rot_c = [s["pose"].get("rz", s["pose"].get("c", 0.0)) for s in samples]
     
     # 检查是否为弧度 (如果最大值很小，极有可能是弧度)
     is_radians = np.max(np.abs([rot_a, rot_b, rot_c])) < 7.0
@@ -165,7 +172,8 @@ def evaluate_diversity(samples):
             "x": float(np.ptp(pos_x)), "y": float(np.ptp(pos_y)), "z": float(np.ptp(pos_z))
         },
         "rotation_range_deg": {
-            "a": float(np.ptp(rot_a)), "b": float(np.ptp(rot_b)), "c": float(np.ptp(rot_c))
+            "a": float(np.ptp(rot_a)), "b": float(np.ptp(rot_b)), "c": float(np.ptp(rot_c)),
+            "rx": float(np.ptp(rot_a)), "ry": float(np.ptp(rot_b)), "rz": float(np.ptp(rot_c))
         },
         "score": 0.0
     }
@@ -187,7 +195,7 @@ def optimize_extrinsics(samples):
     best_res = None
     
     test_orders = ['ZYX', 'XYZ', 'YXZ', 'YZX', 'ZXY', 'XZY', 'zyx', 'xyz', 'yxz', 'yzx', 'zxy', 'xzy']
-    signs = [(1,1,1), (1,1,-1), (1,-1,1), (-1,1,1), (1,-1,-1), (-1,1,-1), (-1,-1,1), (-1,-1,-1)]
+    signs = [(1,1,1), (1,1,-1), (1,-1,1), (-1,1,1), (-1,1,-1), (-1,1,-1), (-1,-1,1), (-1,-1,-1)]
 
     print(f"[*] 正在执行全排列联合交替优化 (包含标定板偏置与旋转搜索)...")
     for order in test_orders:
@@ -198,7 +206,14 @@ def optimize_extrinsics(samples):
             
             P_robot = np.array([[s["pose"]["x"], s["pose"]["y"], s["pose"]["z"]] for s in samples])
             P_cam = np.array([s["t_cb"] for s in samples])
-            R_bt_list = [create_rotation_matrix(s["pose"]['a'], s["pose"]['b'], s["pose"]['c'], order, s_vec) for s in samples]
+            R_bt_list = [
+                create_rotation_matrix(
+                    s["pose"].get("rx", s["pose"].get("a", 0.0)),
+                    s["pose"].get("ry", s["pose"].get("b", 0.0)),
+                    s["pose"].get("rz", s["pose"].get("c", 0.0)),
+                    order, s_vec
+                ) for s in samples
+            ]
             
             try:
                 for _ in range(15): # 增加迭代次数
@@ -247,7 +262,8 @@ def calculate_rotation_error(samples, best_res):
     T_tt_list = []
     for s in samples:
         p = s["pose"]
-        R_bt = create_rotation_matrix(p['a'], p['b'], p['c'], order, s_vec)
+        rx, ry, rz = _get_pose_rot(p)
+        R_bt = create_rotation_matrix(rx, ry, rz, order, s_vec)
         T_bt = np.eye(4); T_bt[:3,:3], T_bt[:3,3] = R_bt, [p['x'], p['y'], p['z']]
         T_cb = np.eye(4); T_cb[:3,:3], T_cb[:3,3] = s["R_cb"], s["t_cb"]
         T_bc_mat = np.eye(4); T_bc_mat[:3,:3], T_bc_mat[:3,3] = R_bc, t_bc

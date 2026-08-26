@@ -338,12 +338,15 @@ class CalibrateTab(QWidget):
             
             # Coordinates label
             pose = s["robot_pose"]
+            rx = pose.get("rx", pose.get("a", 0.0))
+            ry = pose.get("ry", pose.get("b", 0.0))
+            rz = pose.get("rz", pose.get("c", 0.0))
             lbl_info = QLabel()
             lbl_info.setAlignment(Qt.AlignCenter)
             lbl_info.setStyleSheet("color: #a9b7c6; font-family: monospace; font-size: 12px; line-height: 120%;")
             lbl_info.setText(
-                f"X:{pose['x']:.1f} Y:{pose['y']:.1f} Z:{pose['z']:.1f}<br/>"
-                f"A:{pose['a']:.3f} B:{pose['b']:.3f} C:{pose['c']:.3f}"
+                f"X:{pose.get('x', 0.0):.1f} Y:{pose.get('y', 0.0):.1f} Z:{pose.get('z', 0.0):.1f}<br/>"
+                f"Rx:{rx:.3f} Ry:{ry:.3f} Rz:{rz:.3f}"
             )
             v_layout.addWidget(lbl_info)
             

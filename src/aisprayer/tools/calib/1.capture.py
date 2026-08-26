@@ -74,13 +74,16 @@ def do_capture(info, color, pose, save_dir, yaml_path):
     # 1. 保存原始彩色图
     cv2.imwrite(img_path, color)
     
-    # 2. 记录当前机械臂位姿 (X, Y, Z, A, B, C)
+    # 2. 记录当前机械臂位姿 (X, Y, Z, Rx, Ry, Rz)
+    rx = getattr(pose, 'rx', getattr(pose, 'a', 0.0))
+    ry = getattr(pose, 'ry', getattr(pose, 'b', 0.0))
+    rz = getattr(pose, 'rz', getattr(pose, 'c', 0.0))
     sample = {
         "id": count,
         "image_file": img_name,
         "robot_pose": {
             "x": round(pose.x, 3), "y": round(pose.y, 3), "z": round(pose.z, 3),
-            "a": round(pose.a, 4), "b": round(pose.b, 4), "c": round(pose.c, 4)
+            "rx": round(rx, 4), "ry": round(ry, 4), "rz": round(rz, 4)
         }
     }
     info["samples"].append(sample)
@@ -89,7 +92,7 @@ def do_capture(info, color, pose, save_dir, yaml_path):
     with open(yaml_path, 'w', encoding='utf-8') as f:
         yaml.dump(info, f, default_flow_style=False)
     
-    pose_str = f"X:{pose.x:.2f} Y:{pose.y:.2f} Z:{pose.z:.2f} A:{pose.a:.3f} B:{pose.b:.3f} C:{pose.c:.3f}"
+    pose_str = f"X:{pose.x:.2f} Y:{pose.y:.2f} Z:{pose.z:.2f} Rx:{rx:.3f} Ry:{ry:.3f} Rz:{rz:.3f}"
     print(f"[OK] 已保存第 {count} 组样本: {img_name} | Pose: {pose_str}")
 
 def main():

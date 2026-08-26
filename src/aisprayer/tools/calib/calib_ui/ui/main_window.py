@@ -626,12 +626,15 @@ class CalibMainWindow(QMainWindow):
 
         cv2.imwrite(img_path, self.current_color)
 
+        rx = getattr(pose, 'rx', pose.a)
+        ry = getattr(pose, 'ry', pose.b)
+        rz = getattr(pose, 'rz', pose.c)
         sample = {
             "id": count,
             "image_file": img_name,
             "robot_pose": {
                 "x": round(pose.x, 3), "y": round(pose.y, 3), "z": round(pose.z, 3),
-                "a": round(pose.a, 5), "b": round(pose.b, 5), "c": round(pose.c, 5)
+                "rx": round(rx, 5), "ry": round(ry, 5), "rz": round(rz, 5)
             }
         }
         self.cap_info["samples"].append(sample)
@@ -640,7 +643,7 @@ class CalibMainWindow(QMainWindow):
             yaml.dump(self.cap_info, f, default_flow_style=False)
 
         self.txt_calib_log.append(f"[OK] Captured Sample {count}: {img_name}")
-        self.txt_calib_log.append(f"     Pose: X:{pose.x:.1f} Y:{pose.y:.1f} Z:{pose.z:.1f} A:{pose.a:.4f} B:{pose.b:.4f} C:{pose.c:.4f}")
+        self.txt_calib_log.append(f"     Pose: X:{pose.x:.1f} Y:{pose.y:.1f} Z:{pose.z:.1f} Rx:{rx:.4f} Ry:{ry:.4f} Rz:{rz:.4f}")
         self.refresh_samples_list()
 
     def run_calibration(self):
@@ -1314,7 +1317,10 @@ class CalibMainWindow(QMainWindow):
                     self.txt_verify_log.append(f"  [!] Safety Limit: {msg}")
                     return
 
-                target_pose = RobotPose(p_dest[0], p_dest[1], p_dest[2], pose_info["a"], pose_info["b"], pose_info["c"])
+                rx = pose_info.get("rx", pose_info.get("a", 0.0))
+                ry = pose_info.get("ry", pose_info.get("b", 0.0))
+                rz = pose_info.get("rz", pose_info.get("c", 0.0))
+                target_pose = RobotPose(p_dest[0], p_dest[1], p_dest[2], rx, ry, rz)
                 move_mode = "MOVJ" if i == 0 else "MOVL"
                 
                 # 可达性与姿态调整

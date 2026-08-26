@@ -13,6 +13,30 @@ class RobotPose:
     x: float = 0.0; y: float = 0.0; z: float = 0.0
     a: float = 0.0; b: float = 0.0; c: float = 0.0
 
+    @property
+    def rx(self) -> float:
+        return self.a
+
+    @rx.setter
+    def rx(self, val: float):
+        self.a = float(val)
+
+    @property
+    def ry(self) -> float:
+        return self.b
+
+    @ry.setter
+    def ry(self, val: float):
+        self.b = float(val)
+
+    @property
+    def rz(self) -> float:
+        return self.c
+
+    @rz.setter
+    def rz(self, val: float):
+        self.c = float(val)
+
     @classmethod
     def from_list(cls, data: list) -> "RobotPose":
         """从长度 >=6 的列表创建位姿RobotPose, 不足部分填 0。"""
@@ -26,7 +50,7 @@ class RobotPose:
     def __repr__(self):
         """返回可读性较好的字符串表示。"""
         return (f"RobotPose(x={self.x:.3f}, y={self.y:.3f}, z={self.z:.3f}, "
-                f"a={self.a:.3f}, b={self.b:.3f}, c={self.c:.3f})")
+                f"rx={self.a:.3f}, ry={self.b:.3f}, rz={self.c:.3f})")
     
     def __eq__(self, other):
         """重载==，允许直接比较两个 RobotPose 对象是否相等。"""
