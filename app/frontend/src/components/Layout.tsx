@@ -10,50 +10,49 @@ interface LayoutProps {
   setIsCameraVisible?: (visible: boolean) => void;
 }
 
-// Clean Fine-Line Flat Logo representing AI Robotic Spraying (AiSprayer)
-const AiRobotSprayerLogo: React.FC<{ size?: number; className?: string }> = ({ size = 25, className = '' }) => (
+// Clean Flat Linear Logo representing AI Robotic Spraying (AiSprayer)
+const AiRobotSprayerLogo: React.FC<{ size?: number; className?: string }> = ({ size = 26, className = '' }) => (
   <svg
     width={size}
     height={size}
     viewBox="0 0 24 24"
     fill="none"
     stroke="currentColor"
-    strokeWidth="1.5"
     strokeLinecap="round"
     strokeLinejoin="round"
     className={className}
   >
     {/* 1. Flat Base & Mounting Pedestal */}
-    <path d="M2 21h7.5" />
-    <path d="M3.8 21v-2.8h3.8v2.8" />
+    <path d="M2 21.2h8" strokeWidth="2.2" />
+    <path d="M3.8 21.2v-3h4.4v3" strokeWidth="1.9" />
 
     {/* 2. Shoulder Revolute Joint */}
-    <circle cx="5.7" cy="15.2" r="2" />
+    <circle cx="6" cy="15" r="2.3" strokeWidth="2" />
 
     {/* 3. Articulated Upper Arm Link */}
-    <path d="M5.7 13.2L9.5 6.5" />
+    <path d="M6 12.7L9.6 6.2" strokeWidth="2.3" />
 
     {/* 4. Elbow Joint */}
-    <circle cx="9.5" cy="6.5" r="1.8" />
+    <circle cx="9.6" cy="6.2" r="2.1" strokeWidth="2" />
 
     {/* 5. Forearm Link */}
-    <path d="M11.3 6.5H15.5" />
+    <path d="M11.7 6.2H15.6" strokeWidth="2.2" />
 
     {/* 6. Spray Gun Nozzle End-Effector */}
-    <path d="M15.5 4.8v3.4l2.6-1.7z" />
-    <path d="M18.1 6.5h1.4" />
+    <path d="M15.6 4.4v3.6l3-1.8z" strokeWidth="1.9" />
+    <path d="M18.6 6.2h1.4" strokeWidth="2" />
 
     {/* 7. Fine-Line Atomized Spray Fan Jet & Mist */}
-    <path d="M20.2 4.3L23.5 2.2" stroke="#38bdf8" strokeDasharray="1.5 1.5" />
-    <path d="M20.5 6.5H23.8" stroke="#38bdf8" />
-    <path d="M20.2 8.7L23.5 10.8" stroke="#38bdf8" strokeDasharray="1.5 1.5" />
+    <path d="M20.5 3.8L23.8 1.8" stroke="#38bdf8" strokeWidth="1.8" strokeDasharray="1.5 1.5" />
+    <path d="M20.8 6.2H24" stroke="#38bdf8" strokeWidth="1.9" />
+    <path d="M20.5 8.6L23.8 10.6" stroke="#38bdf8" strokeWidth="1.8" strokeDasharray="1.5 1.5" />
 
     {/* 8. AI Intelligence Star (Top Golden Sparkle) */}
     <path
-      d="M9.5 1L10.2 2.4L11.6 3.1L10.2 3.8L9.5 5.2L8.8 3.8L7.4 3.1L8.8 2.4Z"
+      d="M9.6 1L10.3 2.5L11.8 3.2L10.3 3.9L9.6 5.4L8.9 3.9L7.4 3.2L8.9 2.5Z"
       fill="#FBBF24"
       stroke="#F59E0B"
-      strokeWidth="0.3"
+      strokeWidth="0.4"
     />
   </svg>
 );
@@ -158,8 +157,8 @@ const Layout: React.FC<LayoutProps> = ({
       >
         <div className="border-b border-slate-800 p-5 shrink-0 flex items-center justify-center">
           <div className="flex items-center justify-center relative group">
-            <div className="flex shrink-0 h-9 w-9 items-center justify-center rounded-lg bg-gradient-to-br from-blue-500 to-indigo-600 shadow-lg shadow-blue-500/25 ml-[-4px]">
-              <AiRobotSprayerLogo size={24} className="text-white" />
+            <div className="flex shrink-0 h-9 w-9 items-center justify-center rounded-xl bg-slate-800/90 hover:bg-slate-800 border border-slate-700/80 shadow-md shadow-black/40 ml-[-4px] text-slate-200 transition-colors">
+              <AiRobotSprayerLogo size={24} className="text-slate-200" />
             </div>
             <div className={tooltipClass}>
               AiSprayer
