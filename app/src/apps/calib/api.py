@@ -249,6 +249,11 @@ def run_calib(session_id: str, background_tasks: BackgroundTasks):
     background_tasks.add_task(calibration_service.run_calibration, session_id)
     return {"success": True, "message": "Calibration task started"}
 
+@calib_router.post("/sessions/{session_id}/resample_and_calibrate")
+def resample_and_calib_route(session_id: str, background_tasks: BackgroundTasks):
+    background_tasks.add_task(calibration_service.resample_and_calibrate, session_id)
+    return {"success": True, "message": "Automatic resample and calibration task started"}
+
 @calib_router.get("/sessions/{session_id}/progress")
 def get_calib_progress(session_id: str):
     return StreamingResponse(

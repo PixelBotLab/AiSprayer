@@ -5,7 +5,7 @@ import json
 import shutil
 import time
 from datetime import datetime
-from typing import List, Tuple, Dict, Any
+from typing import List, Tuple, Dict, Any, Optional
 import yaml
 import numpy as np
 import cv2
@@ -22,6 +22,61 @@ from scipy.spatial.transform import Rotation as R_tool
 from apps.camera.services.camera_service import camera_service
 
 logger = logging.getLogger(__name__)
+
+def evaluate_image_quality(img: np.ndarray, pattern_size: Tuple[int, int]) -> Tuple[bool, Optional[np.ndarray], Dict[str, Any]]:
+    """
+    Evaluate image quality and detect chessboard corners.
+    Returns: (corners_found, corners, quality_metrics)
+    Quality metrics include:
+      - sharpness (Laplacian variance for focus/blur detection)
+      - brightness (Mean grayscale intensity 0-255)
+      - contrast (Grayscale standard deviation)
+      - overexposed_pct (Percentage of saturated/highlight pixels >= 250)
+      - underexposed_pct (Percentage of dark pixels <= 5)
+      - quality_rating ("EXCELLENT" | "GOOD" | "FAIR" | "POOR" | "FAIL (No Corners)")
+    """
+    if img is None or img.size == 0:
+        return False, None, {"quality_rating": "FAIL (Empty Image)", "corners_count": 0, "sharpness": 0.0, "brightness": 0.0, "contrast": 0.0, "overexposed_pct": 0.0, "underexposed_pct": 0.0}
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
+    
+    # 1. Chessboard corner detection
+    ret, corners = cv2.findChessboardCorners(gray, pattern_size, None)
+    if ret:
+        criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
+        corners = cv2.cornerSubPix(gray, corners, (5, 5), (-1, -1), criteria)
+    
+    # 2. Image quality metrics
+    sharpness = float(cv2.Laplacian(gray, cv2.CV_64F).var())
+    brightness = float(np.mean(gray))
+    contrast = float(np.std(gray))
+    overexposed_pct = float(np.sum(gray >= 250) / gray.size * 100.0)
+    underexposed_pct = float(np.sum(gray <= 5) / gray.size * 100.0)
+    
+    num_corners = len(corners) if ret and corners is not None else 0
+    
+    if not ret:
+        rating = "FAIL (No Corners)"
+    elif sharpness < 40.0 or brightness < 35.0 or brightness > 225.0:
+        rating = "POOR"
+    elif sharpness < 100.0 or brightness < 60.0 or brightness > 195.0 or contrast < 30.0:
+        rating = "FAIR"
+    elif sharpness > 200.0 and 70.0 <= brightness <= 165.0 and contrast >= 40.0:
+        rating = "EXCELLENT"
+    else:
+        rating = "GOOD"
+        
+    metrics = {
+        "corners_found": bool(ret),
+        "corners_count": int(num_corners),
+        "sharpness": round(sharpness, 1),
+        "brightness": round(brightness, 1),
+        "contrast": round(contrast, 1),
+        "overexposed_pct": round(overexposed_pct, 2),
+        "underexposed_pct": round(underexposed_pct, 2),
+        "quality_rating": rating
+    }
+    return ret, corners, metrics
 
 class CalibrationService:
     def __init__(self):
@@ -363,12 +418,186 @@ class CalibrationService:
         with open(result_yaml, 'w', encoding='utf-8') as f:
             yaml.dump(output_res, f, default_flow_style=False)
 
+        # Print and log complete calibration results in English
+        banner_lines = [
+            "=" * 70,
+            f"  HAND-EYE CALIBRATION RESULT: {session_id}",
+            "=" * 70,
+            f"  - Status: SUCCESS",
+            f"  - Samples: {len(samples)} used / {len(all_samples)} total",
+            f"  - Reprojection Error (Residual): {float(err):.4f} mm",
+            f"  - Mean Rotation Error (Angular): {float(r_err_mean):.4f} deg",
+            f"  - Optimization Config: Euler Order = {order}, Signs = {s_vec}",
+            f"  - Chessboard Offset (mm): [{t_off[0]:.3f}, {t_off[1]:.3f}, {t_off[2]:.3f}]",
+            "-" * 70,
+            f"  - Camera Pose in Robot Base Frame:",
+            f"      X: {xyz[0]:.3f} mm,  Y: {xyz[1]:.3f} mm,  Z: {xyz[2]:.3f} mm",
+            f"      Roll: {rpy[0]:.3f} deg,  Pitch: {rpy[1]:.3f} deg,  Yaw: {rpy[2]:.3f} deg",
+            "-" * 70,
+            f"  - Transformation Matrix T_base_camera (4x4):",
+        ]
+        for row in T_bc:
+            banner_lines.append(f"      [ {row[0]:9.6f}, {row[1]:9.6f}, {row[2]:9.6f}, {row[3]:10.4f} ]")
+        banner_lines.append(f"  - Result Saved To: {result_yaml}")
+        banner_lines.append("=" * 70)
+        
+        banner_text = "\n".join(banner_lines)
+        print(banner_text, flush=True)
+        logger.info("\n" + banner_text)
+
         safe_callback(total_samples, total_samples, "", "completed")
 
         return {
             "success": True,
             **output_res
         }
+
+    def resample_and_calibrate(self, session_id: str, progress_callback=None) -> Dict[str, Any]:
+        """
+        Automatic resample and calibration workflow:
+        1. Read waypoint poses from calibration_info.yaml in the specified session;
+        2. Drive the robot sequentially to each waypoint pose;
+        3. Pause for 2s after reaching each pose for mechanical stabilization;
+        4. Capture a new frame and evaluate chessboard corners and image quality metrics;
+        5. Pause for 1s, then proceed to the next waypoint pose;
+        6. Solve calibration extrinsics automatically after all samples are collected.
+        """
+        from services.robot_service import robot_service
+
+        session_path = os.path.join(self.calib_dir, session_id)
+        yaml_file = os.path.join(session_path, "calibration_info.yaml")
+
+        def safe_callback(idx, total, filename, status, message=""):
+            self.progress_states[session_id] = {
+                "current": idx,
+                "total": total,
+                "filename": filename,
+                "status": status,
+                "message": message
+            }
+            if progress_callback:
+                try:
+                    progress_callback(idx, total, filename, status, message)
+                except Exception as e:
+                    logger.error(f"Callback error: {e}")
+
+        if not os.path.exists(yaml_file):
+            safe_callback(0, 1, "", "error", "Missing calibration_info.yaml")
+            return {"success": False, "error": "Missing calibration_info.yaml"}
+
+        with open(yaml_file, 'r', encoding='utf-8') as f:
+            info = yaml.safe_load(f) or {}
+
+        samples = info.get("samples", [])
+        total_samples = len(samples)
+        if total_samples < 3:
+            safe_callback(0, total_samples, "", "error", "Session has fewer than 3 poses to resample.")
+            return {"success": False, "error": "Not enough sample poses. Need at least 3."}
+
+        if not robot_service.is_connected:
+            safe_callback(0, total_samples, "", "error", "Robot is not connected.")
+            return {"success": False, "error": "Robot is not connected. Please connect robot first."}
+
+        logger.info(f"Starting automatic resample & calibration for session '{session_id}' with {total_samples} waypoints.")
+        safe_callback(0, total_samples, "", "resampling_started", f"Starting automatic resampling ({total_samples} waypoints)...")
+
+        pattern_size = tuple(info.get("board_params", {}).get("pattern_size_inner", [8, 11]))
+        speed_l, acc_l, speed_j, acc_j = robot_service.get_speed()
+
+        for idx, s in enumerate(samples):
+            sample_id = s.get("id", idx + 1)
+            img_filename = s.get("image_file", f"image_{sample_id:03d}.png")
+            pose_dict = s.get("robot_pose", {})
+
+            x = float(pose_dict.get("x", 0.0))
+            y = float(pose_dict.get("y", 0.0))
+            z = float(pose_dict.get("z", 0.0))
+            rx = float(pose_dict.get("rx", pose_dict.get("a", 0.0)))
+            ry = float(pose_dict.get("ry", pose_dict.get("b", 0.0)))
+            rz = float(pose_dict.get("rz", pose_dict.get("c", 0.0)))
+            target_pose = [x, y, z, rx, ry, rz]
+
+            # 1. Drive robot to target waypoint pose
+            safe_callback(idx + 1, total_samples, img_filename, "moving", f"Moving to waypoint {idx+1}/{total_samples}...")
+            logger.info(f"[*] [Resample #{sample_id} ({idx+1}/{total_samples})] Moving robot to: X={x:.1f}, Y={y:.1f}, Z={z:.1f}, Rx={rx:.4f}, Ry={ry:.4f}, Rz={rz:.4f}")
+
+            move_ok, move_err = robot_service.move_to_pose_j(target_pose, speed=speed_j, acc=acc_j)
+            if not move_ok:
+                err_msg = f"Robot motion to sample #{sample_id} failed: {move_err}"
+                logger.error(err_msg)
+                safe_callback(idx + 1, total_samples, img_filename, "error", err_msg)
+                return {"success": False, "error": err_msg}
+
+            # 2. Settle robot for 2.0s after reaching waypoint
+            safe_callback(idx + 1, total_samples, img_filename, "settling", f"Waypoint {idx+1}/{total_samples} reached. Settling 2.0s...")
+            time.sleep(2.0)
+
+            # 3. Capture and persist new camera frame (overwriting sample image)
+            safe_callback(idx + 1, total_samples, img_filename, "capturing", f"Capturing sample {idx+1}/{total_samples}...")
+            save_res = camera_service.save_frame(
+                save_dir=session_path,
+                color_filename=img_filename,
+                save_color=True,
+                save_depth=False,
+                save_info_yaml=False,
+                color_format="png"
+            )
+            time.sleep(0.15)
+
+            # 4. Verify chessboard corners and evaluate image quality metrics, log quality report
+            img_path = os.path.join(session_path, img_filename)
+            img = cv2.imread(img_path)
+            quality_str = ""
+            if img is not None:
+                corners_found, corners, quality = evaluate_image_quality(img, pattern_size)
+                quality_str = f"Corners: {'FOUND' if corners_found else 'NONE'} | Sharpness: {quality['sharpness']} | Rating: {quality['quality_rating']}"
+                
+                # Log detailed image quality report
+                logger.info(
+                    f"[+] [Sample #{sample_id} Quality Report] "
+                    f"File: {img_filename} | "
+                    f"Corners: {'FOUND (' + str(quality['corners_count']) + ')' if corners_found else 'NOT FOUND'} | "
+                    f"Rating: {quality['quality_rating']} | "
+                    f"Sharpness: {quality['sharpness']} | "
+                    f"Brightness: {quality['brightness']}/255 | "
+                    f"Contrast: {quality['contrast']} | "
+                    f"Overexposed: {quality['overexposed_pct']}% | "
+                    f"Underexposed: {quality['underexposed_pct']}%"
+                )
+
+                # Render corners and quality badge to in-memory preview cache
+                preview_img = img.copy()
+                if corners_found:
+                    cv2.drawChessboardCorners(preview_img, pattern_size, corners, corners_found)
+                    status_text = f"SAMPLE {idx+1}/{total_samples}: FOUND | Sharpness: {quality['sharpness']:.1f} ({quality['quality_rating']})"
+                    cv2.putText(preview_img, status_text, (20, 40),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 255, 0), 2, cv2.LINE_AA)
+                else:
+                    status_text = f"SAMPLE {idx+1}/{total_samples}: NO CORNERS | Sharpness: {quality['sharpness']:.1f} ({quality['quality_rating']})"
+                    cv2.putText(preview_img, status_text, (20, 40),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (0, 0, 255), 2, cv2.LINE_AA)
+
+                success, buffer = cv2.imencode('.jpg', preview_img)
+                if success:
+                    self._corner_images_cache[f"{session_id}/{img_filename}"] = buffer.tobytes()
+
+                s["timestamp"] = datetime.now().isoformat()
+            else:
+                logger.warning(f"Failed to load image for quality check: {img_path}")
+
+            # 5. Pause for 1.0s, then proceed to the next waypoint pose
+            safe_callback(idx + 1, total_samples, img_filename, "waiting", f"Sample #{sample_id} captured ({quality_str}). Pausing 1.0s...")
+            time.sleep(1.0)
+
+        # Sync back updated metadata to YAML
+        with open(yaml_file, 'w', encoding='utf-8') as f:
+            yaml.dump(info, f, default_flow_style=False)
+
+        logger.info(f"[*] Resampling completed for all {total_samples} waypoints. Starting calibration solver...")
+        safe_callback(total_samples, total_samples, "", "optimizing", "All samples recaptured. Computing calibration...")
+
+        # 6. Automatically solve calibration extrinsics after completing all waypoints
+        return self.run_calibration(session_id, progress_callback=progress_callback)
         
     def stream_progress(self, session_id: str):
         """Generator for Server-Sent Events (SSE) that yields progress updates."""
@@ -378,7 +607,7 @@ class CalibrationService:
             if not state:
                 yield f"data: {json.dumps({'status': 'waiting'})}\n\n"
             else:
-                curr = (state.get("current"), state.get("status"), state.get("filename"))
+                curr = (state.get("current"), state.get("status"), state.get("filename"), state.get("message"))
                 if curr != last_sent:
                     last_sent = curr
                     yield f"data: {json.dumps(state)}\n\n"

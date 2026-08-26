@@ -37,28 +37,27 @@ def load_calib_info(data_dir, camera_model=None):
     with open(info_path, 'r') as f: 
         info = yaml.safe_load(f)
     
-    # 校验型号一致性 (与当前配置对比)
+    # Verify camera model consistency
     if camera_model:
         data_cam = info.get("camera_params", {}).get("camera_model")
         if data_cam != camera_model:
-            print(f"\n[WARNING] 采集数据相机型号 ({data_cam}) 与当前配置 ({camera_model}) 不一致，将使用采集数据中的参数。")
+            print(f"\n[WARNING] Dataset camera model ({data_cam}) differs from config ({camera_model}), using dataset parameters.")
             
     return info
 
 def extract_corners_and_pnp(data_dir, config):
-    """提取角点并解算 PnP，返回所有样本"""
+    """Extract chessboard corners and compute PnP for all samples"""
     info = config
-    # 直接使用采集数据中的内参进行 PnP
     K = np.array(info["camera_params"]["intrinsic_matrix"])
     D = np.array(info["camera_params"]["distortion_coeffs"])
     
-    print(f"[*] 正在处理标定数据: {data_dir}")
+    print(f"[*] Processing calibration dataset: {data_dir}")
     
-    # 2. 准备标定板物理参数 (用于角点检测和 PnP 解算)
+    # 2. Board parameters
     pattern_size = tuple(config["board_params"]["pattern_size_inner"])
     sq_size = config["board_params"]["square_size_mm"]
 
-    print(f"[*] 正在提取角点...")
+    print(f"[*] Extracting chessboard corners...")
     objp = np.zeros((pattern_size[0] * pattern_size[1], 3), np.float32)
     objp[:, :2] = np.mgrid[0:pattern_size[0], 0:pattern_size[1]].T.reshape(-1, 2) * sq_size
     
@@ -68,14 +67,14 @@ def extract_corners_and_pnp(data_dir, config):
     for s in config["samples"]:
         pose = s.get("robot_pose", {})
         if any(abs(v) > 2500 for v in [pose.get('x',0), pose.get('y',0), pose.get('z',0)]):
-            print(f"  [!] 忽略无效数据样本 (SDK 异常): {s['id']}")
+            print(f"  [!] Ignored invalid pose sample: #{s['id']}")
             continue
 
         img_file = s.get("image_file", "unknown")
         img_path = os.path.join(data_dir, img_file)
         img = cv2.imread(img_path)
         if img is None:
-            print(f"  [!] 无法读取图片: {img_file}")
+            print(f"  [!] Failed to read image: {img_file}")
             fail_count += 1
             continue
         
@@ -86,11 +85,11 @@ def extract_corners_and_pnp(data_dir, config):
             if "width" not in config["camera_params"]:
                 config["camera_params"]["width"] = w
                 config["camera_params"]["height"] = h
-                print(f"[*] 自动检测到标定分辨率: {w}x{h}")
+                print(f"[*] Detected calibration resolution: {w}x{h}")
 
         ret, corners = cv2.findChessboardCorners(img, pattern_size, None)
         if ret:
-            # 亚像素级精细化
+            # Subpixel refinement
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 0.001)
             corners = cv2.cornerSubPix(gray, corners, (5,5), (-1,-1), criteria)
@@ -99,19 +98,19 @@ def extract_corners_and_pnp(data_dir, config):
             R_cb, _ = cv2.Rodrigues(rvec)
             all_samples.append({"id": s["id"], "R_cb": R_cb, "t_cb": tvec.flatten(), "pose": s["robot_pose"]})
         else:
-            print(f"  [!] 角点提取失败: {img_file}")
+            print(f"  [!] Corner extraction failed: {img_file}")
             fail_count += 1
             
-    print(f"[*] 角点提取完成: 成功 {len(all_samples)} 张, 失败 {fail_count} 张")
+    print(f"[*] Corner extraction complete: {len(all_samples)} succeeded, {fail_count} failed")
     return all_samples
 
 def clean_data(all_samples, threshold=0.05):
-    """根据位移比例清洗数据，阈值为 5% 以容忍旋转带来的杆臂效应(20%)"""
+    """Filter outlier samples based on displacement ratio"""
     if not all_samples: return []
     base = all_samples[0]
     samples = [base]
-    print(f"[*] 正在清洗数据 (阈值: {threshold*100:.1f}%)...")
-    print(f"  [KEEP] Sample {base['id']}: 基准点")
+    print(f"[*] Cleaning samples (Threshold: {threshold*100:.1f}%)...")
+    print(f"  [KEEP] Sample {base['id']}: Reference base point")
     for i in range(1, len(all_samples)):
         s = all_samples[i]
         p_base = np.array([base["pose"]["x"], base["pose"]["y"], base["pose"]["z"]])
@@ -119,33 +118,31 @@ def clean_data(all_samples, threshold=0.05):
         dist_r = np.linalg.norm(p_curr - p_base)
         dist_c = np.linalg.norm(s["t_cb"] - base["t_cb"])
         
-        # 如果机器人几乎没动，则不检查比例
+        # If robot barely moved (<10mm), keep sample
         if dist_r < 10:
             samples.append(s)
             continue
             
         ratio = dist_c / dist_r
-        # 允许较大偏差，因为标定板中心不在 TCP 上时，旋转会导致比例大幅偏离 1.0
         if (1.0 - threshold) < ratio < (1.0 + threshold):
             samples.append(s)
-            print(f"  [KEEP] Sample {s['id']}: 位移比例 = {ratio:.3f}")
+            print(f"  [KEEP] Sample {s['id']}: Displacement ratio = {ratio:.3f}")
         else:
-            # 特殊处理：如果有明显的旋转 (角度变化 > 0.05 rad)，即使比例偏离也建议保留
+            # Check for significant orientation change (>0.05 rad)
             r_base = np.array(_get_pose_rot(base["pose"]))
             r_curr = np.array(_get_pose_rot(s["pose"]))
             rot_diff = np.linalg.norm(r_curr - r_base)
             
-            if rot_diff > 0.05: # 约 3 度以上旋转
-                # 即便有旋转，位移比例也不应过于离谱 (设定 0.5 ~ 2.5 的宽泛区间)
+            if rot_diff > 0.05: # > 3 deg rotation
                 if 0.80 < ratio < 1.20:
                     samples.append(s)
-                    print(f"  [KEEP*] Sample {s['id']}: 位移比例 = {ratio:.3f} (检测到姿态变化且位移合理，放行)")
+                    print(f"  [KEEP*] Sample {s['id']}: Displacement ratio = {ratio:.3f} (orientation change detected)")
                 else:
-                    print(f"  [DROP] Sample {s['id']}: 位移比例 = {ratio:.3f} (即便有旋转，位移也过于离谱，剔除)")
+                    print(f"  [DROP] Sample {s['id']}: Displacement ratio = {ratio:.3f} (excessive deviation with rotation)")
             else:
-                print(f"  [DROP] Sample {s['id']}: 位移比例 = {ratio:.3f} (偏差过大且无显著旋转)")
+                print(f"  [DROP] Sample {s['id']}: Displacement ratio = {ratio:.3f} (deviation without rotation)")
             
-    print(f"[*] 最终参与计算的优质样本数: {len(samples)} / {len(all_samples)}")
+    print(f"[*] High-quality samples kept for calculation: {len(samples)} / {len(all_samples)}")
     return samples
 
 def evaluate_diversity(samples):
@@ -197,7 +194,7 @@ def optimize_extrinsics(samples):
     test_orders = ['ZYX', 'XYZ', 'YXZ', 'YZX', 'ZXY', 'XZY', 'zyx', 'xyz', 'yxz', 'yzx', 'zxy', 'xzy']
     signs = [(1,1,1), (1,1,-1), (1,-1,1), (-1,1,1), (-1,1,-1), (-1,1,-1), (-1,-1,1), (-1,-1,-1)]
 
-    print(f"[*] 正在执行全排列联合交替优化 (包含标定板偏置与旋转搜索)...")
+    print(f"[*] Running exhaustive grid optimization (Extrinsics & Hand-eye Offset)...")
     for order in test_orders:
         for s_vec in signs:
             t_off = np.zeros(3)
@@ -279,25 +276,27 @@ def calculate_rotation_error(samples, best_res):
     return np.mean(r_errs)
 
 def save_and_print_results(data_dir, best_res, r_err_mean, camera_params, board_params, output_path, sample_stats, diversity):
-    """打印详细结果并保存全量配置至 yaml 文件"""
+    """Print detailed results and save full configuration to YAML file in English"""
     R_bc, t_bc, t_off, err, order, s_vec = best_res
     T_bc = np.eye(4); T_bc[:3,:3], T_bc[:3,3] = R_bc, t_bc
     
-    # 结果保存路径
+    # Results path
     output_res_path = get_abs_path(output_path, PROJECT_ROOT)
     os.makedirs(os.path.dirname(output_res_path), exist_ok=True)
     
-    print("\n" + "="*50)
-    print(f"标定成功！配置: {order}, Signs: {s_vec}")
-    print(f"平均平移误差 (Residual): {err:.3f} mm")
-    print(f"平均旋转误差 (Angular): {r_err_mean:.3f} °")
-    print(f"标定板偏移 (Offset): {t_off} mm")
-    
-    # 提取可读位姿 (XYZ + RPY 度数)
+    # Readable pose (XYZ + RPY degrees)
     xyz = T_bc[:3, 3].tolist()
     rpy = R_tool.from_matrix(T_bc[:3, :3]).as_euler('xyz', degrees=True).tolist()
 
-    # 构造全量结果字典
+    print("\n" + "="*60)
+    print(f"  CALIBRATION SUCCESSFUL! Config: Euler={order}, Signs={s_vec}")
+    print(f"  - Reprojection Error (Residual): {err:.4f} mm")
+    print(f"  - Mean Angular Error: {r_err_mean:.4f} deg")
+    print(f"  - Chessboard Offset (Offset): [{t_off[0]:.3f}, {t_off[1]:.3f}, {t_off[2]:.3f}] mm")
+    print(f"  - Camera Pose (Base): X={xyz[0]:.2f}, Y={xyz[1]:.2f}, Z={xyz[2]:.2f} mm | Roll={rpy[0]:.2f}°, Pitch={rpy[1]:.2f}°, Yaw={rpy[2]:.2f}°")
+    print("="*60)
+
+    # Full output data dict
     output_data = {
         "metadata": {
             "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -326,7 +325,7 @@ def save_and_print_results(data_dir, best_res, r_err_mean, camera_params, board_
 
     with open(output_res_path, 'w') as f:
         yaml.dump(output_data, f, default_flow_style=False)
-    print(f"\n[+] 标定结果已保存至: {output_res_path}")
+    print(f"[+] Calibration results saved to: {output_res_path}\n")
 
 def main():
     args = parse_args()
@@ -336,61 +335,61 @@ def main():
     c_cfg = full_cfg.get("calib", {})
     camera_model = full_cfg.get("hardware", {}).get("camera", {}).get("model", "orbbec")
     
-    # 2. 确定采集数据目录
+    # 2. Resolve dataset directory
     if args.data:
         target_dir = get_abs_path(args.data, PROJECT_ROOT)
         if not os.path.exists(target_dir):
-            print(f"[-] 指定的目录不存在: {target_dir}")
+            print(f"[-] Specified directory does not exist: {target_dir}")
             return
-        print(f"[*] 使用指定采集目录: {target_dir}")
+        print(f"[*] Using specified dataset directory: {target_dir}")
     else:
         data_root = get_abs_path(c_cfg.get("capture", {}).get("output_dir", "data/calib"), PROJECT_ROOT)
         dirs = sorted(glob.glob(os.path.join(data_root, "calib_*")))
         if not dirs:
-            print(f"[-] 找不到标定数据目录: {data_root}")
+            print(f"[-] No calibration datasets found in: {data_root}")
             return
         target_dir = dirs[-1]
-        print(f"[*] 自动锁定最新采集目录: {target_dir}")
+        print(f"[*] Auto-selected latest dataset directory: {target_dir}")
     
-    # 3. 加载该目录下的标定元数据
+    # 3. Load metadata
     try:
         info = load_calib_info(target_dir, camera_model)
     except Exception as e:
-        print(f"[-] 加载标定信息失败: {e}")
+        print(f"[-] Failed to load calibration info: {e}")
         return
     
-    # 4. 提取角点与 PnP (直接离线处理采集数据)
+    # 4. Extract corners and solve PnP offline
     all_samples = extract_corners_and_pnp(target_dir, info)
     if not all_samples:
-        print("[-] 未能提取任何样本的角点，标定失败")
+        print("[-] Failed to extract corners from any samples. Calibration aborted.")
         return
 
-    # 2. 数据清洗 (基于物理位移比例分析)
+    # 5. Data cleaning (based on physical displacement ratio)
     clean_thr = c_cfg.get("cleaning_threshold", 0.05)
     samples = clean_data(all_samples, threshold=clean_thr)
     if len(samples) < 3:
-        print("[-] 有效样本数量不足，无法进行标定")
+        print("[-] Insufficient valid samples for calibration after filtering.")
         return
 
-    # 6. 评估数据多样性 (在清洗之后，计算之前)
+    # 6. Evaluate data diversity
     diversity = evaluate_diversity(samples)
-    print(f"[*] 数据多样性评分: {diversity['score']:.1f} / 100")
+    print(f"[*] Data Diversity Score: {diversity['score']:.1f} / 100")
     if diversity['score'] < 60:
         if diversity['p_score'] < 50:
-            print("    [!] 警告: 空间平移跨度不足，建议在更大范围内移动机械臂。")
+            print("    [!] Warning: Spatial translation span is small. Consider moving the robot across a larger area.")
         if diversity['r_score'] < 50:
-            print("    [!] 警告: 姿态旋转角度不足，建议增加机械臂末端的翻转角度。")
+            print("    [!] Warning: Orientation rotation span is small. Consider varying TCP tilt/roll angles.")
 
-    # 7. 联合交替优化解算
+    # 7. Alternating grid optimization
     best_res = optimize_extrinsics(samples)
     if not best_res:
-        print("[-] 标定求解失败")
+        print("[-] Calibration solver failed to find a valid solution.")
         return
 
-    # 8. 计算旋转误差
+    # 8. Compute rotation error
     r_err_mean = calculate_rotation_error(samples, best_res)
 
-    # 9. 打印并保存结果 (信任并透传采集数据中的相机参数)
+    # 9. Print and save results
     calib_out = c_cfg.get("result_path", "configs/calib/calibration_result.yaml")
     save_and_print_results(
         target_dir, best_res, r_err_mean, 

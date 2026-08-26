@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Play, FolderPlus, Trash2, Image as ImageIcon, Camera, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Play, FolderPlus, Trash2, Image as ImageIcon, Camera, ChevronLeft, ChevronRight, RotateCw } from 'lucide-react';
 import { CustomModal, type ModalConfig } from '../common/CustomModal';
 import { API_BASE } from '../../config';
 
@@ -10,7 +10,8 @@ const CalibrationOp: React.FC = () => {
   const [activeImage, setActiveImage] = useState<string | null>(null);
   const [isCapturing, setIsCapturing] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
-  const [progressData, setProgressData] = useState<{current: number, total: number, status: string} | null>(null);
+  const [isResampling, setIsResampling] = useState(false);
+  const [progressData, setProgressData] = useState<{current: number, total: number, status: string, message?: string} | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   // Custom Modal State
@@ -36,16 +37,15 @@ const CalibrationOp: React.FC = () => {
       const res = await fetch(`${API_BASE}/api/calib/sessions`);
       if (res.ok) {
         const data = await res.json();
-        const list: string[] = data.sessions || [];
-        setSessions(list);
-        if (list.length > 0) {
-          const target = (preferredSession && list.includes(preferredSession))
-            ? preferredSession
-            : (activeSession && list.includes(activeSession))
-            ? activeSession
-            : list[0];
-          setActiveSession(target);
-          fetchSessionData(target);
+        const sessList = data.sessions || [];
+        setSessions(sessList);
+        
+        if (sessList.length > 0) {
+          if (preferredSession && sessList.includes(preferredSession)) {
+            setActiveSession(preferredSession);
+          } else if (!activeSession || !sessList.includes(activeSession)) {
+            setActiveSession(sessList[0]);
+          }
         } else {
           setActiveSession(null);
           setActiveImage(null);
@@ -53,96 +53,71 @@ const CalibrationOp: React.FC = () => {
         }
       }
     } catch (err) {
-      console.error('Failed to fetch sessions:', err);
+      console.error('Failed to fetch calibration sessions:', err);
     }
   };
-
-  let calibrationModeTimeout: any = null;
-
-  useEffect(() => {
-    fetchSessions();
-
-    if (calibrationModeTimeout) {
-      clearTimeout(calibrationModeTimeout);
-      calibrationModeTimeout = null;
-    }
-
-    // Enable calibration mode for live camera feed
-    fetch(`${API_BASE}/api/camera/calibration_mode`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: true })
-    }).catch(console.error);
-
-    return () => {
-      calibrationModeTimeout = setTimeout(() => {
-        fetch(`${API_BASE}/api/camera/calibration_mode`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ enabled: false })
-        }).catch(console.error);
-      }, 100);
-    };
-  }, []);
 
   const fetchSessionData = async (sessionId: string) => {
     try {
       const res = await fetch(`${API_BASE}/api/calib/sessions/${sessionId}`);
       if (res.ok) {
         const data = await res.json();
-        setSessionData({ 
-          samples: data.samples || [], 
+        setSessionData({
+          samples: data.samples || [],
           result: data.result || null,
           mode: data.mode || undefined
         });
-        if (data.samples?.length > 0) {
-          setActiveImage(data.samples[0].filename);
+        if (data.samples && data.samples.length > 0) {
+          // If active image doesn't exist in current samples, set to the last one
+          const filenames = data.samples.map((s: any) => s.filename);
+          if (!activeImage || !filenames.includes(activeImage)) {
+            setActiveImage(filenames[filenames.length - 1]);
+          }
         } else {
           setActiveImage(null);
         }
       }
     } catch (err) {
-      console.error('Failed to fetch session data:', err);
+      console.error(`Failed to fetch session ${sessionId} data:`, err);
     }
   };
 
   useEffect(() => {
-    if (!activeSession) return;
-    fetchSessionData(activeSession);
-  }, [activeSession]);
+    fetchSessions();
+  }, []);
 
   useEffect(() => {
-    if (activeImage) {
-      const el = document.getElementById(`sample-thumb-${activeImage}`);
-      if (el) {
-        el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-      }
+    if (activeSession) {
+      fetchSessionData(activeSession);
     }
-  }, [activeImage]);
+  }, [activeSession]);
 
   const handleCreateSession = async () => {
     try {
       const res = await fetch(`${API_BASE}/api/calib/sessions/new`, { method: 'POST' });
       if (res.ok) {
         const data = await res.json();
-        await fetchSessions();
-        setActiveSession(data.session_id);
+        await fetchSessions(data.session_id);
+      } else {
+        const err = await res.json();
+        showAlert('Create Session Failed', err.detail || 'Could not create new session');
       }
-    } catch (err) {
-      console.error('Failed to create session:', err);
+    } catch (err: any) {
+      showAlert('Network Error', err.message);
     }
   };
 
-  const handleDeleteSession = (sessionToDelete?: string | React.MouseEvent) => {
-    const targetSession = typeof sessionToDelete === 'string' ? sessionToDelete : activeSession;
+  const handleDeleteSession = async (sessionToDelete?: string) => {
+    const targetSession = sessionToDelete || activeSession;
     if (!targetSession) return;
+
     setModalConfig({
       isOpen: true,
       type: 'confirm',
       title: 'Delete Calibration Session',
       message: `Are you sure you want to permanently delete session "${targetSession}"? All captured samples and calibration results will be removed.`,
-      confirmText: 'Delete Session',
-      isDanger: true,
+      confirmText: 'Delete Permanently',
+      cancelText: 'Cancel',
       onConfirm: async () => {
         try {
           const res = await fetch(`${API_BASE}/api/calib/sessions/${targetSession}`, { method: 'DELETE' });
@@ -162,7 +137,7 @@ const CalibrationOp: React.FC = () => {
   };
 
   const handleCapture = async () => {
-    if (!activeSession || isCapturing) return;
+    if (!activeSession || isCapturing || isRunning || isResampling) return;
     setIsCapturing(true);
     try {
       const res = await fetch(`${API_BASE}/api/calib/sessions/${activeSession}/samples`, { method: 'POST' });
@@ -190,14 +165,71 @@ const CalibrationOp: React.FC = () => {
     }
   };
 
+  const handleResampleAndCalibrate = async () => {
+    if (!activeSession || isRunning || isResampling || isCapturing) return;
+    if (sessionData.samples.length < 3) {
+      showAlert('Insufficient Samples', 'At least 3 valid calibration waypoints are required to resample and solve camera extrinsics.');
+      return;
+    }
+    setIsResampling(true);
+    setProgressData({ current: 0, total: sessionData.samples.length, status: 'started', message: 'Starting robot auto-resampling...' });
+    try {
+      const res = await fetch(`${API_BASE}/api/calib/sessions/${activeSession}/resample_and_calibrate`, { method: 'POST' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Failed to start resample and calibration task');
+      }
+
+      const eventSource = new EventSource(`${API_BASE}/api/calib/sessions/${activeSession}/progress`);
+      
+      eventSource.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.status === 'waiting') return;
+        
+        setProgressData({
+          current: data.current || 0,
+          total: data.total || sessionData.samples.length,
+          status: data.status,
+          message: data.message
+        });
+        
+        if (data.filename) {
+          setActiveImage(data.filename);
+        }
+
+        if (data.status === 'completed' || data.status === 'error') {
+          eventSource.close();
+          setIsResampling(false);
+          setProgressData(null);
+          
+          if (data.status === 'completed') {
+            fetchSessionData(activeSession);
+          } else {
+            showAlert('Resample/Calibration Failed', data.message || 'Auto-resampling or optimization failed. Please check robot status and camera detections.');
+          }
+        }
+      };
+      
+      eventSource.onerror = () => {
+        eventSource.close();
+        setIsResampling(false);
+        setProgressData(null);
+      };
+    } catch (err: any) {
+      showAlert('Execution Error', err.message);
+      setIsResampling(false);
+      setProgressData(null);
+    }
+  };
+
   const handleRunCalibration = async () => {
-    if (!activeSession || isRunning) return;
+    if (!activeSession || isRunning || isResampling || isCapturing) return;
     if (sessionData.samples.length < 3) {
       showAlert('Insufficient Samples', 'At least 3 valid calibration samples are required to solve camera extrinsics.');
       return;
     }
     setIsRunning(true);
-    setProgressData({ current: 0, total: sessionData.samples.length, status: 'started' });
+    setProgressData({ current: 0, total: sessionData.samples.length, status: 'started', message: 'Solving hand-eye calibration...' });
     try {
       const res = await fetch(`${API_BASE}/api/calib/sessions/${activeSession}/run`, { method: 'POST' });
       if (!res.ok) {
@@ -213,7 +245,8 @@ const CalibrationOp: React.FC = () => {
         setProgressData({
           current: data.current || 0,
           total: data.total || 1,
-          status: data.status
+          status: data.status,
+          message: data.message
         });
         
         if (data.filename) {
@@ -345,15 +378,28 @@ const CalibrationOp: React.FC = () => {
           )}
 
           {/* Progress Overlay */}
-          {isRunning && progressData && (
-            <div className="absolute inset-x-0 bottom-0 bg-slate-950/80 backdrop-blur-sm p-4 border-t border-emerald-900/50 flex flex-col gap-2">
+          {(isRunning || isResampling) && progressData && (
+            <div className="absolute inset-x-0 bottom-0 bg-slate-950/85 backdrop-blur-sm p-3.5 border-t border-sky-900/50 flex flex-col gap-1.5 z-20">
               <div className="flex justify-between items-center text-xs">
-                <span className="text-emerald-400 font-bold uppercase tracking-wider">{progressData.status}</span>
-                <span className="text-slate-400 font-mono">{progressData.current} / {progressData.total}</span>
+                <div className="flex items-center gap-2">
+                  <span className={`font-bold uppercase tracking-wider text-[10px] px-2 py-0.5 rounded ${
+                    isResampling ? 'bg-indigo-950 text-indigo-300 border border-indigo-800' : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                  }`}>
+                    {progressData.status}
+                  </span>
+                  {progressData.message && (
+                    <span className="text-slate-300 text-xs font-mono truncate max-w-[320px]">
+                      {progressData.message}
+                    </span>
+                  )}
+                </div>
+                <span className="text-slate-400 font-mono text-xs">{progressData.current} / {progressData.total}</span>
               </div>
               <div className="w-full h-1.5 bg-slate-800 rounded-full overflow-hidden">
                 <div 
-                  className="h-full bg-emerald-500 transition-all duration-300"
+                  className={`h-full transition-all duration-300 ${
+                    isResampling ? 'bg-gradient-to-r from-indigo-500 to-sky-400' : 'bg-emerald-500'
+                  }`}
                   style={{ width: `${(progressData.current / Math.max(1, progressData.total)) * 100}%` }}
                 />
               </div>
@@ -508,30 +554,44 @@ const CalibrationOp: React.FC = () => {
               )}
             </div>
 
-            <div className="flex gap-2">
+            <div className="flex gap-1.5 items-center">
               <button 
                 onClick={handleCapture}
-                disabled={isCapturing || !activeSession}
-                className="flex-1 py-2 bg-blue-600 hover:bg-blue-500 border border-blue-500 text-white font-medium rounded-lg shadow transition-colors flex items-center justify-center gap-1.5 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={isCapturing || isRunning || isResampling || !activeSession}
+                className="flex-1 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-medium rounded-lg shadow transition-colors flex items-center justify-center gap-1.5 text-xs disabled:opacity-40 disabled:cursor-not-allowed"
+                title="Capture single sample at current robot pose"
               >
-                <Camera size={14} />
-                {isCapturing ? 'Wait...' : 'Capture'}
+                <Camera size={13} className="text-sky-400" />
+                <span>{isCapturing ? 'Wait...' : 'Capture'}</span>
               </button>
+              
+              <button 
+                onClick={handleResampleAndCalibrate}
+                disabled={isRunning || isResampling || isCapturing || !activeSession || sessionData.samples.length < 3}
+                className="flex-1 py-2 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-500 hover:to-blue-500 text-white font-medium rounded-lg shadow-lg shadow-indigo-900/20 transition-all flex items-center justify-center gap-1 text-xs active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed"
+                title="Drive robot to all saved waypoints, resample images, evaluate quality, and calculate calibration"
+              >
+                <RotateCw size={13} className={isResampling ? 'animate-spin' : ''} />
+                <span>{isResampling ? 'Sampling...' : 'Re-Calib'}</span>
+              </button>
+
               <button 
                 onClick={handleRunCalibration}
-                disabled={isRunning || !activeSession || sessionData.samples.length < 3}
-                className="flex-1 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-medium rounded-lg shadow-lg shadow-emerald-900/20 transition-all flex items-center justify-center gap-1.5 text-xs active:scale-[0.98] disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={isRunning || isResampling || isCapturing || !activeSession || sessionData.samples.length < 3}
+                className="flex-1 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-medium rounded-lg shadow-lg shadow-emerald-900/20 transition-all flex items-center justify-center gap-1 text-xs active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed"
+                title="Calculate calibration using existing captured samples"
               >
-                <Play size={14} fill="currentColor" />
-                {isRunning ? 'Solving...' : 'Execute'}
+                <Play size={13} fill="currentColor" />
+                <span>{isRunning ? 'Solving...' : 'Calibrate'}</span>
               </button>
+
               <button 
-                onClick={handleDeleteSession}
-                disabled={!activeSession}
-                className="px-3 py-2 bg-transparent hover:bg-red-950 border border-red-900/50 hover:border-red-500/50 text-red-500 font-medium rounded-lg transition-colors flex items-center justify-center gap-1 text-xs disabled:opacity-30 disabled:cursor-not-allowed"
+                onClick={() => handleDeleteSession()}
+                disabled={!activeSession || isRunning || isResampling}
+                className="px-2.5 py-2 bg-transparent hover:bg-red-950/60 border border-red-900/40 hover:border-red-500/50 text-red-400 font-medium rounded-lg transition-colors flex items-center justify-center text-xs disabled:opacity-30 disabled:cursor-not-allowed"
                 title="Delete Session"
               >
-                <Trash2 size={14} />
+                <Trash2 size={13} />
               </button>
             </div>
           </div>
