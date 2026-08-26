@@ -408,9 +408,9 @@ const CalibrationOp: React.FC = () => {
         </div>
 
         {/* Middle Column: Thumbnails */}
-        <div className="w-36 shrink-0 border-r border-slate-800 p-3 overflow-y-auto custom-scrollbar flex flex-col gap-3 bg-slate-950/30">
+        <div className="w-28 shrink-0 border-r border-slate-800 p-2 overflow-y-auto custom-scrollbar flex flex-col gap-2 bg-slate-950/30">
           {sessionData.samples.length === 0 ? (
-            <div className="text-xs text-center text-slate-500 mt-10">Empty session</div>
+            <div className="text-[10px] text-center text-slate-500 mt-10">Empty session</div>
           ) : (
             sessionData.samples.map(sample => (
               <div 
@@ -429,20 +429,15 @@ const CalibrationOp: React.FC = () => {
                     alt={sample.filename}
                     className="w-full h-full object-cover"
                   />
-                  <div className="absolute top-0 right-0 bg-black/60 text-[9px] text-white px-1.5 py-0.5 rounded-bl">
+                  <div className="absolute top-0 right-0 bg-black/60 text-[8px] text-white px-1 py-0.2 rounded-bl">
                     #{sample.id}
                   </div>
                 </div>
-                <div className="p-1.5 flex flex-col gap-1 text-[8px] text-slate-400 font-mono tracking-tight border-t border-slate-800 leading-none">
+                <div className="p-1 flex flex-col gap-0.5 text-[7.5px] text-slate-400 font-mono tracking-tight border-t border-slate-800 leading-none">
                   <div className="flex justify-between">
-                    <span>X:{sample.pose?.[0]?.toFixed(1) ?? '0.0'}</span>
-                    <span>Y:{sample.pose?.[1]?.toFixed(1) ?? '0.0'}</span>
-                    <span>Z:{sample.pose?.[2]?.toFixed(1) ?? '0.0'}</span>
-                  </div>
-                  <div className="flex justify-between text-slate-500">
-                    <span>Rx:{sample.pose?.[3]?.toFixed(2) ?? '0.00'}</span>
-                    <span>Ry:{sample.pose?.[4]?.toFixed(2) ?? '0.00'}</span>
-                    <span>Rz:{sample.pose?.[5]?.toFixed(2) ?? '0.00'}</span>
+                    <span>X:{sample.pose?.[0]?.toFixed(0) ?? '0'}</span>
+                    <span>Y:{sample.pose?.[1]?.toFixed(0) ?? '0'}</span>
+                    <span>Z:{sample.pose?.[2]?.toFixed(0) ?? '0'}</span>
                   </div>
                 </div>
               </div>
@@ -450,73 +445,77 @@ const CalibrationOp: React.FC = () => {
           )}
         </div>
 
-        {/* Right Column: Controls & Result Data */}
-        <div className="w-[340px] shrink-0 bg-slate-950/50 flex flex-col overflow-hidden">
+        {/* Right Column: Controls & Result Data (Narrowed to maximize left image view) */}
+        <div className="w-[230px] shrink-0 bg-slate-950/50 flex flex-col overflow-hidden">
           
           {/* Scrollable Results Area */}
-          <div className="flex-1 overflow-y-auto custom-scrollbar p-4 flex flex-col gap-4">
+          <div className="flex-1 overflow-y-auto custom-scrollbar p-2.5 flex flex-col gap-2.5">
             
             {/* Header: Mode Display */}
             {sessionData.mode && (
-              <div className="flex justify-between items-center bg-slate-900 border border-slate-800 rounded p-2 shadow-inner">
-                <span className="text-[10px] text-slate-500 uppercase tracking-wider font-bold">Calibration Mode</span>
-                <span className="text-[10px] text-emerald-400 font-mono uppercase bg-emerald-950/30 px-2 py-0.5 rounded border border-emerald-900/50">
+              <div className="flex justify-between items-center bg-slate-900 border border-slate-800 rounded px-2 py-1 shadow-inner">
+                <span className="text-[9px] text-slate-500 uppercase tracking-wider font-bold">Mode</span>
+                <span className="text-[9px] text-emerald-400 font-mono uppercase bg-emerald-950/30 px-1.5 py-0.5 rounded border border-emerald-900/50">
                   {sessionData.mode}
                 </span>
               </div>
             )}
 
             {!sessionData.result ? (
-              <div className="flex-1 flex flex-col items-center justify-center text-slate-500 opacity-60">
-                <p className="text-xs">No calibration data yet.</p>
-                <p className="text-xs mt-1">Capture at least 3 samples.</p>
+              <div className="flex-1 flex flex-col items-center justify-center text-slate-500 opacity-60 text-center py-6">
+                <p className="text-[11px]">No calibration data yet.</p>
+                <p className="text-[9px] mt-1 text-slate-600">Need at least 3 samples.</p>
               </div>
             ) : (
-              <div className="flex flex-col gap-5">
+              <div className="flex flex-col gap-2.5">
                 
                 {/* Errors */}
-                <div className="bg-slate-900 border border-slate-800 rounded-lg p-3 flex justify-between shadow-inner">
+                <div className="bg-slate-900 border border-slate-800 rounded p-2 flex justify-between shadow-inner text-[9px]">
                   <div className="flex flex-col">
-                    <span className="text-[10px] text-slate-500 mb-1">Reproj Error (mm)</span>
-                    <span className="text-base font-mono text-emerald-400 leading-none">{sessionData.result.metadata?.reprojection_error_mm?.toFixed(4) || 'N/A'}</span>
+                    <span className="text-slate-500 text-[8.5px]">Reproj Error</span>
+                    <span className="text-xs font-mono text-emerald-400 font-bold leading-tight">
+                      {sessionData.result.metadata?.reprojection_error_mm ? `${sessionData.result.metadata.reprojection_error_mm.toFixed(3)} mm` : 'N/A'}
+                    </span>
                   </div>
                   <div className="flex flex-col text-right">
-                    <span className="text-[10px] text-slate-500 mb-1">Rot Error (deg)</span>
-                    <span className="text-base font-mono text-emerald-400 leading-none">{sessionData.result.metadata?.rotation_error_deg?.toFixed(4) || 'N/A'}</span>
+                    <span className="text-slate-500 text-[8.5px]">Rot Error</span>
+                    <span className="text-xs font-mono text-emerald-400 font-bold leading-tight">
+                      {sessionData.result.metadata?.rotation_error_deg ? `${sessionData.result.metadata.rotation_error_deg.toFixed(3)}°` : 'N/A'}
+                    </span>
                   </div>
                 </div>
 
                 {/* Camera Pose (XYZ RPY) */}
-                <div className="flex flex-col gap-2">
-                  <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Camera Pose (Base Frame)</h4>
-                  <div className="bg-slate-900 border border-slate-800 rounded p-2 text-[10px] font-mono text-slate-300 grid grid-cols-2 gap-x-2 gap-y-1.5 shadow-inner">
-                    <span className="flex justify-between"><span className="text-slate-500">X:</span> {sessionData.result.camera_pose_base?.x?.toFixed(2) ?? '-'}</span>
-                    <span className="flex justify-between"><span className="text-slate-500">R:</span> {sessionData.result.camera_pose_base?.roll_deg?.toFixed(2) ?? '-'}°</span>
-                    <span className="flex justify-between"><span className="text-slate-500">Y:</span> {sessionData.result.camera_pose_base?.y?.toFixed(2) ?? '-'}</span>
-                    <span className="flex justify-between"><span className="text-slate-500">P:</span> {sessionData.result.camera_pose_base?.pitch_deg?.toFixed(2) ?? '-'}°</span>
-                    <span className="flex justify-between"><span className="text-slate-500">Z:</span> {sessionData.result.camera_pose_base?.z?.toFixed(2) ?? '-'}</span>
-                    <span className="flex justify-between"><span className="text-slate-500">Y:</span> {sessionData.result.camera_pose_base?.yaw_deg?.toFixed(2) ?? '-'}°</span>
+                <div className="flex flex-col gap-1">
+                  <h4 className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Camera Pose (Base Frame)</h4>
+                  <div className="bg-slate-900 border border-slate-800 rounded p-1.5 text-[8.5px] font-mono text-slate-300 grid grid-cols-2 gap-x-1.5 gap-y-1 shadow-inner">
+                    <span className="flex justify-between"><span className="text-slate-500">X:</span> {sessionData.result.camera_pose_base?.x?.toFixed(1) ?? '-'}</span>
+                    <span className="flex justify-between"><span className="text-slate-500">R:</span> {sessionData.result.camera_pose_base?.roll_deg?.toFixed(1) ?? '-'}°</span>
+                    <span className="flex justify-between"><span className="text-slate-500">Y:</span> {sessionData.result.camera_pose_base?.y?.toFixed(1) ?? '-'}</span>
+                    <span className="flex justify-between"><span className="text-slate-500">P:</span> {sessionData.result.camera_pose_base?.pitch_deg?.toFixed(1) ?? '-'}°</span>
+                    <span className="flex justify-between"><span className="text-slate-500">Z:</span> {sessionData.result.camera_pose_base?.z?.toFixed(1) ?? '-'}</span>
+                    <span className="flex justify-between"><span className="text-slate-500">Y:</span> {sessionData.result.camera_pose_base?.yaw_deg?.toFixed(1) ?? '-'}°</span>
                   </div>
                 </div>
 
                 {/* Transform Matrix */}
-                <div className="flex flex-col gap-2">
-                  <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Transform Matrix</h4>
-                  <div className="bg-slate-900 border border-slate-800 rounded p-2 text-[10px] font-mono text-slate-300 overflow-x-auto whitespace-pre shadow-inner">
+                <div className="flex flex-col gap-1">
+                  <h4 className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Transform Matrix</h4>
+                  <div className="bg-slate-900 border border-slate-800 rounded p-1.5 text-[8px] font-mono text-slate-300 overflow-x-auto whitespace-pre shadow-inner">
                     {sessionData.result.T_base_camera?.map((row: any[], i: number) => (
-                      <div key={i} className="flex gap-2">
+                      <div key={i} className="flex justify-between gap-1 leading-tight">
                         {row.map((val, j) => (
-                          <span key={j} className="w-[60px] text-right inline-block">{val.toFixed(4)}</span>
+                          <span key={j} className="text-right inline-block">{val.toFixed(3)}</span>
                         ))}
                       </div>
                     ))}
                   </div>
                 </div>
 
-                {/* Intrinsics & Params */}
-                <div className="flex flex-col gap-2">
-                  <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">Configuration</h4>
-                  <div className="bg-slate-900 border border-slate-800 rounded p-2 text-[10px] font-mono text-slate-400 flex flex-col gap-1.5 shadow-inner">
+                {/* Intrinsics & Board Params */}
+                <div className="flex flex-col gap-1">
+                  <h4 className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Configuration</h4>
+                  <div className="bg-slate-900 border border-slate-800 rounded p-1.5 text-[8.5px] font-mono text-slate-400 flex flex-col gap-1 shadow-inner">
                     <div className="flex justify-between">
                       <span>Model: <span className="text-slate-200">{sessionData.result.camera_params?.camera_model || '-'}</span></span>
                       <span>Res: <span className="text-slate-200">{sessionData.result.camera_params?.width || '-'}x{sessionData.result.camera_params?.height || '-'}</span></span>
@@ -555,44 +554,69 @@ const CalibrationOp: React.FC = () => {
             </div>
 
             <div className="flex gap-1.5 items-center">
-              <button 
-                onClick={handleCapture}
-                disabled={isCapturing || isRunning || isResampling || !activeSession}
-                className="flex-1 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-medium rounded-lg shadow transition-colors flex items-center justify-center gap-1.5 text-xs disabled:opacity-40 disabled:cursor-not-allowed"
-                title="Capture single sample at current robot pose"
-              >
-                <Camera size={13} className="text-sky-400" />
-                <span>{isCapturing ? 'Wait...' : 'Capture'}</span>
-              </button>
+              {/* 1. Capture Button */}
+              <div className="relative group flex-1 flex items-center justify-center">
+                <button 
+                  onClick={handleCapture}
+                  disabled={isCapturing || isRunning || isResampling || !activeSession}
+                  className="w-full h-8 bg-gradient-to-r from-slate-800 to-slate-900 hover:from-slate-700 hover:to-slate-800 text-slate-200 rounded-lg shadow transition-all flex items-center justify-center active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed border border-slate-700 hover:border-slate-600"
+                >
+                  <Camera size={14} className={isCapturing ? "animate-pulse text-sky-400" : "text-slate-300"} />
+                </button>
+                <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
+                  <div className="bg-slate-950/80 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
+                    {isCapturing ? 'Capturing Sample...' : 'Capture Single Sample at Current Pose'}
+                  </div>
+                </div>
+              </div>
               
-              <button 
-                onClick={handleResampleAndCalibrate}
-                disabled={isRunning || isResampling || isCapturing || !activeSession || sessionData.samples.length < 3}
-                className="flex-1 py-2 bg-gradient-to-r from-indigo-600 to-blue-600 hover:from-indigo-500 hover:to-blue-500 text-white font-medium rounded-lg shadow-lg shadow-indigo-900/20 transition-all flex items-center justify-center gap-1 text-xs active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed"
-                title="Drive robot to all saved waypoints, resample images, evaluate quality, and calculate calibration"
-              >
-                <RotateCw size={13} className={isResampling ? 'animate-spin' : ''} />
-                <span>{isResampling ? 'Sampling...' : 'Re-Calib'}</span>
-              </button>
+              {/* 2. Resample & Calibrate Button */}
+              <div className="relative group flex-1 flex items-center justify-center">
+                <button 
+                  onClick={handleResampleAndCalibrate}
+                  disabled={isRunning || isResampling || isCapturing || !activeSession || sessionData.samples.length < 3}
+                  className="w-full h-8 bg-gradient-to-r from-slate-800 to-slate-900 hover:from-slate-700 hover:to-slate-800 text-slate-200 rounded-lg shadow transition-all flex items-center justify-center active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed border border-slate-700 hover:border-slate-600"
+                >
+                  <RotateCw size={14} className={isResampling ? "animate-spin text-sky-400" : "text-slate-300"} />
+                </button>
+                <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
+                  <div className="bg-slate-950/80 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
+                    {isResampling ? 'Resampling Waypoints...' : 'Resample All Waypoints & Calibrate'}
+                  </div>
+                </div>
+              </div>
 
-              <button 
-                onClick={handleRunCalibration}
-                disabled={isRunning || isResampling || isCapturing || !activeSession || sessionData.samples.length < 3}
-                className="flex-1 py-2 bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-medium rounded-lg shadow-lg shadow-emerald-900/20 transition-all flex items-center justify-center gap-1 text-xs active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed"
-                title="Calculate calibration using existing captured samples"
-              >
-                <Play size={13} fill="currentColor" />
-                <span>{isRunning ? 'Solving...' : 'Calibrate'}</span>
-              </button>
+              {/* 3. Calibrate Button */}
+              <div className="relative group flex-1 flex items-center justify-center">
+                <button 
+                  onClick={handleRunCalibration}
+                  disabled={isRunning || isResampling || isCapturing || !activeSession || sessionData.samples.length < 3}
+                  className="w-full h-8 bg-gradient-to-r from-slate-800 to-slate-900 hover:from-slate-700 hover:to-slate-800 text-slate-200 rounded-lg shadow transition-all flex items-center justify-center active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed border border-slate-700 hover:border-slate-600"
+                >
+                  <Play size={14} fill="currentColor" className={isRunning ? "animate-pulse text-sky-400" : "text-slate-300"} />
+                </button>
+                <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
+                  <div className="bg-slate-950/80 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
+                    {isRunning ? 'Solving Calibration...' : 'Calculate Calibration from Samples'}
+                  </div>
+                </div>
+              </div>
 
-              <button 
-                onClick={() => handleDeleteSession()}
-                disabled={!activeSession || isRunning || isResampling}
-                className="px-2.5 py-2 bg-transparent hover:bg-red-950/60 border border-red-900/40 hover:border-red-500/50 text-red-400 font-medium rounded-lg transition-colors flex items-center justify-center text-xs disabled:opacity-30 disabled:cursor-not-allowed"
-                title="Delete Session"
-              >
-                <Trash2 size={13} />
-              </button>
+              {/* 4. Delete Session Button */}
+              <div className="relative group flex-1 flex items-center justify-center">
+                <button 
+                  onClick={() => handleDeleteSession()}
+                  disabled={!activeSession || isRunning || isResampling}
+                  className="w-full h-8 bg-gradient-to-r from-slate-800 to-slate-900 hover:from-red-950/60 hover:to-slate-800 text-slate-300 hover:text-red-400 rounded-lg shadow transition-all flex items-center justify-center active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed border border-slate-700 hover:border-red-900/40"
+                >
+                  <Trash2 size={14} className="text-slate-300 group-hover:text-red-400 transition-colors" />
+                </button>
+                <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
+                  <div className="bg-slate-950/80 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
+                    Delete Current Session
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
 
