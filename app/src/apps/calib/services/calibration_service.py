@@ -283,16 +283,20 @@ class CalibrationService:
                     logger.error(f"Callback error: {e}")
 
         if not os.path.exists(yaml_file):
+            err_msg = f"Missing calibration_info.yaml for session '{session_id}' at: {yaml_file}"
+            logger.error(f"[-] [Calib ERROR] {err_msg}")
             safe_callback(0, 1, "", "error")
-            return {"success": False, "error": "Missing calibration_info.yaml"}
+            return {"success": False, "error": err_msg}
 
         with open(yaml_file, 'r', encoding='utf-8') as f:
             info = yaml.safe_load(f)
 
         total_samples = len(info.get("samples", []))
         if total_samples < 3:
+            err_msg = f"Session '{session_id}' has {total_samples} samples, but at least 3 are required."
+            logger.error(f"[-] [Calib ERROR] {err_msg}")
             safe_callback(0, total_samples, "", "error")
-            return {"success": False, "error": "Not enough samples. Need at least 3."}
+            return {"success": False, "error": err_msg}
 
         logger.info(f"Running calibration for session {session_id} with {total_samples} samples.")
         safe_callback(0, total_samples, "", "started")
@@ -482,8 +486,10 @@ class CalibrationService:
                     logger.error(f"Callback error: {e}")
 
         if not os.path.exists(yaml_file):
-            safe_callback(0, 1, "", "error", "Missing calibration_info.yaml")
-            return {"success": False, "error": "Missing calibration_info.yaml"}
+            err_msg = f"Missing calibration_info.yaml for session '{session_id}' at: {yaml_file}"
+            logger.error(f"[-] [Resample ERROR] {err_msg}")
+            safe_callback(0, 1, "", "error", err_msg)
+            return {"success": False, "error": err_msg}
 
         with open(yaml_file, 'r', encoding='utf-8') as f:
             info = yaml.safe_load(f) or {}
@@ -491,12 +497,16 @@ class CalibrationService:
         samples = info.get("samples", [])
         total_samples = len(samples)
         if total_samples < 3:
-            safe_callback(0, total_samples, "", "error", "Session has fewer than 3 poses to resample.")
-            return {"success": False, "error": "Not enough sample poses. Need at least 3."}
+            err_msg = f"Session '{session_id}' has {total_samples} samples, but at least 3 are required."
+            logger.error(f"[-] [Resample ERROR] {err_msg}")
+            safe_callback(0, total_samples, "", "error", err_msg)
+            return {"success": False, "error": err_msg}
 
         if not robot_service.is_connected:
-            safe_callback(0, total_samples, "", "error", "Robot is not connected.")
-            return {"success": False, "error": "Robot is not connected. Please connect robot first."}
+            err_msg = "Robot is not connected. Please connect robot before starting automatic resampling."
+            logger.error(f"[-] [Resample ERROR] {err_msg}")
+            safe_callback(0, total_samples, "", "error", err_msg)
+            return {"success": False, "error": err_msg}
 
         logger.info(f"Starting automatic resample & calibration for session '{session_id}' with {total_samples} waypoints.")
         safe_callback(0, total_samples, "", "resampling_started", f"Starting automatic resampling ({total_samples} waypoints)...")
@@ -532,6 +542,18 @@ class CalibrationService:
             safe_callback(idx + 1, total_samples, img_filename, "settling", f"Waypoint {idx+1}/{total_samples} reached. Settling 2.0s...")
             time.sleep(2.0)
 
+            # Query actual feedback pose from robot encoders
+            live_pose, _ = robot_service.get_current_pose()
+            if live_pose and len(live_pose) >= 6:
+                s["robot_pose"] = {
+                    "x": round(float(live_pose[0]), 3),
+                    "y": round(float(live_pose[1]), 3),
+                    "z": round(float(live_pose[2]), 3),
+                    "rx": round(float(live_pose[3]), 5),
+                    "ry": round(float(live_pose[4]), 5),
+                    "rz": round(float(live_pose[5]), 5)
+                }
+
             # 3. Capture and persist new camera frame (overwriting sample image)
             safe_callback(idx + 1, total_samples, img_filename, "capturing", f"Capturing sample {idx+1}/{total_samples}...")
             save_res = camera_service.save_frame(
@@ -565,6 +587,20 @@ class CalibrationService:
                     f"Underexposed: {quality['underexposed_pct']}%"
                 )
 
+                # Explicit error / warning logs on failure or degradation
+                if not corners_found:
+                    logger.error(
+                        f"[-] [Sample #{sample_id} ERROR] Chessboard corners NOT detected in '{img_filename}'! "
+                        f"(Sharpness: {quality['sharpness']}, Brightness: {quality['brightness']}). "
+                        f"This sample will be excluded during calibration optimization."
+                    )
+                elif quality['quality_rating'] == 'POOR':
+                    logger.warning(
+                        f"[!] [Sample #{sample_id} WARNING] Poor image quality detected in '{img_filename}' "
+                        f"(Sharpness: {quality['sharpness']}, Brightness: {quality['brightness']}, Overexposed: {quality['overexposed_pct']}%). "
+                        f"Please inspect target illumination and check for glare or motion blur."
+                    )
+
                 # Render corners and quality badge to in-memory preview cache
                 preview_img = img.copy()
                 if corners_found:
@@ -583,13 +619,13 @@ class CalibrationService:
 
                 s["timestamp"] = datetime.now().isoformat()
             else:
-                logger.warning(f"Failed to load image for quality check: {img_path}")
+                logger.error(f"[-] [Sample #{sample_id} ERROR] Failed to load captured image file from disk: {img_path}")
 
             # 5. Pause for 1.0s, then proceed to the next waypoint pose
             safe_callback(idx + 1, total_samples, img_filename, "waiting", f"Sample #{sample_id} captured ({quality_str}). Pausing 1.0s...")
             time.sleep(1.0)
 
-        # Sync back updated metadata to YAML
+        # Sync back updated metadata and feedback poses to YAML
         with open(yaml_file, 'w', encoding='utf-8') as f:
             yaml.dump(info, f, default_flow_style=False)
 
