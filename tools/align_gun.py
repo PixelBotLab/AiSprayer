@@ -3,7 +3,7 @@ import numpy as np
 import os
 
 def align_gun(face_index=0):
-    base_dir = "app/urdf/meshes/dobot_gazebo_sim/"
+    base_dir = "../app/urdf/meshes/dobot_gazebo_sim/"
     filepath = os.path.join(base_dir, "my_tools.stl")
     
     print(f"Loading {filepath}...")

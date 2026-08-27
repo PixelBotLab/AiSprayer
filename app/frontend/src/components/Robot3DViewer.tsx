@@ -70,10 +70,12 @@ function loadUrdfMesh(
 
   if (/\.stl(\?.*)?$/i.test(path)) {
     const loader = new STLLoader(manager);
+    const isTool = /my_tools|spray_gun/i.test(path);
+    const defaultColor = isTool ? 0x464d57 : 0xb0b0b0;
     loader.load(
       versionedPath,
       (geom) => {
-        done(new Mesh(geom, material ?? new MeshPhongMaterial({ color: 0xb0b0b0, side: DoubleSide })));
+        done(new Mesh(geom, material ?? new MeshPhongMaterial({ color: defaultColor, specular: 0x2a3038, shininess: 30, side: DoubleSide })));
       },
       undefined,
       (err) => done(new Object3D(), err as Error),
