@@ -66,10 +66,12 @@ function loadUrdfMesh(
   const material = typeof doneOrMaterial !== 'function' ? doneOrMaterial : undefined;
   if (!done) return;
 
-  if (/\.stl$/i.test(path)) {
+  const versionedPath = path.includes('?') ? path : `${path}?v=${Date.now()}`;
+
+  if (/\.stl(\?.*)?$/i.test(path)) {
     const loader = new STLLoader(manager);
     loader.load(
-      path,
+      versionedPath,
       (geom) => {
         done(new Mesh(geom, material ?? new MeshPhongMaterial({ color: 0xb0b0b0, side: DoubleSide })));
       },
@@ -79,10 +81,10 @@ function loadUrdfMesh(
     return;
   }
 
-  if (/\.dae$/i.test(path)) {
+  if (/\.dae(\?.*)?$/i.test(path)) {
     const loader = new ColladaLoader(manager);
     loader.load(
-      path,
+      versionedPath,
       (dae) => {
         if (dae && dae.scene) {
           stripEmbeddedLights(dae.scene);

@@ -35,7 +35,7 @@ hardware:
     global_speed_factor: 50     # 示教/远程/运行全局速度百分比 (startup 时 set_speed)
     max_tcp_speed_mm_s: 2000    # robot cr5最大线速度为2000mm/s, 在控制软件中设置
     max_joint_speed_deg_s: [180, 180, 180, 180, 180, 180]  # robot cr5最大关节速度为180度/s, 在控制软件中设置
-    robot_urdf: "app/urdf/cr5_robot.urdf" # cr5_robot.urdf/cr5_robot_with_gun.urdf
+    robot_urdf: "app/urdf/cr5_robot_with_my_tools.urdf" # cr5_robot.urdf/cr5_robot_with_gun.urdf
     robot_tcp: "spray_nozzle_link"
 
 # 2. 视觉与规划层配置 (Vision & Planning)
