@@ -40,28 +40,108 @@
     </collision>
   </link>
 
-  <link name="my_tools">
+  <!-- ========================================================================= -->
+  <!-- 末端复合工具挂载 (End-Effector Composite Tool: 喷枪 + 夹爪 + 相机 + 支架)   -->
+  <!-- ========================================================================= -->
+
+  <!-- 1. 黑色部件 (喷枪枪身 + 相机机身 + 夹爪驱动器本体) -> 颜色: 黑曜炭黑 -->
+  <link name="my_tools_black">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://dobot_rviz/meshes/dobot_gazebo_sim/my_tools.stl" scale="0.001 0.001 0.001" />
+        <mesh filename="package://dobot_rviz/meshes/dobot_gazebo_sim/my_tools_black.stl" scale="0.001 0.001 0.001" />
       </geometry>
-      <material name="iron_gray">
-        <color rgba="0.26 0.29 0.33 1.0" />
+      <material name="obsidian_black">
+        <color rgba="0.14 0.16 0.19 1.0" />
       </material>
     </visual>
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://dobot_rviz/meshes/dobot_gazebo_sim/my_tools.stl" scale="0.001 0.001 0.001" />
+        <mesh filename="package://dobot_rviz/meshes/dobot_gazebo_sim/my_tools_black.stl" scale="0.001 0.001 0.001" />
       </geometry>
     </collision>
   </link>
 
-  <joint name="Link6_to_my_tools" type="fixed">
+  <joint name="Link6_to_my_tools_black" type="fixed">
     <origin xyz="0 0 0" rpy="0 0 1.5708" />
     <parent link="Link6" />
-    <child link="my_tools" />
+    <child link="my_tools_black" />
+  </joint>
+
+  <!-- 2. 支架部件 (四方主安装框体 + 顶部相机钣金支架) -> 颜色: 暗调铁银色 -->
+  <link name="my_tools_silver">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://dobot_rviz/meshes/dobot_gazebo_sim/my_tools_silver.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="iron_silver">
+        <color rgba="0.44 0.47 0.52 1.0" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://dobot_rviz/meshes/dobot_gazebo_sim/my_tools_silver.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="Link6_to_my_tools_silver" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 1.5708" />
+    <parent link="Link6" />
+    <child link="my_tools_silver" />
+  </joint>
+
+  <!-- 3. 夹爪活动部件 (夹爪手指 + 导轨滑块夹具) -> 颜色: 哑光银色 -->
+  <link name="my_tools_fingers">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://dobot_rviz/meshes/dobot_gazebo_sim/my_tools_fingers.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="matte_silver">
+        <color rgba="0.65 0.68 0.72 1.0" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://dobot_rviz/meshes/dobot_gazebo_sim/my_tools_fingers.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="Link6_to_my_tools_fingers" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 1.5708" />
+    <parent link="Link6" />
+    <child link="my_tools_fingers" />
+  </joint>
+
+  <!-- 4. 喷枪前端部件 (喷枪锥形枪嘴 / 雾化喷头) -> 颜色: 金属黄铜金色 -->
+  <link name="my_tools_nozzle">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://dobot_rviz/meshes/dobot_gazebo_sim/my_tools_nozzle.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="brass_gold">
+        <color rgba="0.88 0.65 0.14 1.0" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://dobot_rviz/meshes/dobot_gazebo_sim/my_tools_nozzle.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="Link6_to_my_tools_nozzle" type="fixed">
+    <origin xyz="0 0 0" rpy="0 0 1.5708" />
+    <parent link="Link6" />
+    <child link="my_tools_nozzle" />
   </joint>
 
   

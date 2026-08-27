@@ -36,10 +36,64 @@ def align_gun(face_index=0):
     # 这样圆饼的中心就会完美地贴在法兰原点上
     new_center = trimesh.transformations.translation_matrix(-np.dot(rotation_matrix[:3,:3], target_center))
     mesh.apply_transform(new_center)
-    
     mesh.export(filepath)
-    print(f"\n对齐完成！喷枪已经按照 Region {face_index} 对齐到了原点。请重新编译并在 RViz 中查看。")
-    print("（如果发现选错面了，可以打开这个脚本把 align_gun(face_index=0) 里的数字改成 1 或 2 再运行）")
+    
+    # 自动分离多材质组件：喷枪枪身/相机/夹爪本体（黑色）、支架（铁银色）、夹爪手指（哑光银）、喷枪枪嘴（金色）
+    bodies = mesh.split()
+    if len(bodies) >= 2:
+        black_bodies = []
+        silver_bodies = []
+        fingers_bodies = []
+        nozzle_mesh = None
+
+        for b in bodies:
+            ext = b.extents
+            # 1. 相机: ~125mm 宽长条形
+            if max(ext) > 120 and min(ext) > 25:
+                black_bodies.append(b)
+            # 2. 相机支架: ~120mm 宽薄板支架
+            elif max(ext) > 115 and min(ext) < 25:
+                silver_bodies.append(b)
+            # 3. 喷枪: 圆柱体 -> 切分为枪身(黑) 与 枪嘴(金)
+            elif abs(ext[0] - ext[1]) < 2.0 and ext[2] > 60:
+                fc = b.triangles.mean(axis=1)
+                # 枪嘴尖端位于最前端 (Z 轴靠前部分)
+                tip_z_threshold = b.bounds[1][2] - 10.0
+                noz_mask = fc[:, 2] >= tip_z_threshold if (b.bounds[1][2] - b.bounds[0][2]) > 20.0 else np.zeros(len(fc), dtype=bool)
+                if noz_mask.any() and (~noz_mask).any():
+                    noz = trimesh.Trimesh(vertices=b.vertices, faces=b.faces[noz_mask], process=True)
+                    gun_b = trimesh.Trimesh(vertices=b.vertices, faces=b.faces[~noz_mask], process=True)
+                    nozzle_mesh = noz
+                    black_bodies.append(gun_b)
+                else:
+                    black_bodies.append(b)
+            # 4. 主支架: 法兰安装圆盘 (厚度 <= 6mm) 或主框体 (三角面数 > 2000)
+            elif ext[2] < 6.0 or len(b.faces) > 2000:
+                silver_bodies.append(b)
+            # 5. 夹爪手指与滑块夹具 (长指 dz ~ 100mm 或 薄块 10mm)
+            elif max(ext) > 95 or (min(ext) <= 12.0 and max(ext) <= 50.0):
+                fingers_bodies.append(b)
+            # 6. 夹爪执行器本体
+            else:
+                black_bodies.append(b)
+
+        if black_bodies and silver_bodies and fingers_bodies:
+            black_mesh = trimesh.util.concatenate(black_bodies)
+            silver_mesh = trimesh.util.concatenate(silver_bodies)
+            fingers_mesh = trimesh.util.concatenate(fingers_bodies)
+            black_out = os.path.join(base_dir, "my_tools_black.stl")
+            silver_out = os.path.join(base_dir, "my_tools_silver.stl")
+            fingers_out = os.path.join(base_dir, "my_tools_fingers.stl")
+            black_mesh.export(black_out)
+            silver_mesh.export(silver_out)
+            fingers_mesh.export(fingers_out)
+            if nozzle_mesh:
+                noz_out = os.path.join(base_dir, "my_tools_nozzle.stl")
+                nozzle_mesh.export(noz_out)
+            print(f"已同步生成多材质部件: 喷枪+相机+夹爪本体(黑色), 支架(铁银色), 夹爪手指(哑光银), 喷枪嘴(金色)")
+
+    print(f"\n对齐完成！喷枪已经按照 Region {face_index} 对齐到了原点。请在页面 3D 视图中查看。")
+    print("（如果发现选错面了，可以把 align_gun.py 里的数字改成 1 或 2 再运行）")
 
 if __name__ == '__main__':
     import sys

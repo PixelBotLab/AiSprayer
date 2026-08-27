@@ -70,12 +70,21 @@ function loadUrdfMesh(
 
   if (/\.stl(\?.*)?$/i.test(path)) {
     const loader = new STLLoader(manager);
-    const isTool = /my_tools|spray_gun/i.test(path);
-    const defaultColor = isTool ? 0x464d57 : 0xb0b0b0;
     loader.load(
       versionedPath,
       (geom) => {
-        done(new Mesh(geom, material ?? new MeshPhongMaterial({ color: defaultColor, specular: 0x2a3038, shininess: 30, side: DoubleSide })));
+        // Dynamically use the material & color parsed directly from the URDF XML (<material><color rgba="..." /></material>)
+        let m: any = material;
+        if (m) {
+          m.side = DoubleSide;
+          if (m instanceof MeshPhongMaterial) {
+            m.shininess = m.shininess || 45;
+            m.specular = new Color(0x383838);
+          }
+        } else {
+          m = new MeshPhongMaterial({ color: 0xb0b0b0, specular: new Color(0x383838), shininess: 40, side: DoubleSide });
+        }
+        done(new Mesh(geom, m));
       },
       undefined,
       (err) => done(new Object3D(), err as Error),
@@ -154,10 +163,6 @@ const RobotModel: React.FC<RobotModelProps> = ({
               if (!m) return;
               m.side = DoubleSide;
               m.needsUpdate = true;
-              if (m.color && m.color instanceof Color) {
-                const { r: cr, g: cg, b: cb } = m.color;
-                if (cr + cg + cb < 0.05) m.color.setRGB(0.08, 0.08, 0.08);
-              }
             });
           });
           setRobot(r);

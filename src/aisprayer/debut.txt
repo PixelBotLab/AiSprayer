@@ -1,9 +1,0 @@
-❯ python tools/vision/3.open3d_viewer.py
-[*] 自动锁定最新任务: trouser_002
- [+] 加载点云: /home/zhanlu/dev/repos/AiSprayer/data/runs/trouser_002/0/scan.pcd (303878 points)
- [+] 加载轨迹: /home/zhanlu/dev/repos/AiSprayer/data/runs/trouser_002/0/path.yaml (64 points)
-[*] 正在启动 Open3D 渲染窗口...
-[Open3D WARNING] GLFW Error: Wayland: The platform does not support setting the window position
-[Open3D WARNING] Failed to initialize GLEW.
-[Open3D WARNING] [DrawGeometries] Failed creating OpenGL window.
-
