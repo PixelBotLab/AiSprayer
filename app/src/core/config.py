@@ -55,8 +55,60 @@ class SprayerConfig:
             return {}
 
     @property
+    def hand_eye_mount(self):
+        """
+        当前标定结果对应的相机安装方式: 'eye-to-hand' 或 'eye-in-hand'。
+
+        历史结果文件没写这个字段 (或写的是旧的 calibration_mode), 一律按眼在手外
+        处理 —— 那是本项目此前唯一支持的装法。
+        """
+        if not self.calib_data:
+            return "eye-to-hand"
+        meta = self.calib_data.get("metadata", {}) or {}
+        mount = (self.calib_data.get("hand_eye_mount")
+                 or meta.get("hand_eye_mount")
+                 or meta.get("calibration_mode"))
+        return "eye-in-hand" if mount == "eye-in-hand" else "eye-to-hand"
+
+    @property
+    def T_flange_camera(self):
+        """眼在手上标定的相机安装外参 (4x4 列表, 平移 mm); 眼在手外时为 None。"""
+        if not self.calib_data:
+            return None
+        return self.calib_data.get("T_flange_camera")
+
+    def T_camera_to_base_at(self, base_flange_pose):
+        """
+        指定法兰位姿下相机到基座的变换 (4x4 列表, 平移 m)。
+
+        眼在手外: 与法兰无关, 直接返回标定的常量外参。
+        眼在手上: T_base_camera = T_base_flange(pose) · T_flange_camera, 每次拍摄都不同。
+
+        :param base_flange_pose: [x, y, z, rx, ry, rz], 平移 mm, 姿态度 (Dobot 'xyz' 内禀序列)
+        """
+        if self.hand_eye_mount != "eye-in-hand":
+            return self.T_camera_to_base
+        if base_flange_pose is None or len(base_flange_pose) < 6:
+            logger.warning("eye-in-hand calibration needs a base_flange_pose to resolve camera extrinsics")
+            return None
+        if not self.T_flange_camera:
+            logger.warning("Calibration result is eye-in-hand but T_flange_camera is missing")
+            return None
+
+        import numpy as np
+        from scipy.spatial.transform import Rotation
+
+        pose = [float(v) for v in base_flange_pose[:6]]
+        T_base_flange = np.eye(4)
+        T_base_flange[:3, :3] = Rotation.from_euler("xyz", pose[3:], degrees=True).as_matrix()
+        T_base_flange[:3, 3] = pose[:3]
+        T = T_base_flange @ np.array(self.T_flange_camera, dtype=float)
+        T[:3, 3] /= 1000.0  # mm -> m, 与 T_camera_to_base 一致
+        return T.tolist()
+
+    @property
     def T_camera_to_base(self):
-        """手眼标定矩阵 (4x4 列表，平移部分被自动转换为米)"""
+        """手眼标定矩阵 (4x4 列表，平移部分被自动转换为米)。眼在手上时为 None, 改用 T_camera_to_base_at。"""
         if self.calib_data:
             key = 'T_base_camera' if 'T_base_camera' in self.calib_data else ('T_camera_to_base' if 'T_camera_to_base' in self.calib_data else None)
             if key:
@@ -69,6 +121,13 @@ class SprayerConfig:
                 T[1][3] /= 1000.0
                 T[2][3] /= 1000.0
                 return T
+            if self.hand_eye_mount == "eye-in-hand" and not getattr(self, "_warned_eye_in_hand", False):
+                # 眼在手上时相机在基座系的位姿不是常量, 返回一个错误的常量比返回 None 危险得多
+                self._warned_eye_in_hand = True
+                logger.warning(
+                    "Active calibration is eye-in-hand: T_camera_to_base is not constant, "
+                    "use T_camera_to_base_at(base_flange_pose)"
+                )
         return None
 
     @property

@@ -3,16 +3,57 @@ import { Play, FolderPlus, Trash2, Image as ImageIcon, Camera, ChevronLeft, Chev
 import { CustomModal, type ModalConfig } from '../common/CustomModal';
 import { API_BASE } from '../../config';
 
+type MountCatalog = {
+  mounts: string[];
+  default: string;
+  min_samples: Record<string, number>;
+  recommended_samples: Record<string, number>;
+};
+
+const MOUNT_LABELS: Record<string, string> = {
+  'eye-to-hand': 'Eye-to-Hand',
+  'eye-in-hand': 'Eye-in-Hand',
+};
+
+// 按钮上只显示缩写, 全名与装法说明放 tooltip / aria-label
+const MOUNT_ABBREV: Record<string, string> = {
+  'eye-to-hand': 'E2H',
+  'eye-in-hand': 'EIH',
+};
+
+const MOUNT_HINTS: Record<string, string> = {
+  'eye-to-hand': 'Camera fixed on the machine base, chessboard mounted on the robot flange.',
+  'eye-in-hand': 'Camera mounted on the robot flange, chessboard fixed in the work cell.',
+};
+
 const CalibrationOp: React.FC = () => {
   const [sessions, setSessions] = useState<string[]>([]);
   const [activeSession, setActiveSession] = useState<string | null>(null);
-  const [sessionData, setSessionData] = useState<{ samples: any[], result: any, mode?: string }>({ samples: [], result: null });
+  const [sessionData, setSessionData] = useState<{
+    samples: any[]; result: any; mount?: string;
+    min_samples?: number; recommended_samples?: number;
+  }>({ samples: [], result: null });
+  const [mountCatalog, setMountCatalog] = useState<MountCatalog | null>(null);
+  const [selectedMount, setSelectedMount] = useState<string>('eye-to-hand');
   const [activeImage, setActiveImage] = useState<string | null>(null);
   const [isCapturing, setIsCapturing] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [isResampling, setIsResampling] = useState(false);
   const [progressData, setProgressData] = useState<{current: number, total: number, status: string, message?: string} | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  const minSamples = sessionData.min_samples ?? 3;
+  const activeMount = sessionData.mount ?? selectedMount;
+
+  // 两种安装的结果键名不同: 眼在手上标的是相机相对法兰, 不是相对基座
+  const resultMount = sessionData.result?.metadata?.hand_eye_mount || sessionData.mount || 'eye-to-hand';
+  const isInHand = resultMount === 'eye-in-hand';
+  const cameraPose = isInHand ? sessionData.result?.camera_pose_flange : sessionData.result?.camera_pose_base;
+  const cameraMatrix = isInHand ? sessionData.result?.T_flange_camera : sessionData.result?.T_base_camera;
+  const meta = sessionData.result?.metadata;
+  const reprojPx: number | null | undefined = meta?.reprojection_error_px;
+  const reprojMm: number | undefined = meta?.translation_error_mm ?? meta?.reprojection_error_mm;
+  const quality = meta?.data_quality;
 
   // Custom Modal State
   const [modalConfig, setModalConfig] = useState<ModalConfig>({
@@ -57,7 +98,7 @@ const CalibrationOp: React.FC = () => {
     }
   };
 
-  const fetchSessionData = async (sessionId: string) => {
+  const fetchSessionData = async (sessionId: string): Promise<any[] | null> => {
     try {
       const res = await fetch(`${API_BASE}/api/calib/sessions/${sessionId}`);
       if (res.ok) {
@@ -65,7 +106,9 @@ const CalibrationOp: React.FC = () => {
         setSessionData({
           samples: data.samples || [],
           result: data.result || null,
-          mode: data.mode || undefined
+          mount: data.mount || undefined,
+          min_samples: data.min_samples,
+          recommended_samples: data.recommended_samples
         });
         if (data.samples && data.samples.length > 0) {
           // If active image doesn't exist in current samples, set to the last one
@@ -76,14 +119,30 @@ const CalibrationOp: React.FC = () => {
         } else {
           setActiveImage(null);
         }
+        return data.samples || [];
       }
     } catch (err) {
       console.error(`Failed to fetch session ${sessionId} data:`, err);
+    }
+    return null;
+  };
+
+  const fetchMountCatalog = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/calib/mounts`);
+      if (res.ok) {
+        const data = await res.json();
+        setMountCatalog(data);
+        if (data.default) setSelectedMount(data.default);
+      }
+    } catch (err) {
+      console.error('Failed to fetch hand-eye mounts:', err);
     }
   };
 
   useEffect(() => {
     fetchSessions();
+    fetchMountCatalog();
   }, []);
 
   useEffect(() => {
@@ -94,7 +153,11 @@ const CalibrationOp: React.FC = () => {
 
   const handleCreateSession = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/calib/sessions/new`, { method: 'POST' });
+      const res = await fetch(`${API_BASE}/api/calib/sessions/new`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mount: selectedMount })
+      });
       if (res.ok) {
         const data = await res.json();
         await fetchSessions(data.session_id);
@@ -142,17 +205,9 @@ const CalibrationOp: React.FC = () => {
     try {
       const res = await fetch(`${API_BASE}/api/calib/sessions/${activeSession}/samples`, { method: 'POST' });
       if (res.ok) {
-        const dataRes = await fetch(`${API_BASE}/api/calib/sessions/${activeSession}`);
-        if (dataRes.ok) {
-          const data = await dataRes.json();
-          setSessionData({ 
-            samples: data.samples || [], 
-            result: data.result || null,
-            mode: data.mode || undefined
-          });
-          if (data.samples?.length > 0) {
-            setActiveImage(data.samples[data.samples.length - 1].filename);
-          }
+        const samples = await fetchSessionData(activeSession);
+        if (samples && samples.length > 0) {
+          setActiveImage(samples[samples.length - 1].filename);
         }
       } else {
         const err = await res.json();
@@ -167,8 +222,8 @@ const CalibrationOp: React.FC = () => {
 
   const handleResampleAndCalibrate = async () => {
     if (!activeSession || isRunning || isResampling || isCapturing) return;
-    if (sessionData.samples.length < 3) {
-      showAlert('Insufficient Samples', 'At least 3 valid calibration waypoints are required to resample and solve camera extrinsics.');
+    if (sessionData.samples.length < minSamples) {
+      showAlert('Insufficient Samples', `'${activeMount}' calibration needs at least ${minSamples} valid waypoints. Current session has ${sessionData.samples.length}.`);
       return;
     }
     setIsResampling(true);
@@ -224,8 +279,8 @@ const CalibrationOp: React.FC = () => {
 
   const handleRunCalibration = async () => {
     if (!activeSession || isRunning || isResampling || isCapturing) return;
-    if (sessionData.samples.length < 3) {
-      showAlert('Insufficient Samples', 'At least 3 valid calibration samples are required to solve camera extrinsics.');
+    if (sessionData.samples.length < minSamples) {
+      showAlert('Insufficient Samples', `'${activeMount}' calibration needs at least ${minSamples} valid samples. Current session has ${sessionData.samples.length}.`);
       return;
     }
     setIsRunning(true);
@@ -300,7 +355,7 @@ const CalibrationOp: React.FC = () => {
         <button
           onClick={handleCreateSession}
           className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-sky-400 border border-slate-700 shrink-0 transition-colors flex items-center gap-1 text-xs font-medium px-2"
-          title="Create New Session"
+          title={`Create New ${MOUNT_LABELS[selectedMount] || selectedMount} Session`}
         >
           <FolderPlus size={13} />
           <span>New</span>
@@ -451,58 +506,103 @@ const CalibrationOp: React.FC = () => {
           {/* Scrollable Results Area */}
           <div className="flex-1 overflow-y-auto custom-scrollbar p-2.5 flex flex-col gap-2.5">
             
-            {/* Header: Mode Display */}
-            {sessionData.mode && (
-              <div className="flex justify-between items-center bg-slate-900 border border-slate-800 rounded px-2 py-1 shadow-inner">
-                <span className="text-[9px] text-slate-500 uppercase tracking-wider font-bold">Mode</span>
-                <span className="text-[9px] text-emerald-400 font-mono uppercase bg-emerald-950/30 px-1.5 py-0.5 rounded border border-emerald-900/50">
-                  {sessionData.mode}
-                </span>
+            {/* Hand-Eye Mount: selectable for a new session, locked once bound */}
+            <div className="flex justify-between items-center gap-1.5 bg-slate-900 border border-slate-800 rounded px-2 py-1 shadow-inner">
+              <span className="text-[9px] text-slate-500 uppercase tracking-wider font-bold shrink-0"
+                    title={activeSession
+                      ? "Bound at session creation. Pick a different mount and press New to start a new session."
+                      : "Camera mounting for the next session created by New."}>
+                Mount
+              </span>
+              <div className="flex items-center gap-0.5 p-0.5 bg-slate-800/60 rounded-md border border-slate-700">
+                {(mountCatalog?.mounts || ['eye-to-hand', 'eye-in-hand']).map((m) => {
+                  const bound = activeSession ? activeMount : selectedMount;
+                  const isBoundCurrent = !!activeSession;
+                  const active = bound === m;
+                  return (
+                    <button
+                      key={m}
+                      disabled={isBoundCurrent}
+                      onClick={() => setSelectedMount(m)}
+                      title={`${MOUNT_LABELS[m] || m}: ${MOUNT_HINTS[m] || m}`}
+                      aria-label={MOUNT_LABELS[m] || m}
+                      className={`px-1.5 py-1 rounded text-[9px] font-mono font-bold uppercase tracking-wide transition-colors border ${
+                        active
+                          ? m === 'eye-in-hand'
+                            ? 'text-indigo-300 bg-indigo-950/40 border-indigo-700/60'
+                            : 'text-emerald-400 bg-emerald-950/40 border-emerald-700/60'
+                          : 'text-slate-500 border-transparent hover:text-slate-200 hover:bg-slate-700/60'
+                      } ${isBoundCurrent ? 'cursor-not-allowed' : ''}`}
+                    >
+                      {MOUNT_ABBREV[m] || m}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {quality?.degenerate && (
+              <div className="bg-rose-950/40 border border-rose-900/60 rounded px-2 py-1 text-[8.5px] text-rose-300 leading-tight"
+                   title="All samples rotate about nearly the same axis, so the hand-eye transform is not uniquely observable. Capture waypoints with the flange rotated about clearly different axes.">
+                Rotation degenerate (axis coverage {quality.axis_coverage?.toFixed(2)}): result may be unreliable.
               </div>
             )}
 
             {!sessionData.result ? (
               <div className="flex-1 flex flex-col items-center justify-center text-slate-500 opacity-60 text-center py-6">
                 <p className="text-[11px]">No calibration data yet.</p>
-                <p className="text-[9px] mt-1 text-slate-600">Need at least 3 samples.</p>
+                <p className="text-[9px] mt-1 text-slate-600">
+                  {`${MOUNT_LABELS[activeMount] || activeMount}: need ${minSamples} samples (recommended ${sessionData.recommended_samples ?? '-'})`}
+                </p>
+                <p className="text-[9px] mt-1 text-slate-600">{MOUNT_HINTS[activeMount]}</p>
               </div>
             ) : (
               <div className="flex flex-col gap-2.5">
                 
                 {/* Errors */}
-                <div className="bg-slate-900 border border-slate-800 rounded p-2 flex justify-between shadow-inner text-[9px]">
+                <div className="bg-slate-900 border border-slate-800 rounded p-2 grid grid-cols-3 gap-1 shadow-inner text-[9px]">
                   <div className="flex flex-col">
-                    <span className="text-slate-500 text-[8.5px]">Reproj Error</span>
+                    <span className="text-slate-500 text-[8.5px]" title="Mean corner reprojection error in pixels">Reproj</span>
                     <span className="text-xs font-mono text-emerald-400 font-bold leading-tight">
-                      {sessionData.result.metadata?.reprojection_error_mm ? `${sessionData.result.metadata.reprojection_error_mm.toFixed(3)} mm` : 'N/A'}
+                      {reprojPx != null ? `${reprojPx.toFixed(2)} px` : 'N/A'}
+                    </span>
+                  </div>
+                  <div className="flex flex-col" title="Mean board-position residual of the fitted model in mm">
+                    <span className="text-slate-500 text-[8.5px]">Residual</span>
+                    <span className="text-xs font-mono text-emerald-400 font-bold leading-tight">
+                      {reprojMm != null ? `${reprojMm.toFixed(2)} mm` : 'N/A'}
                     </span>
                   </div>
                   <div className="flex flex-col text-right">
-                    <span className="text-slate-500 text-[8.5px]">Rot Error</span>
+                    <span className="text-slate-500 text-[8.5px]">Rot Err</span>
                     <span className="text-xs font-mono text-emerald-400 font-bold leading-tight">
-                      {sessionData.result.metadata?.rotation_error_deg ? `${sessionData.result.metadata.rotation_error_deg.toFixed(3)}°` : 'N/A'}
+                      {meta?.rotation_error_deg != null ? `${meta.rotation_error_deg.toFixed(2)}°` : 'N/A'}
                     </span>
                   </div>
                 </div>
 
                 {/* Camera Pose (XYZ RPY) */}
                 <div className="flex flex-col gap-1">
-                  <h4 className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Camera Pose (Base Frame)</h4>
+                  <h4 className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">
+                    {`Camera Pose (${isInHand ? 'Flange' : 'Base'} Frame)`}
+                  </h4>
                   <div className="bg-slate-900 border border-slate-800 rounded p-1.5 text-[8.5px] font-mono text-slate-300 grid grid-cols-2 gap-x-1.5 gap-y-1 shadow-inner">
-                    <span className="flex justify-between"><span className="text-slate-500">X:</span> {sessionData.result.camera_pose_base?.x?.toFixed(1) ?? '-'}</span>
-                    <span className="flex justify-between"><span className="text-slate-500">R:</span> {sessionData.result.camera_pose_base?.roll_deg?.toFixed(1) ?? '-'}°</span>
-                    <span className="flex justify-between"><span className="text-slate-500">Y:</span> {sessionData.result.camera_pose_base?.y?.toFixed(1) ?? '-'}</span>
-                    <span className="flex justify-between"><span className="text-slate-500">P:</span> {sessionData.result.camera_pose_base?.pitch_deg?.toFixed(1) ?? '-'}°</span>
-                    <span className="flex justify-between"><span className="text-slate-500">Z:</span> {sessionData.result.camera_pose_base?.z?.toFixed(1) ?? '-'}</span>
-                    <span className="flex justify-between"><span className="text-slate-500">Y:</span> {sessionData.result.camera_pose_base?.yaw_deg?.toFixed(1) ?? '-'}°</span>
+                    <span className="flex justify-between"><span className="text-slate-500">X:</span> {cameraPose?.x?.toFixed(1) ?? '-'}</span>
+                    <span className="flex justify-between"><span className="text-slate-500">R:</span> {cameraPose?.roll_deg?.toFixed(1) ?? '-'}°</span>
+                    <span className="flex justify-between"><span className="text-slate-500">Y:</span> {cameraPose?.y?.toFixed(1) ?? '-'}</span>
+                    <span className="flex justify-between"><span className="text-slate-500">P:</span> {cameraPose?.pitch_deg?.toFixed(1) ?? '-'}°</span>
+                    <span className="flex justify-between"><span className="text-slate-500">Z:</span> {cameraPose?.z?.toFixed(1) ?? '-'}</span>
+                    <span className="flex justify-between"><span className="text-slate-500">Y:</span> {cameraPose?.yaw_deg?.toFixed(1) ?? '-'}°</span>
                   </div>
                 </div>
 
                 {/* Transform Matrix */}
                 <div className="flex flex-col gap-1">
-                  <h4 className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">Transform Matrix</h4>
+                  <h4 className="text-[9px] font-bold text-slate-400 uppercase tracking-wider">
+                    {`Transform Matrix (${isInHand ? 'T_flange_camera' : 'T_base_camera'})`}
+                  </h4>
                   <div className="bg-slate-900 border border-slate-800 rounded p-1.5 text-[8px] font-mono text-slate-300 overflow-x-auto whitespace-pre shadow-inner">
-                    {sessionData.result.T_base_camera?.map((row: any[], i: number) => (
+                    {cameraMatrix?.map((row: any[], i: number) => (
                       <div key={i} className="flex justify-between gap-1 leading-tight">
                         {row.map((val, j) => (
                           <span key={j} className="text-right inline-block">{val.toFixed(3)}</span>
@@ -574,7 +674,7 @@ const CalibrationOp: React.FC = () => {
               <div className="relative group flex-1 flex items-center justify-center">
                 <button 
                   onClick={handleResampleAndCalibrate}
-                  disabled={isRunning || isResampling || isCapturing || !activeSession || sessionData.samples.length < 3}
+                  disabled={isRunning || isResampling || isCapturing || !activeSession || sessionData.samples.length < minSamples}
                   className="w-full h-8 bg-gradient-to-r from-slate-800 to-slate-900 hover:from-slate-700 hover:to-slate-800 text-slate-200 rounded-lg shadow transition-all flex items-center justify-center active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed border border-slate-700 hover:border-slate-600"
                 >
                   <RotateCw size={14} className={isResampling ? "animate-spin text-sky-400" : "text-slate-300"} />
@@ -590,7 +690,7 @@ const CalibrationOp: React.FC = () => {
               <div className="relative group flex-1 flex items-center justify-center">
                 <button 
                   onClick={handleRunCalibration}
-                  disabled={isRunning || isResampling || isCapturing || !activeSession || sessionData.samples.length < 3}
+                  disabled={isRunning || isResampling || isCapturing || !activeSession || sessionData.samples.length < minSamples}
                   className="w-full h-8 bg-gradient-to-r from-slate-800 to-slate-900 hover:from-slate-700 hover:to-slate-800 text-slate-200 rounded-lg shadow transition-all flex items-center justify-center active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed border border-slate-700 hover:border-slate-600"
                 >
                   <Play size={14} fill="currentColor" className={isRunning ? "animate-pulse text-sky-400" : "text-slate-300"} />

@@ -5,7 +5,7 @@ import json
 import shutil
 import time
 from datetime import datetime
-from typing import List, Tuple, Dict, Any, Optional
+from typing import List, Sequence, Tuple, Dict, Any, Optional
 import yaml
 import numpy as np
 import cv2
@@ -13,9 +13,12 @@ import cv2
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "app/src"))
 
-from apps.calib.services.calib_solver import (
-    clean_calibration_data, evaluate_data_diversity, 
-    optimize_extrinsics_solve, calculate_rotation_error
+from apps.calib.services.hand_eye import (
+    DOBOT_EULER_SEQ, EYE_IN_HAND, EYE_TO_HAND, INTERNAL_ANGLE_UNIT, MOUNTS,
+    UNIT_DEG, UNIT_RAD, CalibSample, chessboard_object_points, clean_samples,
+    evaluate_data_quality, infer_angle_unit, invert_transform, make_transform,
+    matrix_to_pose, minimum_samples, normalize_pose, pose_to_matrix,
+    recommended_samples, solve_hand_eye,
 )
 from scipy.spatial.transform import Rotation as R_tool
 
@@ -78,6 +81,46 @@ def evaluate_image_quality(img: np.ndarray, pattern_size: Tuple[int, int]) -> Tu
     }
     return ret, corners, metrics
 
+
+def resolve_mount(info: Dict[str, Any]) -> str:
+    """读取 session 的安装方式; 历史数据用 calibration_mode 键兜底, 未知值按眼在手外处理。"""
+    mount = info.get("hand_eye_mount") or info.get("calibration_mode") or EYE_TO_HAND
+    return mount if mount in MOUNTS else EYE_TO_HAND
+
+
+def resolve_pose_unit(info: Dict[str, Any], samples: Sequence[dict]) -> str:
+    """
+    session  yaml 里姿态的单位。
+
+    新 session 一律在写入时归一成度并显式记录 pose_angle_unit; 老数据没记, 只能
+    按幅值猜 —— 这是历史包袱, 不是新代码的路径。
+    """
+    unit = info.get("pose_angle_unit")
+    if unit in (UNIT_DEG, UNIT_RAD):
+        return unit
+    return infer_angle_unit(samples)
+
+
+def _board_reach_mm(mount: str, samples: Sequence[CalibSample], solution: Any) -> float:
+    """
+    法兰原点到标定板原点的距离 (mm): 清洗区间里旋转项应当按这个尺度张开。
+
+    眼在手外直接就是解出来的 TCP 偏移; 眼在手上传回的是相机外参, 需要再复合一次
+    才得到板在法兰系下的位置。
+    """
+    if mount == EYE_TO_HAND:
+        return float(np.linalg.norm(solution.board_offset_flange_mm))
+    T_flange_cam = invert_transform(solution.T_flange_camera)
+    dists = [float(np.linalg.norm((T_flange_cam @ s.T_camera_board)[:3, 3])) for s in samples]
+    return float(np.median(dists)) if dists else 0.0
+
+
+def _solution_score(solution: Any) -> float:
+    """两个解择优用的标量: 优先像素重投影误差, 没有角点时退回平移残差。"""
+    px = getattr(solution, "reprojection_error_px", None)
+    return float(px) if px is not None else float(solution.translation_error_mm)
+
+
 class CalibrationService:
     def __init__(self):
         self.calib_dir = os.path.abspath(os.path.join(PROJECT_ROOT, "..", "data", "calib"))
@@ -103,7 +146,11 @@ class CalibrationService:
         sessions = [d for d in os.listdir(self.calib_dir) if os.path.isdir(os.path.join(self.calib_dir, d))]
         return sorted(sessions, reverse=True)
 
-    def create_session(self) -> str:
+    def create_session(self, mount: Optional[str] = None) -> str:
+        mount = mount or self.config.get("calib", {}).get("mount", EYE_TO_HAND)
+        if mount not in MOUNTS:
+            raise ValueError(f"unknown hand-eye mount '{mount}', expected one of {list(MOUNTS)}")
+
         session_id = datetime.now().strftime("calib_%Y%m%d_%H%M%S")
         session_path = os.path.join(self.calib_dir, session_id)
         os.makedirs(session_path, exist_ok=True)
@@ -133,8 +180,11 @@ class CalibrationService:
         pattern_size = [board_cols - 1, board_rows - 1]
 
         cap_info = {
-            "version": "1.0",
-            "calibration_mode": "eye-to-hand",
+            "version": "2.0",
+            "hand_eye_mount": mount,
+            "pose_angle_unit": INTERNAL_ANGLE_UNIT,
+            "min_samples": minimum_samples(mount),
+            "recommended_samples": recommended_samples(mount),
             "camera_params": {
                 "camera_model": h_cfg.get("camera", {}).get("model", "orbbec"),
                 "width": cam_width,
@@ -178,7 +228,7 @@ class CalibrationService:
         with open(yaml_file, 'r', encoding='utf-8') as f:
             info = yaml.safe_load(f) or {}
 
-        mode = info.get("calibration_mode", "eye-to-hand")
+        mount = resolve_mount(info)
         raw_samples = info.get("samples", [])
         formatted_samples = []
         for s in raw_samples:
@@ -199,7 +249,8 @@ class CalibrationService:
                 "filename": s.get("image_file", s.get("filename", "")),
                 "image_file": s.get("image_file", s.get("filename", "")),
                 "pose": pose_list,
-                "robot_pose": pose
+                "robot_pose": pose,
+                "joints": s.get("joints"),
             })
 
         result_data = None
@@ -209,12 +260,42 @@ class CalibrationService:
 
         return {
             "session_id": session_id,
-            "mode": mode,
+            "mount": mount,
+            "pose_angle_unit": resolve_pose_unit(info, raw_samples),
+            "min_samples": int(info.get("min_samples") or minimum_samples(mount)),
+            "recommended_samples": int(info.get("recommended_samples") or recommended_samples(mount)),
             "samples": formatted_samples,
             "result": result_data
         }
 
-    def add_sample(self, session_id: str, robot_pose: List[float]) -> int:
+    def _stamp_pose_unit(self, info: Dict[str, Any]) -> None:
+        """
+        把 session 内已有样本统一到度并写死 pose_angle_unit。
+
+        老数据没记录单位 (robot_service 回报的是弧度), 若直接往里追加一条度样本,
+        同一个文件就会混用两种单位, 而求解器只认一个声明值。
+        """
+        current = resolve_pose_unit(info, info.get("samples", []))
+        if current != INTERNAL_ANGLE_UNIT:
+            for s in info.get("samples", []):
+                pose = s.get("robot_pose")
+                if not pose:
+                    continue
+                for key in ("rx", "ry", "rz", "a", "b", "c"):
+                    if key in pose and pose[key] is not None:
+                        pose[key] = float(np.degrees(float(pose[key])))
+        info["pose_angle_unit"] = INTERNAL_ANGLE_UNIT
+
+    def add_sample(self, session_id: str, robot_pose: List[float],
+                   angle_unit: str = UNIT_RAD,
+                   joints_deg: Optional[Sequence[float]] = None) -> int:
+        """
+        采集一个样本: 保存当前帧并记录机器人法兰位姿。
+
+        angle_unit 必须与 robot_pose 姿态部分的实际单位一致 —— robot_service.
+        get_current_pose 返回的是弧度 (dobot_driver 里做过 math.radians), 因此默认
+        UNIT_RAD。会话内一律存度, 避免求解器再猜单位。
+        """
         session_path = os.path.join(self.calib_dir, session_id)
         if not os.path.exists(session_path):
             raise Exception(f"Session {session_id} does not exist.")
@@ -242,20 +323,25 @@ class CalibrationService:
         if not save_res:
             raise Exception("Failed to trigger camera hardware frame persistence.")
 
-        # Pose format: [x, y, z, rx, ry, rz]
+        # Pose format: [x, y, z, rx, ry, rz] -> 会话内统一为 mm / deg
+        pose_deg = normalize_pose(robot_pose, angle_unit)
+        self._stamp_pose_unit(info)
+
         sample_entry = {
             "id": sample_id,
             "image_file": img_filename,
             "robot_pose": {
-                "x": float(robot_pose[0]),
-                "y": float(robot_pose[1]),
-                "z": float(robot_pose[2]),
-                "rx": float(robot_pose[3]),
-                "ry": float(robot_pose[4]),
-                "rz": float(robot_pose[5])
+                "x": float(pose_deg[0]),
+                "y": float(pose_deg[1]),
+                "z": float(pose_deg[2]),
+                "rx": float(pose_deg[3]),
+                "ry": float(pose_deg[4]),
+                "rz": float(pose_deg[5])
             },
             "timestamp": datetime.now().isoformat()
         }
+        if joints_deg is not None and len(joints_deg) >= 6:
+            sample_entry["joints"] = [float(v) for v in list(joints_deg)[:6]]
 
         samples.append(sample_entry)
         info["samples"] = samples
@@ -264,6 +350,16 @@ class CalibrationService:
             yaml.dump(info, f, default_flow_style=False)
 
         return len(samples)
+
+    def capture_sample(self, session_id: str) -> int:
+        """从机器人读当前位姿/关节并采集样本, 单位换算只发生在这一处。"""
+        from services.robot_service import robot_service
+
+        pose, err = robot_service.get_current_pose()
+        if pose is None:
+            raise RuntimeError(err or "Robot pose unavailable")
+        joints, _ = robot_service.get_current_joint()
+        return self.add_sample(session_id, pose, angle_unit=UNIT_RAD, joints_deg=joints)
 
     def run_calibration(self, session_id: str, progress_callback=None) -> Dict[str, Any]:
         session_path = os.path.join(self.calib_dir, session_id)
@@ -291,25 +387,28 @@ class CalibrationService:
         with open(yaml_file, 'r', encoding='utf-8') as f:
             info = yaml.safe_load(f)
 
+        mount = resolve_mount(info)
+        pose_unit = resolve_pose_unit(info, info.get("samples", []))
+        min_samples = minimum_samples(mount)
+
         total_samples = len(info.get("samples", []))
-        if total_samples < 3:
-            err_msg = f"Session '{session_id}' has {total_samples} samples, but at least 3 are required."
+        if total_samples < min_samples:
+            err_msg = (f"Session '{session_id}' has {total_samples} samples, but "
+                       f"'{mount}' needs at least {min_samples}.")
             logger.error(f"[-] [Calib ERROR] {err_msg}")
             safe_callback(0, total_samples, "", "error")
             return {"success": False, "error": err_msg}
 
-        logger.info(f"Running calibration for session {session_id} with {total_samples} samples.")
+        logger.info(f"Running {mount} calibration for session {session_id} "
+                    f"with {total_samples} samples (poses in {pose_unit}).")
         safe_callback(0, total_samples, "", "started")
 
         K = np.array(info["camera_params"]["intrinsic_matrix"])
         D = np.array(info["camera_params"]["distortion_coeffs"])
         pattern_size = tuple(info["board_params"]["pattern_size_inner"])
-        sq_size = info["board_params"]["square_size_mm"]
+        objp = chessboard_object_points(pattern_size, info["board_params"]["square_size_mm"])
 
-        objp = np.zeros((pattern_size[0] * pattern_size[1], 3), np.float32)
-        objp[:, :2] = np.mgrid[0:pattern_size[0], 0:pattern_size[1]].T.reshape(-1, 2) * sq_size
-
-        all_samples = []
+        observations: List[CalibSample] = []
 
         # Avoid thread over-subscription on RK3588
         cv2.setNumThreads(2)
@@ -338,12 +437,16 @@ class CalibrationService:
                 corners = cv2.cornerSubPix(gray, corners, (5, 5), (-1, -1), criteria)
                 _, rvec, tvec = cv2.solvePnP(objp, corners, K, D)
                 R_cb, _ = cv2.Rodrigues(rvec)
-                all_samples.append({
-                    "id": s["id"], 
-                    "R_cb": R_cb, 
-                    "t_cb": tvec.flatten(), 
-                    "pose": pose
-                })
+                observations.append(CalibSample(
+                    sample_id=s["id"],
+                    T_base_flange=pose_to_matrix(pose, pose_unit),
+                    T_camera_board=make_transform(R_cb, tvec.flatten()),
+                    pose_dobot=normalize_pose(pose, pose_unit),
+                    corners_px=np.asarray(corners, dtype=np.float64).reshape(-1, 2).copy(),
+                    image_file=s["image_file"],
+                    joints_deg=s.get("joints"),
+                    obj_pts=objp,
+                ))
                 # Draw corners and cache the rendered image for instant frontend retrieval
                 cv2.drawChessboardCorners(img, pattern_size, corners, ret)
                 cv2.putText(img, f"SAMPLE {idx+1}/{total_samples}: FOUND", (20, 40),
@@ -362,85 +465,133 @@ class CalibrationService:
 
         safe_callback(total_samples, total_samples, "", "optimizing")
         
-        if len(all_samples) < 3:
+        if len(observations) < min_samples:
             safe_callback(total_samples, total_samples, "", "error")
-            return {"success": False, "error": "Insufficient valid chessboard corners found."}
+            return {"success": False, "error": f"Insufficient valid chessboard corners found "
+                                               f"(got {len(observations)}, need {min_samples})."}
 
         clean_thr = self.config.get("calib", {}).get("cleaning_threshold", 0.05)
-        samples = clean_calibration_data(
-            all_samples, 
-            threshold=clean_thr,
-            log_callback=lambda msg: logger.info(msg)
-        )
-
-        if len(samples) < 3:
+        samples = clean_samples(observations, threshold=clean_thr,
+                                log_callback=lambda msg: logger.info(msg))
+        if len(samples) < min_samples:
             safe_callback(total_samples, total_samples, "", "error")
             return {"success": False, "error": "Calibration failed: not enough clean samples after filtering."}
 
-        diversity = evaluate_data_diversity(samples)
-        logger.info(f"Diversity score: {diversity['score']:.1f} / 100")
+        quality = evaluate_data_quality(samples, mount)
+        logger.info(f"[{mount}] data quality: score={quality['score']:.1f}/100, "
+                    f"translation_span={quality['translation_span_mm']:.1f}mm, "
+                    f"rotation_span={quality['rotation_span_deg']:.1f}deg, "
+                    f"axis_coverage={quality['axis_coverage']:.2f}")
+        if quality["degenerate"]:
+            logger.warning(
+                f"[!] [{mount}] rotation axes are nearly parallel (axis_coverage="
+                f"{quality['axis_coverage']:.2f} < 0.30). The hand-eye solution is poorly "
+                f"observable; re-sample with the flange rotated about clearly different axes."
+            )
 
-        best_res = optimize_extrinsics_solve(samples)
-        if not best_res:
+        solution = solve_hand_eye(mount, samples, K=K, D=D)
+        if solution is None:
             safe_callback(total_samples, total_samples, "", "error")
             return {"success": False, "error": "Optimization solver failed."}
 
-        R_bc, t_bc, t_off, err, order, s_vec = best_res
-        r_err_mean = calculate_rotation_error(samples, best_res)
+        # 二次清洗: 首轮用宽松运动包络, 解出法兰到标定板的真实作用距离后收紧区间重解一次。
+        reach_mm = _board_reach_mm(mount, samples, solution)
+        if reach_mm > 0:
+            tight = clean_samples(observations, threshold=clean_thr,
+                                  motion_envelope_mm=max(reach_mm * 1.5, 60.0),
+                                  log_callback=lambda msg: logger.info(f"[refine] {msg}"))
+            if minimum_samples(mount) <= len(tight) < len(samples):
+                refined = solve_hand_eye(mount, tight, K=K, D=D)
+                if refined is not None and _solution_score(refined) <= _solution_score(solution):
+                    samples, solution = tight, refined
 
-        T_bc = np.eye(4)
-        T_bc[:3, :3] = R_bc
-        T_bc[:3, 3] = t_bc
-        xyz = t_bc.tolist()
-        rpy = R_tool.from_matrix(R_bc).as_euler('xyz', degrees=True).tolist()
+        is_eto = mount == EYE_TO_HAND
+        T_camera_mount = solution.T_base_camera if is_eto else solution.T_flange_camera
+        mount_name = "base" if is_eto else "flange"
+        pose_in_mount = matrix_to_pose(T_camera_mount)
+        reproj_px = getattr(solution, "reprojection_error_px", None)
 
-        output_res = {
+        output_res: Dict[str, Any] = {
             "metadata": {
                 "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                 "source_data_dir": session_path,
-                "calibration_mode": info.get("calibration_mode", "eye-to-hand"),
-                "reprojection_error_mm": float(err),
-                "rotation_error_deg": float(r_err_mean),
-                "samples_total": len(all_samples),
+                "hand_eye_mount": mount,
+                "pose_angle_unit": INTERNAL_ANGLE_UNIT,
+                "reprojection_error_px": None if reproj_px is None else float(reproj_px),
+                "translation_error_mm": float(solution.translation_error_mm),
+                "rotation_error_deg": float(solution.rotation_error_deg),
+                "samples_total": len(observations),
                 "samples_used": len(samples),
-                "optimization_config": {
-                    "axis_order": order,
-                    "sign_vector": [int(x) for x in s_vec]
-                }
+                "data_quality": {
+                    "score": round(quality["score"], 1),
+                    "axis_coverage": round(quality["axis_coverage"], 3),
+                    "rotation_span_deg": round(quality["rotation_span_deg"], 2),
+                    "translation_span_mm": round(quality["translation_span_mm"], 1),
+                    "degenerate": bool(quality["degenerate"]),
+                },
+                "solver": (
+                    {"euler_order": solution.euler_order,
+                     "sign_vector": [int(x) for x in solution.sign_vector]}
+                    if is_eto else
+                    {"ax_xb_method": solution.method,
+                     "method_report": solution.method_report}
+                ),
             },
-            "camera_pose_base": {
-                "x": xyz[0], "y": xyz[1], "z": xyz[2],
-                "roll_deg": rpy[0], "pitch_deg": rpy[1], "yaw_deg": rpy[2]
+            f"camera_pose_{mount_name}": {
+                "x": pose_in_mount[0], "y": pose_in_mount[1], "z": pose_in_mount[2],
+                "roll_deg": pose_in_mount[3], "pitch_deg": pose_in_mount[4],
+                "yaw_deg": pose_in_mount[5],
             },
-            "T_base_camera": T_bc.tolist(),
+            f"T_{mount_name}_camera": T_camera_mount.tolist(),
             "camera_params": info["camera_params"],
             "board_params": info["board_params"],
-            "chessboard_offset": t_off.tolist()
         }
+
+        if is_eto:
+            board_rot = R_tool.from_matrix(solution.board_rotation_flange).as_euler(
+                DOBOT_EULER_SEQ, degrees=True).tolist()
+            output_res["chessboard_offset"] = solution.board_offset_flange_mm.tolist()
+            output_res["chessboard_rotation_deg"] = board_rot
+            # 历史键名, 值其实是运动学平移残差 (mm) 而非像素误差; reconstruction_service
+            # 与前端仍在读它, 像素域误差另见 reprojection_error_px。
+            output_res["metadata"]["reprojection_error_mm"] = float(solution.translation_error_mm)
+        else:
+            board_pose = matrix_to_pose(solution.T_base_board)
+            output_res["T_base_board"] = solution.T_base_board.tolist()
+            output_res["board_pose_base"] = {
+                "x": board_pose[0], "y": board_pose[1], "z": board_pose[2],
+                "roll_deg": board_pose[3], "pitch_deg": board_pose[4],
+                "yaw_deg": board_pose[5],
+            }
         
         result_yaml = os.path.join(session_path, "calibration_result.yaml")
         with open(result_yaml, 'w', encoding='utf-8') as f:
             yaml.dump(output_res, f, default_flow_style=False)
 
         # Print and log complete calibration results in English
+        reach_note = f" (board reach {reach_mm:.1f} mm)" if reach_mm > 0 else ""
         banner_lines = [
             "=" * 70,
             f"  HAND-EYE CALIBRATION RESULT: {session_id}",
             "=" * 70,
+            f"  - Mount: {mount}",
             f"  - Status: SUCCESS",
-            f"  - Samples: {len(samples)} used / {len(all_samples)} total",
-            f"  - Reprojection Error (Residual): {float(err):.4f} mm",
-            f"  - Mean Rotation Error (Angular): {float(r_err_mean):.4f} deg",
-            f"  - Optimization Config: Euler Order = {order}, Signs = {s_vec}",
-            f"  - Chessboard Offset (mm): [{t_off[0]:.3f}, {t_off[1]:.3f}, {t_off[2]:.3f}]",
+            f"  - Samples: {len(samples)} used / {len(observations)} valid / {total_samples} captured",
+            f"  - Reprojection Error: "
+            + ("N/A (no corner pixels)" if reproj_px is None else f"{float(reproj_px):.4f} px"),
+            f"  - Kinematic Residual: {float(solution.translation_error_mm):.4f} mm, "
+            f"{float(solution.rotation_error_deg):.4f} deg{reach_note}",
+            f"  - Data Quality: {quality['score']:.1f}/100 "
+            f"(axis coverage {quality['axis_coverage']:.2f})"
+            + ("  [DEGENERATE]" if quality["degenerate"] else ""),
             "-" * 70,
-            f"  - Camera Pose in Robot Base Frame:",
-            f"      X: {xyz[0]:.3f} mm,  Y: {xyz[1]:.3f} mm,  Z: {xyz[2]:.3f} mm",
-            f"      Roll: {rpy[0]:.3f} deg,  Pitch: {rpy[1]:.3f} deg,  Yaw: {rpy[2]:.3f} deg",
+            f"  - Camera Pose in Robot {mount_name.capitalize()} Frame:",
+            f"      X: {pose_in_mount[0]:.3f} mm,  Y: {pose_in_mount[1]:.3f} mm,  Z: {pose_in_mount[2]:.3f} mm",
+            f"      Roll: {pose_in_mount[3]:.3f} deg,  Pitch: {pose_in_mount[4]:.3f} deg,  Yaw: {pose_in_mount[5]:.3f} deg",
             "-" * 70,
-            f"  - Transformation Matrix T_base_camera (4x4):",
+            f"  - Transformation Matrix T_{mount_name}_camera (4x4):",
         ]
-        for row in T_bc:
+        for row in T_camera_mount:
             banner_lines.append(f"      [ {row[0]:9.6f}, {row[1]:9.6f}, {row[2]:9.6f}, {row[3]:10.4f} ]")
         banner_lines.append(f"  - Result Saved To: {result_yaml}")
         banner_lines.append("=" * 70)
@@ -494,10 +645,13 @@ class CalibrationService:
         with open(yaml_file, 'r', encoding='utf-8') as f:
             info = yaml.safe_load(f) or {}
 
+        mount = resolve_mount(info)
+        min_samples = minimum_samples(mount)
         samples = info.get("samples", [])
         total_samples = len(samples)
-        if total_samples < 3:
-            err_msg = f"Session '{session_id}' has {total_samples} samples, but at least 3 are required."
+        if total_samples < min_samples:
+            err_msg = (f"Session '{session_id}' has {total_samples} samples, but "
+                       f"'{mount}' needs at least {min_samples}.")
             logger.error(f"[-] [Resample ERROR] {err_msg}")
             safe_callback(0, total_samples, "", "error", err_msg)
             return {"success": False, "error": err_msg}
@@ -514,24 +668,30 @@ class CalibrationService:
         pattern_size = tuple(info.get("board_params", {}).get("pattern_size_inner", [8, 11]))
         speed_l, acc_l, speed_j, acc_j = robot_service.get_speed()
 
+        pose_unit = resolve_pose_unit(info, samples)
+
         for idx, s in enumerate(samples):
             sample_id = s.get("id", idx + 1)
             img_filename = s.get("image_file", f"image_{sample_id:03d}.png")
-            pose_dict = s.get("robot_pose", {})
-
-            x = float(pose_dict.get("x", 0.0))
-            y = float(pose_dict.get("y", 0.0))
-            z = float(pose_dict.get("z", 0.0))
-            rx = float(pose_dict.get("rx", pose_dict.get("a", 0.0)))
-            ry = float(pose_dict.get("ry", pose_dict.get("b", 0.0)))
-            rz = float(pose_dict.get("rz", pose_dict.get("c", 0.0)))
-            target_pose = [x, y, z, rx, ry, rz]
+            target_pose = normalize_pose(s.get("robot_pose", {}), pose_unit)
+            joints = s.get("joints")
 
             # 1. Drive robot to target waypoint pose
             safe_callback(idx + 1, total_samples, img_filename, "moving", f"Moving to waypoint {idx+1}/{total_samples}...")
-            logger.info(f"[*] [Resample #{sample_id} ({idx+1}/{total_samples})] Moving robot to: X={x:.1f}, Y={y:.1f}, Z={z:.1f}, Rx={rx:.4f}, Ry={ry:.4f}, Rz={rz:.4f}")
+            logger.info(
+                f"[*] [Resample #{sample_id} ({idx+1}/{total_samples})] Moving robot to: "
+                f"X={target_pose[0]:.1f}, Y={target_pose[1]:.1f}, Z={target_pose[2]:.1f}, "
+                f"Rx={target_pose[3]:.3f}, Ry={target_pose[4]:.3f}, Rz={target_pose[5]:.3f} (deg)"
+            )
 
-            move_ok, move_err = robot_service.move_to_pose_j(target_pose, speed=speed_j, acc=acc_j)
+            if joints is not None and len(joints) >= 6:
+                # 关节回放: 复现采集该图时的确切构型, 避免逆解在奇異点附近失败
+                move_ok, move_err = robot_service.move_to_joint(joints, speed=speed_j, acc=acc_j)
+            else:
+                # robot_service.move_to_pose_j 接受弧度 (driver 内部再转回控制器度)
+                move_pose = [target_pose[0], target_pose[1], target_pose[2]] + \
+                    [float(v) for v in np.radians(target_pose[3:])]
+                move_ok, move_err = robot_service.move_to_pose_j(move_pose, speed=speed_j, acc=acc_j)
             if not move_ok:
                 err_msg = f"Robot motion to sample #{sample_id} failed: {move_err}"
                 logger.error(err_msg)
@@ -542,17 +702,21 @@ class CalibrationService:
             safe_callback(idx + 1, total_samples, img_filename, "settling", f"Waypoint {idx+1}/{total_samples} reached. Settling 2.0s...")
             time.sleep(2.0)
 
-            # Query actual feedback pose from robot encoders
+            # Query actual feedback pose & joints from robot encoders, store in the session's unit
             live_pose, _ = robot_service.get_current_pose()
+            live_joints, _ = robot_service.get_current_joint()
             if live_pose and len(live_pose) >= 6:
+                feedback = normalize_pose(live_pose, UNIT_RAD)
                 s["robot_pose"] = {
-                    "x": round(float(live_pose[0]), 3),
-                    "y": round(float(live_pose[1]), 3),
-                    "z": round(float(live_pose[2]), 3),
-                    "rx": round(float(live_pose[3]), 5),
-                    "ry": round(float(live_pose[4]), 5),
-                    "rz": round(float(live_pose[5]), 5)
+                    "x": round(float(feedback[0]), 3),
+                    "y": round(float(feedback[1]), 3),
+                    "z": round(float(feedback[2]), 3),
+                    "rx": round(float(feedback[3]), 5),
+                    "ry": round(float(feedback[4]), 5),
+                    "rz": round(float(feedback[5]), 5)
                 }
+            if live_joints and len(live_joints) >= 6:
+                s["joints"] = [round(float(v), 4) for v in list(live_joints)[:6]]
 
             # 3. Capture and persist new camera frame (overwriting sample image)
             safe_callback(idx + 1, total_samples, img_filename, "capturing", f"Capturing sample {idx+1}/{total_samples}...")
@@ -626,6 +790,7 @@ class CalibrationService:
             time.sleep(1.0)
 
         # Sync back updated metadata and feedback poses to YAML
+        info["pose_angle_unit"] = INTERNAL_ANGLE_UNIT
         with open(yaml_file, 'w', encoding='utf-8') as f:
             yaml.dump(info, f, default_flow_style=False)
 

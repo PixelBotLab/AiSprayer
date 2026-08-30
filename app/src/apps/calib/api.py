@@ -12,6 +12,9 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "app/src"))
 from apps.camera.services.camera_service import camera_service
 from services.robot_service import robot_service
 from apps.calib.services.calibration_service import calibration_service
+from apps.calib.services.hand_eye import (
+    EYE_TO_HAND, MIN_SAMPLES, MOUNTS, RECOMMENDED_SAMPLES,
+)
 
 calib_router = APIRouter(prefix="/api/calib", tags=["Calibration"])
 
@@ -192,10 +195,28 @@ async def robot_ws(websocket: WebSocket):
 def list_sessions():
     return {"sessions": calibration_service.get_sessions()}
 
+@calib_router.get("/mounts")
+def list_mounts():
+    return {
+        "mounts": list(MOUNTS),
+        "default": calibration_service.config.get("calib", {}).get("mount", EYE_TO_HAND),
+        "min_samples": dict(MIN_SAMPLES),
+        "recommended_samples": dict(RECOMMENDED_SAMPLES),
+    }
+
+class NewSessionReq(BaseModel):
+    mount: Optional[str] = None
+
 @calib_router.post("/sessions/new")
-def create_session():
-    session_id = calibration_service.create_session()
-    return {"session_id": session_id}
+def create_session(req: NewSessionReq):
+    try:
+        session_id = calibration_service.create_session(req.mount)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    data = calibration_service.get_session_data(session_id)
+    return {"session_id": session_id, "mount": data["mount"],
+            "min_samples": data["min_samples"],
+            "recommended_samples": data["recommended_samples"]}
 
 @calib_router.delete("/sessions/{session_id}")
 def delete_session(session_id: str):
@@ -211,15 +232,11 @@ def get_session(session_id: str):
 
 @calib_router.post("/sessions/{session_id}/samples")
 def add_sample(session_id: str):
-    pose, err = robot_service.get_current_pose()
-    if pose is None:
-        raise HTTPException(status_code=400, detail=f"Robot pose missing: {err}")
-        
     try:
-        count = calibration_service.add_sample(session_id, pose)
-        return {"samples_count": count}
+        count = calibration_service.capture_sample(session_id)
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
+    return {"samples_count": count}
 
 @calib_router.get("/sessions/{session_id}/images/{filename}")
 def get_image(session_id: str, filename: str):

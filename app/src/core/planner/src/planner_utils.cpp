@@ -63,6 +63,23 @@ CameraCalibration loadCalibration(const std::string& calib_path)
       return calib;
     }
     YAML::Node root = YAML::LoadFile(calib_path);
+
+    // 眼在手上的相机在基座系下不是常量, 这里没有法兰位姿可用, 只能按未标定处理
+    const YAML::Node mount_top = root["hand_eye_mount"];
+    const YAML::Node meta = root["metadata"];
+    YAML::Node mount_meta = meta.IsMap() ? meta["hand_eye_mount"] : YAML::Node();
+    std::string mount;
+    if (mount_top.IsDefined() && mount_top.IsScalar()) {
+      mount = mount_top.as<std::string>();
+    } else if (mount_meta.IsDefined() && mount_meta.IsScalar()) {
+      mount = mount_meta.as<std::string>();
+    }
+    if (mount == "eye-in-hand") {
+      std::cerr << "Error: " << calib_path << " is an eye-in-hand calibration, which has no "
+                   "constant T_base_camera; 2D mappings will be skipped.\n";
+      return calib;
+    }
+
     const YAML::Node t_node = root["T_base_camera"];
     if (t_node.IsSequence() && t_node.size() == 4) {
       for (int i = 0; i < 4; ++i) {

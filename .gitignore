@@ -42,6 +42,8 @@ test_cr5_kinematics
 logs/
 *.log
 OrbbecSDK.log.*
+.orbbec.lock
+*.lock
 
 # 数据文件 (忽略采集的原始数据和标定过程数据)
 data/runs/*

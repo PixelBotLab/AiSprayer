@@ -52,6 +52,12 @@ vision:
 
 # 3. 标定算法配置 (Calibration)
 calib:
+  # 相机安装方式默认值, 决定新建标定会话采用哪套手眼模型:
+  #   eye-to-hand (眼在手外): 相机固定于基座, 标定板装在法兰上 -> 求解 T_base_camera
+  #   eye-in-hand (眼在手上): 相机装在法兰上, 标定板固定于世界 -> 求解 T_flange_camera
+  # 仅作为新建会话的默认值, 每个会话在创建时记录自己的安装方式。
+  mount: "eye-to-hand"
+
   capture:
     output_dir: "data/calib"    # 标定采集数据存储根目录
   
@@ -83,3 +89,56 @@ spraying:
   grid_tol_x_deg: [-5.0, 5.0, 2.0]       # 绕工具 X 轴倾斜容差与采样步长
   grid_tol_y_deg: [-5.0, 5.0, 2.0]       # 绕工具 Y 轴倾斜容差与采样步长
   grid_tol_z_deg: [-180.0, 180.0, 10.0]  # 绕工具 Z 轴自旋容差与采样步长
+
+# 5. 工位跟随 (Follow) —— follow_node 独立进程的配置
+# 刻意不继承 hardware.camera：那一块是给推流/标定用的 1280x800，而本模块的分辨率预算由
+# follow_bench_frontend 在真实工位图上量出来。下面每个数都能追到一次测量，改之前先重跑量具。
+follow:
+  mount: "eye-to-hand"          # 眼在手上时「工件动了」与「相机动了」纯视觉不可辨识，见 follow/README
+
+  camera:
+    width: 640                  # 硬件 D2C 对齐支持的最大分辨率为 640x480 (848x480 及以上仅支持软对齐)
+    height: 480                 # 640x480 走硬件 D2C (ASIC 芯片计算，0% 主机 CPU 占用)
+    fps: 15                     # 640x480@15fps：单帧 40ms < 66.7ms 预算，0丢帧且大幅降低总CPU占用
+    lock_path: ".orbbec.lock"   # 与相机服务互斥的 flock 文件（相对项目根）
+    frame_timeout_ms: 1000
+    first_pair_timeout_ms: 3000 # 彩色比深度晚上线约 333 ms，等第一个「成对」帧组才算就绪
+    allow_unaligned: false      # true 会让深度/彩色各用一套内参（基线 23.735mm），只给排障
+    enable_imu: true            # 开启板载 6 轴 IMU 陀螺仪数据流并注入跟踪器
+
+  frontend:
+    kind: "cpu"                 # cpu | superpoint(需板端 .rknn，本板转不出来)
+    max_features: 200
+    quality_level: 0.01
+    min_distance_px: 16
+    rknn_model_path: "superpoint.rknn"
+
+  track:
+    zmin_m: 0.30
+    zmax_m: 2.50                # 实测数据集深度 0.74~2.59 m
+    depth_stride: 3
+    voxel_m: 0.015
+    max_corr_m: 0.035            # 实际生效门 = min(此值, 2.6*voxel_m)
+    threads: 4                  # 绑 4 个 A76，不要 8
+    max_iters: 15
+    min_cloud_points: 200
+    min_gicp_inliers: 80
+    trans_sigma_mm: 2.0         # 可观测门：好场景实测 0.15~0.19 mm
+    rot_sigma_deg: 0.2
+    group_anisotropy: 15.0      # 工件 8.9~10.1，整幅大平面 31.6/26.7
+    min_inlier_ratio: 0.30      # 低于此 = 出了示教包络，要重新示教而不是"跟丢"
+    max_sparse_streak: 15
+    sparse_inlier_dist_m: 0.02
+    sparse_min_inliers: 12
+
+  teach:
+    map_path: "follow/out/reference.frmap"
+    frames: 10                  # 采集 10 帧做时间域深度均值去噪融合，消除初始散斑噪声
+
+  runtime:
+    dry_run: true               # 只打印修正量，不发臂。P5 控制层接入前 false 也会被强制回 true
+    enable_servo_p: false
+    health_port: 18081          # 18080 属于相机服务，8008 属于 ZLM
+    max_cycles: 0               # 0 = 一直跑
+    calib_path: "configs/calib/calibration_result.yaml"
+    log_level: "info"
