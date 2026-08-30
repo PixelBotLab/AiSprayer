@@ -1,0 +1,541 @@
+# -*- coding: utf-8 -*-
+"""
+FollowService：把相机服务里跑的 follow（进程内）变成"页面上能用的跟随"。
+
+三件事：
+  1. **代理** C++ 的三个端点（使能 / 示教 / 读快照）。C++ 侧才是唯一懂设备的地方；这里不碰
+     pipeline、不碰锁，也就不会出现"两边各自认为相机在某个档位"的分歧。
+  2. **合成**：把相机增量映射到臂的基座系，做最近分支 IK，得到仿真臂该去的关节角（`mirror.py`）。
+  3. **广播**：按 robot_service 的风格注册回调，WS 层把它变成 `{"type":"follow_state",...}`。
+
+臂的基线**只在示教那一刻取一次**（启动 = home，调零 = 当时位姿），之后每帧都算
+`T_target = Δ_base(当前增量) · T_baseline`。不拿实时位姿当基准 —— 那会形成正反馈：臂跟着自己
+上一帧的解算误差继续走，静止时的 0.2 mm 噪声也能慢慢把它推走。
+
+真实臂本轮**只预留接口与开关**：`follow.arm.mode: real` 一旦被调用到需要发指令的路径，
+直接返回失败说"未接入（P5）"。预留的是接缝，不是一个假装能发、实际什么都不做的空函数。
+"""
+from __future__ import annotations
+
+import logging
+import threading
+import time
+from typing import Any, Callable, Dict, List, Optional, Tuple
+
+import numpy as np
+import requests
+
+from apps.camera.services.camera_service import CPP_BASE_URL
+from apps.follow.mirror import (
+    joints_to_target, pose_ctrl_from_target, rotation_camera_to_base,
+    rotation_camera_to_base_fallback,
+)
+from core.config import sprayer_config
+
+logger = logging.getLogger(__name__)
+
+# C++ 侧的使能/关闭是**提交式**的：POST /follow 受理即返回（202），重启取流 pipeline 在它的
+# 专用线程里跑，实测百毫秒到几十秒。所以这里的控制类调用分两段：一次短请求提交（TIMEOUT_CONTROL），
+# 再轮询 /follow/status 的 switching 字段等终态（总预算 SWITCH_DEADLINE）。示教是同步的快操作，
+# 仍用 TIMEOUT_CONTROL；轮询必须是"快"超时 —— 轮询慢了会把页面读数拖成 1 Hz。
+TIMEOUT_CONTROL = 20.0
+TIMEOUT_POLL = 0.5
+SWITCH_DEADLINE = 60.0        # 提交 + 轮询确认的总预算：重启取流再慢也不该超过它
+SWITCH_POLL_INTERVAL = 0.3
+SWITCH_POLL_TIMEOUT = 2.0     # 单次状态轮询的超时；连续失败几次才判服务没了，容忍偶发抖动
+
+_FOLLOW_PATHS = {
+    "toggle": "/api/v1/camera/follow",
+    "teach": "/api/v1/camera/follow/teach",
+    "status": "/api/v1/camera/follow/status",
+}
+
+
+class FollowService:
+    """单例。由 api.py 的路由与一条自己的轮询线程共同访问，所有可变状态都在 `_lock` 下。"""
+
+    def __init__(self) -> None:
+        self._lock = threading.RLock()
+        # CR5Kinematics 的 cpp 后端用 per-instance ctypes 缓冲（源码注释：one solver per
+        # thread）。路由线程要 FK、轮询线程要 IK ⇒ 必须串行化，否则两边共用同一块缓冲。
+        self._kin_lock = threading.Lock()
+        self._kin = None
+
+        self._ws_callbacks: List[Callable[[dict], None]] = []
+        self._stop_evt = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+        self._active = False              # 页面点过"启动"、还没"停止"
+        self._baseline_q: Optional[np.ndarray] = None   # rad，示教那一刻的臂位姿
+        self._target_q: Optional[np.ndarray] = None     # rad，最近一次成功的目标
+        self._ik_failed = False
+        self._last_error = ""
+        self._snapshot: Dict[str, Any] = {}
+        self._last_frames = -1
+        self._last_emit_key = None
+
+        self._R_cb = None
+        self._R_cb_source = ""
+        # 路由要把"相机服务没起来"（503，页面该提示后端）和"这个请求本身不成立"（400，配置/
+        # 模式/基线问题）分开。靠猜 msg 前缀太脆 ⇒ 由 _cpp 维护一个明确的布尔。
+        self._upstream_down = False
+        # 可达性是"最近一次访问的结果"，而 503 要的是"**这次**失败是不是因为访问不了"：
+        # 模式/标定这类护栏根本不出网，拿上面那个布尔判会把它们错标成后端没起。
+        self._fail_upstream = False
+
+        self._arm = self._read_arm_config()
+        self._resolve_camera_to_base()
+
+    # ------------------------------------------------------------------ 配置
+    @staticmethod
+    def _read_arm_config() -> dict:
+        arm = (sprayer_config.config_data.get("follow", {}) or {}).get("arm", {}) or {}
+        home = arm.get("home_joints_deg", [0.0, 0.0, -90.0, -90.0, -90.0, 0.0])
+        home = [float(v) for v in home]
+        if len(home) != 6:
+            logger.warning("follow.arm.home_joints_deg 需要 6 个值，收到 %d 个 —— 退回默认 home", len(home))
+            home = [0.0, 0.0, -90.0, -90.0, -90.0, 0.0]
+        return {
+            "mode": str(arm.get("mode", "sim")).lower(),
+            "home_joints_deg": home,
+            "fallback_euler_deg": [float(v) for v in
+                                   (arm.get("camera_to_base_fallback_euler_deg") or [0.0, 0.0, 0.0])][:3],
+            "poll_hz": max(1, min(int(arm.get("poll_hz", 20)), 50)),
+            "teach_save_map": bool(arm.get("teach_save_map", True)),
+        }
+
+    def _resolve_camera_to_base(self) -> None:
+        """
+        相机轴 → 基座轴。优先手眼标定结果，退路才是配置常量 —— **用哪个必须能被看见**，
+        因为两者给出的是不同的平移方向映射，悄悄降级比直接失败更危险。
+        """
+        self._R_cb = None
+        self._R_cb_source = ""
+        try:
+            T = sprayer_config.T_camera_to_base
+        except Exception as e:                                   # 解析失败也要能说清是哪儿失败
+            self._R_cb_source = f"标定结果读取异常：{e}"
+            logger.warning("%s", self._R_cb_source)
+            return
+        if T is not None:
+            try:
+                self._R_cb = rotation_camera_to_base(T)
+                self._R_cb_source = "手眼标定 T_base_camera（旋转块）"
+                logger.info("follow 基座←相机轴映射: %s", self._R_cb_source)
+                return
+            except ValueError as e:
+                self._R_cb_source = f"标定矩阵不可用：{e}"
+                logger.warning("%s", self._R_cb_source)
+        else:
+            self._R_cb_source = ("标定结果缺失，或当前安装是 eye-in-hand（相机位姿不是常量，"
+                                 "不能当固定轴映射用）")
+        try:
+            self._R_cb = rotation_camera_to_base_fallback(self._arm["fallback_euler_deg"])
+            self._R_cb_source += " → 已退回配置常量 follow.arm.camera_to_base_fallback_euler_deg（降级，方向会有偏差）"
+            logger.warning("follow: %s", self._R_cb_source)
+        except ValueError as e:
+            self._R_cb = None
+            self._R_cb_source = f"退路常量也读不出来：{e}"
+            logger.error("follow: %s", self._R_cb_source)
+
+    # ------------------------------------------------------------ C++ 代理
+    @property
+    def camera_service_down(self) -> bool:
+        """True = 最近一次访问相机服务连不上（只描述后端存活，不能用来自分类任意一次失败）。"""
+        with self._lock:
+            return self._upstream_down
+
+    @property
+    def last_failure_upstream(self) -> bool:
+        """最近一次被拒绝的调用，是不是因为够不着相机服务。路由据此选 503 / 400。"""
+        with self._lock:
+            return self._fail_upstream
+
+    def _cpp(self, kind: str, payload: Optional[dict] = None,
+             timeout: float = TIMEOUT_POLL) -> Tuple[bool, str, dict]:
+        """返回 (ok, msg, data)。C++ 侧的 {code,msg,data} 只在这一层拆开。"""
+        url = f"{CPP_BASE_URL}{_FOLLOW_PATHS[kind]}"
+        try:
+            if payload is None:
+                r = requests.get(url, timeout=timeout)
+            else:
+                r = requests.post(url, json=payload, timeout=timeout)
+        except Exception as e:
+            with self._lock:
+                self._upstream_down = True
+            return False, f"相机服务无响应（{url} 没起来？后端进程在跑吗）: {e}", {}
+        with self._lock:
+            self._upstream_down = False      # 只要有一次真实回复，就认定后端活着
+        try:
+            body = r.json()
+        except Exception:
+            return False, f"相机服务返回了非 JSON（HTTP {r.status_code}）: {r.text[:120]}", {}
+        data = body.get("data", {}) or {}
+        ok = (r.status_code // 100 == 2) and int(body.get("code", -1)) == 0
+        return ok, str(body.get("msg", "")), data
+
+    def _fetch_snapshot(self) -> dict:
+        ok, msg, data = self._cpp("status")
+        if not ok:
+            return {"error": msg or "读不到 follow 状态"}
+        return data
+
+    def _toggle_and_wait(self, enabled: bool) -> Tuple[bool, str, dict]:
+        """
+        提交一次档位切换并等它到终态。返回 (ok, msg, 最终快照)。
+        C++ 侧三种回应都进轮询：受理（202，switching）、已在切换（409，别人先点了）、
+        同态无操作（202 且非 switching）—— 最后一种不用等，当场就是终态。
+        """
+        ok, msg, data = self._cpp("toggle", {"enabled": enabled}, timeout=TIMEOUT_CONTROL)
+        if not ok and not (data or {}).get("switching"):
+            # 既没受理也没人在切：是真的被拒了（配置坏/标定模式挡着/服务不在）。
+            with self._lock:
+                self._fail_upstream = bool(self._upstream_down)
+            return False, msg or self._reason_of(data), data
+        if not (data or {}).get("switching"):
+            return True, msg, data              # 同态无操作：目标态已达成
+        return self._wait_switch_done(enabled)
+
+    def _wait_switch_done(self, enabled: bool) -> Tuple[bool, str, dict]:
+        """轮询直到 switching 落下：到目标态 = 成；没到 = 把 C++ 记的失败原因原样交回去。"""
+        deadline = time.monotonic() + SWITCH_DEADLINE
+        fails = 0
+        while time.monotonic() < deadline:
+            ok, msg, data = self._cpp("status", timeout=SWITCH_POLL_TIMEOUT)
+            if not ok:
+                fails += 1
+                # 连续几次都够不着才判服务没了：单次抖动（比如切换瞬间的端口重建）不该杀掉整个流程。
+                if fails >= 3:
+                    with self._lock:
+                        self._fail_upstream = True
+                    return False, msg or "轮询档位切换状态失败（相机服务无响应）", {}
+                time.sleep(SWITCH_POLL_INTERVAL)
+                continue
+            fails = 0
+            if data.get("switching"):
+                time.sleep(SWITCH_POLL_INTERVAL)
+                continue
+            if bool(data.get("enabled")) == enabled:
+                return True, "", data
+            # 没在切也没到目标态：切换失败了。reason 是 C++ 切换线程写的失败原话。
+            with self._lock:
+                self._fail_upstream = False
+            return False, data.get("reason") or "档位切换未达到目标状态", data
+        with self._lock:
+            self._fail_upstream = False
+        return False, f"档位切换超时（{SWITCH_DEADLINE:.0f}s 未完成）：请查相机服务日志", {}
+
+    # --------------------------------------------------------- 三个按钮的语义
+    def start(self, joints_deg: Optional[List[float]] = None) -> Tuple[bool, str]:
+        """
+        ① 启动：使能 follow（相机会切到 `follow.camera` 那一档：仓库里定在 640x480@15，
+        因为那是硬件 D2C 的上限档）→ 示教并落盘 → 臂基线 = home。
+        `joints_deg` 给了就用它当基线（页面此刻的仿真臂位姿），没给才用 home。
+        """
+        return self._begin(which="start", joints_deg=joints_deg, teach=True)
+
+    def zero(self, joints_deg: Optional[List[float]] = None) -> Tuple[bool, str]:
+        """
+        ② 调零：重新示教 + 把臂基线换成**当前**位姿。已经在跟随中途工件被搬走、或装歪了时用，
+        不用先停止再启动 —— 基线一换，增量归零，臂停在它此刻该在的地方。
+        """
+        if not self._active:
+            with self._lock:
+                self._fail_upstream = False
+            return False, "还没启动跟随：调零要求 follow 已使能（先点启动）"
+        return self._begin(which="zero", joints_deg=joints_deg, teach=True)
+
+    def stop(self) -> Tuple[bool, str]:
+        """③ 停止：关掉使能（取流退回 hardware.camera），并让页面把臂的控制权交回真机状态。"""
+        ok, msg, data = self._toggle_and_wait(False)
+        with self._lock:
+            self._fail_upstream = bool(self._upstream_down)
+            self._active = False
+            self._baseline_q = None
+            self._target_q = None
+            self._ik_failed = False
+            self._last_frames = -1
+            self._last_emit_key = None
+            if data:
+                self._snapshot = data
+        self._stop_poller_if_idle()
+        self._emit(force=True)               # 让前端拿到"已停止"，从而把 simJoints 置回 null
+        if not ok:
+            return False, msg
+        # 报"实测回到了哪一档"而不是"配置里写的是哪一档"：这两个在设备拒了档位时会不一样，
+        # 而运维要看的是相机此刻在跑什么。
+        snap = data or {}
+        w, h = snap.get("capture_width"), snap.get("capture_height")
+        return True, (f"已停止跟随：取流已回到 {w}x{h}，参考地图仍留在相机服务里" if w and h
+                      else "已停止跟随：取流已退回 hardware.camera 档位，参考地图仍留在相机服务里")
+
+    def _begin(self, which: str, joints_deg: Optional[List[float]], teach: bool) -> Tuple[bool, str]:
+        cfg = self._arm
+        if cfg["mode"] != "sim":
+            # 真实臂路径本轮不实现。返回失败而不是"接受请求但什么都不发"：后者会让页面以为
+            # 臂在跟，而实际上一台真机一动不动 —— 在有人真接上臂之前，这种假装是最坏的失效。
+            with self._lock:
+                self._fail_upstream = False
+            return False, (f"follow.arm.mode={cfg['mode']}：真实臂控制路径未接入（P5），已拒绝。"
+                           "改用 mode: sim 只驱动仿真臂。")
+        if self._R_cb is None:
+            with self._lock:
+                self._fail_upstream = False
+            return False, f"拿不到基座←相机轴映射，跟随方向无法确定。{self._R_cb_source}"
+
+        baseline, note = self._pick_baseline(which, joints_deg)
+        if baseline is None:
+            with self._lock:
+                self._fail_upstream = False
+            return False, note
+
+        if which == "start":
+            ok, msg, data = self._toggle_and_wait(True)
+            if not ok:
+                return False, f"使能 follow 失败：{msg or self._reason_of(data)}"
+            with self._lock:
+                self._snapshot = data or self._snapshot
+        if teach:
+            ok, msg, data = self._cpp("teach", {"save_map": cfg["teach_save_map"]},
+                                      timeout=TIMEOUT_CONTROL)
+            if not ok:
+                with self._lock:
+                    self._fail_upstream = bool(self._upstream_down)
+                return False, f"示教失败：{msg or self._reason_of(data)}"
+            with self._lock:
+                self._snapshot = data or self._snapshot
+                self._fail_upstream = False
+
+        with self._lock:
+            self._active = True
+            self._baseline_q = baseline
+            self._target_q = baseline.copy()   # 增量=0 ⇒ 目标就是基线；页面据此把臂摆到位
+            self._ik_failed = False
+            self._last_error = ""
+            self._last_frames = -1
+        self._ensure_poller()
+        self._emit(force=True)
+        logger.info("follow %s：基线=%s°  %s", which,
+                    np.round(np.degrees(baseline), 2).tolist(), note)
+        return True, (f"{'启动' if which == 'start' else '调零'}完成：已示教并锁定臂基线"
+                      + (f"（{note}）" if note else ""))
+
+    @staticmethod
+    def _reason_of(data: dict) -> str:
+        return str((data or {}).get("reason", "") or "")
+
+    def _pick_baseline(self, which: str,
+                       joints_deg: Optional[List[float]]) -> Tuple[Optional[np.ndarray], str]:
+        """
+        基线优先级（写死在这里，别在三个调用点各排一次序）：
+          1) 请求带来的 joints_deg —— 页面才是"此刻仿真臂在哪儿"的唯一知情者（URDF 约定，度）；
+          2) 服务自己上一次的目标 —— 页面刚刷新、还没收到 WS 时至少接着自己的数走；
+          3) 启动专用兜底 = home；调零**不兜底**（"当前位姿"拿不到就必须喊，而不是偷偷用 home
+             当基线 —— 那会把臂瞬移走，而用户刚点的明明是"就停在这儿"）。
+
+        真机反馈**故意不在这里**：`cr5_kinematics` 明写 DH 的 q2/q4 相对 URDF 偏 ±π/2，控制器
+        回报的 J2/J4 与 URDF 关节角差 90°，直接拿来当基线会让臂摆到一个错位 90° 的位姿上。
+        那条换算属于 P5（真机控制路径），不是这里该顺手补的。
+        """
+        if joints_deg is not None and len(joints_deg) >= 6:
+            q = np.asarray([float(v) for v in joints_deg[:6]], dtype=np.float64)
+            if not np.all(np.isfinite(q)):
+                return None, "joints_deg 含非有限值"
+            return np.radians(q), "基线取自请求里的当前关节角"
+        with self._lock:
+            last = None if self._target_q is None else self._target_q.copy()
+        if last is not None:
+            return last, "请求没带关节角，沿用上一次的跟随目标"
+        if which == "zero":
+            return None, ("调零需要臂的当前位姿当基线：页面没传 joints_deg，也没有可沿用的跟随目标。"
+                          "真机关节反馈不能当基线用（控制器 J2/J4 与 URDF 差 ±90°，见 P5）")
+        return np.radians(np.asarray(self._arm["home_joints_deg"], dtype=np.float64)), \
+            "基线取 home（仿真臂先摆到 home 再锁基准）"
+
+    # ---------------------------------------------------------------- 状态
+    def status(self) -> Dict[str, Any]:
+        """给 REST 用。在跟随中就返回轮询缓存（不额外压 C++），否则即时拉一次。"""
+        with self._lock:
+            active = self._active
+            snap = dict(self._snapshot)
+            baseline = None if self._baseline_q is None else np.degrees(self._baseline_q).tolist()
+            target = None if self._target_q is None else np.degrees(self._target_q).tolist()
+        if not active:
+            # 没在跟随：缓存可能是上一次停止时的，即时拉一次。**必须拉在组装载荷之前** ——
+            # 否则载荷里的 camera_service_reachable 说的是"上一次访问"的结果，第一次查状态
+            # 就会在相机服务根本没起的情况下报出 reachable=true。
+            snap = self._fetch_snapshot()
+        with self._lock:
+            payload = {
+                "active": active,
+                "arm_mode": self._arm["mode"],
+                "poll_hz": self._arm["poll_hz"],
+                "home_joints_deg": self._arm["home_joints_deg"],
+                "r_cb_source": self._R_cb_source,
+                "r_cb_ready": self._R_cb is not None,
+                "camera_service_reachable": not self._upstream_down,
+                "ik_failed": self._ik_failed,
+                "last_error": self._last_error,
+                "arm_baseline_deg": baseline,
+                "arm_target_deg": target,
+                "follow": snap,
+            }
+        # joints_deg / target_pose 与 WS 广播同名：页面用一套渲染代码吃掉两条来源。
+        payload["joints_deg"] = target
+        payload["target_pose"] = self._target_pose_deg()
+        return payload
+
+    def _state_payload(self) -> dict:
+        with self._lock:
+            return {
+                "active": self._active,
+                "arm_mode": self._arm["mode"],
+                "r_cb_source": self._R_cb_source,
+                "ik_failed": self._ik_failed,
+                "last_error": self._last_error,
+                "arm_baseline_deg": (None if self._baseline_q is None
+                                     else [round(float(v), 4) for v in np.degrees(self._baseline_q)]),
+                "arm_target_deg": (None if self._target_q is None
+                                   else [round(float(v), 4) for v in np.degrees(self._target_q)]),
+                "follow": dict(self._snapshot),
+            }
+
+    # -------------------------------------------------------------- 轮询/解算
+    def _ensure_poller(self) -> None:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop_evt.clear()
+            self._thread = threading.Thread(target=self._poll_loop, name="follow-poll", daemon=True)
+            self._thread.start()
+
+    def _stop_poller_if_idle(self) -> None:
+        with self._lock:
+            if self._active or self._thread is None:
+                return
+            self._stop_evt.set()
+            self._thread = None
+
+    def _poll_loop(self) -> None:
+        period = 1.0 / self._arm["poll_hz"]
+        while not self._stop_evt.is_set():
+            t0 = time.monotonic()
+            try:
+                self._poll_once()
+            except Exception as e:                                # 轮询线程不许因一次异常就死掉
+                logger.error("follow 轮询异常: %s", e, exc_info=True)
+                with self._lock:
+                    self._last_error = f"轮询异常：{e}"
+            dt = time.monotonic() - t0
+            if dt < period:
+                self._stop_evt.wait(period - dt)
+
+    def _poll_once(self) -> None:
+        with self._lock:
+            if not self._active:
+                return
+        snap = self._fetch_snapshot()
+        if "error" in snap:
+            with self._lock:
+                self._last_error = snap["error"]
+            self._emit()
+            return
+
+        frames = int(snap.get("frames") or 0)
+        usable = bool(snap.get("enabled")) and bool(snap.get("has_pose")) and snap.get("status") == "ok"
+        with self._lock:
+            self._snapshot = snap
+            new_frames = frames != self._last_frames
+            baseline = None if self._baseline_q is None else self._baseline_q.copy()
+            nearest = None if self._target_q is None else self._target_q.copy()
+            ready = self._R_cb is not None
+
+        # 同一批帧只解一次：C++ 的 frames 只在真正解算过一帧时才前进，用它当去重键最省。
+        if not (new_frames and usable and baseline is not None and ready):
+            self._emit()
+            return
+
+        best, _T_target, reason = self._solve(snap, baseline, nearest)
+        with self._lock:
+            self._last_frames = frames
+            self._ik_failed = best is None
+            self._last_error = reason
+            if best is not None:
+                self._target_q = best
+            elif reason:
+                # 失败**保持上一目标**：不夹位、不缩增量、不跳去 home。"增量一致"的契约
+                # 不能被一次静默的截断破坏 —— 宁可臂停住，也不要它朝一个没测到的方向走。
+                logger.warning("follow: 本帧未采用（%s），保持上一目标", reason)
+        self._emit()
+
+    def _solve(self, snap: dict, baseline: np.ndarray,
+               nearest: Optional[np.ndarray]) -> Tuple[Optional[np.ndarray], Any, str]:
+        kin = self._get_kin()
+        if kin is None or self._R_cb is None:
+            return None, np.eye(4), "kinematics 或轴映射不可用"
+        with self._kin_lock:
+            return joints_to_target(kin, self._R_cb, snap.get("delta_r") or np.eye(3),
+                                    snap.get("delta_t_m") or [0.0, 0.0, 0.0], baseline, nearest)
+
+    def _get_kin(self):
+        with self._kin_lock:
+            if self._kin is None:
+                try:
+                    from core.hardware.robot.cr5_kinematics import CR5Kinematics
+                    self._kin = CR5Kinematics(backend="auto")
+                except Exception as e:
+                    logger.error("CR5 运动学初始化失败: %s", e)
+                    return None
+            return self._kin
+
+    # ---------------------------------------------------------------- 广播
+    def register_ws_callback(self, callback: Callable) -> None:
+        with self._lock:
+            if callback not in self._ws_callbacks:
+                self._ws_callbacks.append(callback)
+
+    def unregister_ws_callback(self, callback: Callable) -> None:
+        with self._lock:
+            if callback in self._ws_callbacks:
+                self._ws_callbacks.remove(callback)
+
+    def _emit(self, force: bool = False) -> None:
+        payload = self._state_payload()
+        snap = payload["follow"] or {}
+        target = payload["arm_target_deg"]
+        key = (int(snap.get("frames") or 0), str(snap.get("status")), payload["active"],
+               payload["ik_failed"], None if target is None else tuple(target))
+        with self._lock:
+            if not force and key == self._last_emit_key:
+                return
+            self._last_emit_key = key
+            callbacks = list(self._ws_callbacks)
+            joints = target
+            pose = self._target_pose_deg() if joints is not None else None
+
+        data = dict(payload)
+        data["joints_deg"] = joints
+        data["target_pose"] = pose
+        for cb in callbacks:
+            try:
+                cb({"type": "follow_state", "data": data})
+            except Exception as e:                                # 一个坏客户端不能拖垮生产者
+                logger.error("follow WS 回调失败: %s", e)
+
+    def _target_pose_deg(self) -> Optional[List[float]]:
+        with self._lock:
+            q = None if self._target_q is None else self._target_q.copy()
+        if q is None:
+            return None
+        kin = self._get_kin()
+        if kin is None:
+            return None
+        try:
+            with self._kin_lock:
+                return pose_ctrl_from_target(kin, q)
+        except Exception as e:
+            logger.warning("目标位姿反算失败: %s", e)
+            return None
+
+
+follow_service = FollowService()

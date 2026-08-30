@@ -27,8 +27,9 @@ EYE_IN_HAND = "eye-in-hand"
 MOUNTS: tuple[str, str] = (EYE_TO_HAND, EYE_IN_HAND)
 
 # Dobot 控制器回报的 [x, y, z, rx, ry, rz] 中姿态部分满足
-#   R = Rx(rx) · Ry(ry) · Rz(rz)      (scipy 内禀序列 'xyz')
-# 该对应关系已用 CR5Kinematics.forward_controller 逐轴随机姿态实测, 与
+#   R = Rz(rz) · Ry(ry) · Rx(rx)      (定系下的矩阵乘序；等价于 scipy 内禀序列 'xyz')
+# 注意别把"内禀 xyz"读成 Rx·Ry·Rz —— 内禀是绕**动**轴依次转 x→y→z，写成定系矩阵乘积时
+# 顺序反过来。该对应关系已用 CR5Kinematics.forward_controller 逐轴随机姿态实测，与
 # Rotation.from_matrix(T_ctrl).as_euler('xyz', degrees=True) 完全一致 (<1e-15)。
 # 老版求解器靠 12 顺规 x 8 符号网格搜索"猜"出这个约定, 现在直接确定化,
 # 网格搜索仅作为异常控制器固件的兜底保留在 eye_to_hand 里。

@@ -4,6 +4,7 @@
 #include <atomic>
 #include <csignal>
 #include <chrono>
+#include <cstdio>
 #include <iomanip>
 
 #include "types.hpp"
@@ -16,6 +17,8 @@
 #include "corner_detector.hpp"
 #include "async_disk_writer.hpp"
 #include "http_server.hpp"
+#include "follow_worker.hpp"
+#include "follow/config_loader.hpp"
 
 using namespace orbbec_service;
 
@@ -123,6 +126,32 @@ int main(int argc, char** argv) {
         stats_interval_sec = config.stats_interval_sec;
     }
 
+    // 1b. follow 的配置：读的是**同一个 yaml 的同一个 follow: 块**，解析器只有 follow::load_config
+    // 一个（在这里抄一份的结果是"新键在那边不认"，而且没人报错）。相机服务从这份配置里只取两样
+    // 东西 —— 设备锁路径和取流档位，其余全归 FollowWorker。
+    follow::FollowConfig fcfg;
+    std::string follow_block_reason;
+    std::string ferr;
+    if (!follow::load_config(config_path, &fcfg, &ferr)) {
+        follow_block_reason = ferr;
+        LOG_ERROR("Follow", "配置读取失败，follow 不可用（相机服务照常运行）: ", ferr);
+    } else {
+        const follow::ConfigProblems fprobs = follow::check_config(&fcfg, follow::find_project_root());
+        for (const auto& p : fprobs.items) {
+            if (p.fatal) {
+                LOG_ERROR("Follow", "配置致命: ", p.text);
+            } else {
+                LOG_WARN("Follow", "配置提示: ", p.text);
+            }
+        }
+        if (!fprobs.ok()) {
+            follow_block_reason = fprobs.joined();
+        }
+    }
+    // 锁路径为空 ⇒ CameraDriver 不做进程间仲裁（并会为此单独喊一次）。配置坏了就不能拿一个可能
+    // 不对的锁路径去挡别人，所以这里连同锁一起放弃。
+    config.device_lock_path = follow_block_reason.empty() ? fcfg.capture.lock_path : std::string();
+
     LOG_INFO("Main", "Initializing Core Subsystems on RK3588 (Stats report interval: ", stats_interval_sec, "s)...");
 
     // 2. Instantiate Subsystems
@@ -156,11 +185,19 @@ int main(int argc, char** argv) {
         LOG_ERROR("Main", "Camera Driver initialization failed!");
     }
 
+    // follow 作为库跑在本进程里（默认不使能）。线程一上来就睡着，除非有人 POST /follow。
+    auto follow_worker = std::make_shared<FollowWorker>(camera, fcfg);
+    if (!follow_block_reason.empty()) {
+        follow_worker->setBlocked(follow_block_reason);   // setEnabled 会拒绝，/follow/status 报同一条
+    }
+    follow_worker->start();
+
     // Start Camera Stream
     camera->start();
 
     // 4. Start HTTP Server
-    auto http_server = std::make_shared<HttpServer>(camera, corner_detector, zlm, disk_writer);
+    auto http_server = std::make_shared<HttpServer>(camera, corner_detector, zlm, disk_writer,
+                                                    follow_worker);
     http_server->start(config.http_port);
 
     LOG_INFO("Main", "All services started successfully! Entering main processing loop.");
@@ -263,6 +300,28 @@ int main(int argc, char** argv) {
                      ", Capture FPS: ", st.color_fps, ", Depth Stream: ", (st.depth_stream_enabled ? "\033[32mON\033[0m" : "\033[33mOFF (Calib Mode)\033[0m"), 
                      ", Depth Align: ", (st.depth_align_enabled ? "\033[32mON\033[0m" : "\033[33mOFF\033[0m"), 
                      ", Total Frames: ", st.total_frames, "]");
+            // 报**实际交付**的档位（不是 hardware.camera 里写的），因为 follow 使能时它会被整档换掉，
+            // 而内参是按哪一档取的直接决定点云对不对。align=disabled 时深度根本不在彩色像素系里。
+            LOG_INFO("Status", "  Delivered Stream: ", st.capture_width, "x", st.capture_height,
+                     " @ ", st.capture_fps, "fps  align=", st.depth_align_mode,
+                     "  intrinsics=", (st.intrinsics_loaded ? "loaded" : "DEFAULT(untrusted)"),
+                     "  profile=", (st.follow_profile ? "follow" : "hardware.camera"));
+
+            const FollowSnapshot fs = follow_worker->snapshot();
+            char pose_buf[128];
+            std::snprintf(pose_buf, sizeof(pose_buf), "X=%+.1f Y=%+.1f Z=%+.1f mm  rx=%+.2f ry=%+.2f rz=%+.2f deg",
+                          fs.pose_mm[0], fs.pose_mm[1], fs.pose_mm[2],
+                          fs.pose_rpy_deg[0], fs.pose_rpy_deg[1], fs.pose_rpy_deg[2]);
+            LOG_INFO("Status", "  Follow (in-proc): [Enabled: ", (fs.enabled ? "\033[32mON\033[0m" : "\033[33mOFF\033[0m"),
+                     ", ", fs.status, "/", fs.estimator, ", Taught: ", (fs.taught ? "YES" : "NO"),
+                     ", ", pose_buf, ", inl=", fs.gicp_inliers, "(", fs.inlier_ratio, ")",
+                     ", compute=", fs.compute_ms, "ms, fps=", fs.fps,
+                     ", frames=", fs.frames, ", dropped=", fs.dropped, ", rejected=", fs.rejected, "]");
+            if (!fs.reason.empty()) {
+                // 不 ok 时位姿是**上一个可信值**，这一行就是把那件事说给人听，否则读数会被当真。
+                LOG_INFO("Status", "    \033[33m> \033[0m", fs.reason,
+                         (fs.holding_last_pose ? "  <位姿保持上一可信值>" : ""));
+            }
             
             if (calib_cfg.enabled) {
                 WorkerLatencyStats w_stats = corner_detector->getWorkerStats(true);
@@ -292,6 +351,7 @@ int main(int argc, char** argv) {
 
     LOG_INFO("Main", "Stopping all services...");
     http_server->stop();
+    follow_worker->stop();   // 必须先于 camera：它是帧的消费者，也是 follow 档位的发起者
     camera->stop();
     disk_writer->stop();
     corner_detector->stop();

@@ -43,6 +43,27 @@ else()
     set(YAML_CPP_LIB yaml-cpp)
 endif()
 
+# follow 把 Eigen3::Eigen / OpenMP::OpenMP_CXX 作为 PUBLIC 依赖往外传，而**非 GLOBAL 的
+# imported target 不会从子目录向上冒**：不在本作用域先 find_package，configure 就会以
+# "no such target" 收场。这两个包板子上都是现成的（/usr/share/eigen3/cmake、系统 OpenMP）。
+find_package(OpenMP REQUIRED)
+find_package(Eigen3 3.3 REQUIRED NO_MODULE)
+
+# ----------------------------------------------------------------------------------
+# follow 作为**库**编进本进程，而不是再起一个 follow_node。
+#
+# 理由不是性能，是设备归属：Orbbec 是独占设备，两个进程各开一路 pipeline 只会有一路拿到
+# 和彩色不对齐的深度、或者干脆打不开还装作在跑。follow 要的就是"本进程已经在交付的那一路
+# D2C 帧"，所以它只能是消费者。
+#
+# FOLLOW_STANDALONE 由 follow/CMakeLists.txt 按"是否被单独 configure"自己判断：作为子项目
+# 时只建 follow（算法核心）+ follow_config（读同一个 yaml 的 follow: 块）。**绝不链
+# follow_device** —— 那里面是第二个 Context/Pipeline/取流线程，同进程两份 driver 比两份
+# 进程更难查。也绝不链 follow_health：状态由本进程自己的 http_server 报，两处报同一个
+# 状态早晚分成两个答案。
+# ----------------------------------------------------------------------------------
+add_subdirectory("${PROJECT_ROOT}/follow" "${CMAKE_BINARY_DIR}/follow")
+
 # Source files
 set(SOURCES
     src/main.cpp
@@ -52,6 +73,7 @@ set(SOURCES
     src/zlm_streamer.cpp
     src/corner_detector.cpp
     src/async_disk_writer.cpp
+    src/follow_worker.cpp
     src/http_server.cpp
 )
 
@@ -61,6 +83,9 @@ add_executable(orbbec_camera_service ${SOURCES})
 # Target link libraries
 target_link_libraries(orbbec_camera_service
     PRIVATE
+    follow            # 工位跟随的算法核心（含 vendored small_gicp）
+    follow_config     # 读 configs/aisprayer_config.yaml 里那个 follow: 块
+    OpenMP::OpenMP_CXX  # small_gicp 的并行后端就是 OMP；编译有 -fopenmp，链接也得带上
     ${OpenCV_LIBS}
     ${YAML_CPP_LIB}
     ${THIRD_PARTY_INSTALL_DIR}/lib/libOrbbecSDK.so

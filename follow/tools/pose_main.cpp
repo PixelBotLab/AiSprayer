@@ -31,6 +31,7 @@
 #include "follow/odometry.hpp"
 #include "follow/orbbec_capture.hpp"
 #include "follow/pose_io.hpp"
+#include "follow/pose_smoother.hpp"
 #include "follow/reference_map.hpp"
 #include "follow/teach.hpp"
 #include "follow/types.hpp"
@@ -80,7 +81,8 @@ constexpr double kRad2Deg = 57.29577951308232;
 constexpr double kDeadbandTmm = 1.0;
 constexpr double kDeadbandRdeg = 0.1;
 constexpr int64_t kHeartbeatMs = 5000;
-constexpr int kSmoothFrames = 5;  // 1 = 显示原始单帧
+// 平滑窗口的默认值在 follow/pose_smoother.hpp（kDefaultSmoothFrames）：相机服务里的 worker
+// 用的就是同一个数，改一处两边一起变，不会出现"demo 稳、页面抖"。
 
 // 启动横幅用颜色分块；非终端（管道/重定向）或设了 NO_COLOR 时必须关掉，否则转义序列会
 // 变成字面上的 ^[[36m 混进日志里。
@@ -128,7 +130,7 @@ struct Args {
   int frames = 0;  // >0 = 跑这么多帧就退出（没有终端时也能自测）
   double deadband_t = kDeadbandTmm;
   double deadband_r = kDeadbandRdeg;
-  int smooth = kSmoothFrames;
+  int smooth = kDefaultSmoothFrames;
   bool debug = false;
   bool want_help = false;
 };
@@ -146,7 +148,7 @@ void usage(const char* argv0) {
       "运行中: z 或 Enter = 以当前画面重新调零，q 或 s = 停止并打印本段精度小结。\n"
       "行只在任一轴与上次打印相差超过阈值时才打印；另有 %.0f 秒一次的心跳行报「其间最大偏离」，"
       "静默不等于没在算。\n",
-      argv0, kDeadbandTmm, kDeadbandRdeg, static_cast<double>(kSmoothFrames),
+      argv0, kDeadbandTmm, kDeadbandRdeg, static_cast<double>(kDefaultSmoothFrames),
       static_cast<double>(kHeartbeatMs) / 1000.0);
 }
 
@@ -387,55 +389,8 @@ class PrintGate {
   int64_t last_print_ms_ = 0;
 };
 
-// 显示用的位姿 = 最近 N 帧的平均。这不是为了好看：静止实测的单帧逐轴噪声 sd 就有 ~2 mm，
-// 而"1 mm 就打印"是用户要的粒度 —— 噪声比阈值还大时，死区再调也挡不住刷屏（实测 90 帧仍打
-// 61 行）。N 帧平均把噪声压到 sd/√N，代价是约 N/2 帧（@15fps、N=5 时 0.17 s）的显示滞后。
-// 给人读的数，这笔交易划算；**精度小结仍然用全部原始帧**，这里只影响打哪一行、显示什么数。
-class PoseSmoother {
- public:
-  explicit PoseSmoother(int n) : n_(n < 1 ? 1 : n) {}
-
-  void push(const Eigen::Isometry3d& T) {
-    buf_.push_back(T);
-    if (static_cast<int>(buf_.size()) > n_) {
-      buf_.pop_front();
-    }
-  }
-
-  Eigen::Isometry3d value() const {
-    Eigen::Vector3d t = Eigen::Vector3d::Zero();
-    Eigen::Matrix3d r = Eigen::Matrix3d::Zero();
-    for (const auto& T : buf_) {
-      t += T.translation();
-      r += T.rotation();
-    }
-    const double inv = 1.0 / static_cast<double>(buf_.size());
-    t *= inv;
-    r *= inv;
-    // 平均出来的矩阵不是正交阵，直接拿去解欧拉角会得到带尺度误差的旋转。投影回 SO(3)：
-    // R = U·diag(1,1,det(UVᵀ))·Vᵀ，这是欧氏意义下最近的正交阵。窗口内角度跨度 < 1° 时
-    // 这一步几乎不改变结果，但它保证"平均"不会悄悄变成一个不合法的姿态。
-    const Eigen::JacobiSVD<Eigen::Matrix3d> svd(r, Eigen::ComputeFullU | Eigen::ComputeFullV);
-    const Eigen::Matrix3d u = svd.matrixU(), v = svd.matrixV();
-    Eigen::Matrix3d R = u * v.transpose();
-    if (R.determinant() < 0.0) {
-      Eigen::Matrix3d flip = Eigen::Matrix3d::Identity();
-      flip(2, 2) = -1.0;
-      R = u * flip * v.transpose();
-    }
-    Eigen::Isometry3d out = Eigen::Isometry3d::Identity();
-    out.linear() = R;
-    out.translation() = t;
-    return out;
-  }
-
-  int used() const { return static_cast<int>(buf_.size()); }
-  int size() const { return n_; }
-
- private:
-  int n_;
-  std::deque<Eigen::Isometry3d> buf_;
-};
+// 显示位姿的 N 帧平均在 follow/pose_smoother.hpp —— 相机服务里推给页面/臂的那一路用的是
+// 同一个类，所以"演示里看着稳"才蕴含"页面上看着稳"。这里只留消费方。
 
 // 一段 = 两次调零之间。参考系在调零那一刻换了，所以运动包络和静止重复性都必须按段算：
 // 跨两个零点求 min/max 等于把两套坐标里的数混在一起，得到的"范围"没有任何物理含义。
@@ -643,7 +598,11 @@ void print_banner(const Palette& pal, const FollowConfig& cfg, const OrbbecCaptu
 
   std::printf("\n%s参考系%s = 上一次调零那一刻的相机坐标轴：X=右  Y=下  Z=前(沿光轴指向工件)，单位 mm。\n",
               pal.cyan, pal.off);
-  std::printf("姿态 rx/ry/rz = 绕 X/Y/Z 的 ZYX 欧拉角(deg)，与发臂的 ServoP 同一约定。\n");
+  std::printf("姿态 rx/ry/rz = 内禀 'xyz'（定系矩阵乘序 R = Rz(rz)·Ry(ry)·Rx(rx)，deg），与发臂的 "
+              "ServoP、与 apps/calib 的 DOBOT_EULER_SEQ 同一约定。\n");
+  std::printf("本工具与相机服务里的 follow 库跑的是%s同一份 libfollow%s：这里的读数就是页面仿真臂"
+              "看到的增量，两边不一致即其中一边接错了。\n",
+              pal.bold, pal.off);
   std::printf("拿尺子验收：朝工件推进 100 mm → Z 应增大 ~100；向右移 → X 增大；向上抬 → Y 减小。\n");
   std::printf("只在任一轴与%s上次打印%s相差 > %.1f mm / %.1f deg 时打印一行；静默 %lld 秒会插一行心跳，"
               "报出「其间最大偏离」——静默是在算，不是卡住\n",

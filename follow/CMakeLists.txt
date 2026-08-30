@@ -76,6 +76,7 @@ set(FOLLOW_SOURCES
     src/pose_io.cpp
     src/frontend.cpp
     src/reference_map.cpp
+    src/teach_core.cpp
     src/odometry.cpp
 )
 
@@ -100,13 +101,45 @@ if(FOLLOW_ENABLE_RKNN)
 endif()
 
 # ----------------------------------------------------------------------------------
+# 配置层：只长 yaml-cpp，不长厂商 SDK，也不长 httplib。
+#
+# 单独一层是给"follow 作为库编进相机服务"这条路径准备的：orbbec_service 要读的是同一个
+# configs/aisprayer_config.yaml 里的同一个 follow: 块，配置解析必须复用而不是抄一份（抄的那份
+# 会静默地不认新键）。而它绝不该顺带链上 follow_device —— 那边有第二个 ob::Pipeline。
+# ----------------------------------------------------------------------------------
+
+find_package(yaml-cpp REQUIRED)
+
+add_library(follow_config STATIC src/config_loader.cpp)
+target_include_directories(follow_config PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_link_libraries(follow_config PUBLIC follow yaml-cpp::yaml-cpp)
+
+# ----------------------------------------------------------------------------------
+# 只有"被单独 configure"时才建的东西：验收工具、设备层、可执行、单测。
+#
+# 判据不用 PROJECT_IS_TOP_LEVEL（那是 3.21+ 才有的），自己比目录即可：3.16 上它必须照样成立，
+# 否则老 cmake 配置出来的默认值会**静默少掉一半目标**，那比构建失败更难查。
+# 守卫写成早 return，而不是把后面 100 行整体缩进 —— 后者会把每条注释的上下文搅乱。
+# ----------------------------------------------------------------------------------
+
+if("${CMAKE_CURRENT_SOURCE_DIR}" STREQUAL "${CMAKE_SOURCE_DIR}")
+  set(_follow_is_top_level ON)
+else()
+  set(_follow_is_top_level OFF)
+endif()
+option(FOLLOW_STANDALONE "Build follow's own executables, tools and tests" ${_follow_is_top_level})
+
+if(NOT FOLLOW_STANDALONE)
+  message(STATUS "follow: 作为子项目被消费，只构建 follow / follow_config（工具与测试已跳过）")
+  return()
+endif()
+
+# ----------------------------------------------------------------------------------
 # P3 验收工具（follow_synth / gen_synth）
 #
 # 刻意不链进 libfollow：渲染器是验收脚手架，产品代码一行都不碰它。反过来 libfollow 也不
 # 依赖 yaml-cpp —— 只有清单读写要它。
 # ----------------------------------------------------------------------------------
-
-find_package(yaml-cpp REQUIRED)
 
 add_library(follow_synth STATIC
     tools/synth_scene.cpp
@@ -156,22 +189,26 @@ add_executable(follow_bench_frontend tools/bench_frontend.cpp)
 target_link_libraries(follow_bench_frontend PRIVATE follow)
 
 # ----------------------------------------------------------------------------------
-# P4 进程装配层：配置格式 + 健康端点 + main。
+# P4 进程装配层：健康端点 + 把配置层和健康层合起来的那个名字。
 #
 # 单独一层的原因和 follow_device 那条一样是构建可达性：libfollow 是算法核心，一旦它
 # 因为 yaml-cpp / httplib 而长进依赖，没装这些的机器（以及所有纯数学单测）就构建不了。
 # 配置的"读哪种格式"和 HTTP 的"用哪个库"都不该出现在 depth_to_cloud 的传递依赖里。
+#
+# 拆成 follow_config / follow_health 两块是因为相机服务只要前者：它自己有 http_server，
+# 再链一份 httplib 的健康服务就是两个进程抢着报同一个状态。follow_app 这个名字保留成
+# INTERFACE（= 配置 + 健康），所以下面两个可执行和 test_config 的写法都不用改。
 # ----------------------------------------------------------------------------------
 
 find_package(Threads REQUIRED)
 
-add_library(follow_app STATIC
-    src/config_loader.cpp
-    src/health_server.cpp
-)
-target_include_directories(follow_app PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
-target_include_directories(follow_app SYSTEM PUBLIC ${THIRD_PARTY_INSTALL_DIR}/include)
-target_link_libraries(follow_app PUBLIC follow yaml-cpp::yaml-cpp Threads::Threads)
+add_library(follow_health STATIC src/health_server.cpp)
+target_include_directories(follow_health PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+target_include_directories(follow_health SYSTEM PUBLIC ${THIRD_PARTY_INSTALL_DIR}/include)
+target_link_libraries(follow_health PUBLIC follow Threads::Threads)
+
+add_library(follow_app INTERFACE)
+target_link_libraries(follow_app INTERFACE follow_config follow_health)
 
 add_executable(follow_node src/node_main.cpp)
 target_link_libraries(follow_node PRIVATE follow_app follow_device)
@@ -185,7 +222,8 @@ target_link_libraries(follow_pose PRIVATE follow_app follow_device)
 set_target_properties(follow_pose PROPERTIES BUILD_RPATH "${THIRD_PARTY_INSTALL_DIR}/lib")
 
 # P4 设备问答：只在插着相机的板子上有意义。**故意不链 libfollow** —— 它是现场诊断工具，
-# 不该把产品库的符号拖进一条只问设备的可执行文件里。
+# 不该把产品库的符号拖进一条只问设备的可执行文件里。副作用要写明白：不链 libfollow 也就
+# 不拿 .orbbec.lock，而相机服务现在持这把锁 ⇒ 后端在跑时它会和 libusb 抢设备。先停后端。
 add_executable(follow_probe_device tools/probe_device.cpp)
 target_include_directories(follow_probe_device PRIVATE ${THIRD_PARTY_INSTALL_DIR}/include)
 target_link_libraries(follow_probe_device PRIVATE ${THIRD_PARTY_INSTALL_DIR}/lib/libOrbbecSDK.so)

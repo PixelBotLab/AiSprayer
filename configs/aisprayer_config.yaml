@@ -90,17 +90,21 @@ spraying:
   grid_tol_y_deg: [-5.0, 5.0, 2.0]       # 绕工具 Y 轴倾斜容差与采样步长
   grid_tol_z_deg: [-180.0, 180.0, 10.0]  # 绕工具 Z 轴自旋容差与采样步长
 
-# 5. 工位跟随 (Follow) —— follow_node 独立进程的配置
-# 刻意不继承 hardware.camera：那一块是给推流/标定用的 1280x800，而本模块的分辨率预算由
+# 5. 工位跟随 (Follow) —— 特征前端 + 配准 + 判据 + 臂侧镜像
+# 这一份 `follow:` 块有两个读者，跑的是同一套数学：
+#   ① 相机服务内的 follow 库（默认**关闭**，页面上点"启动"才使能；见 follow_worker.cpp）
+#      —— 以及它上面的 app 后端 apps/follow（把修正量镜像成仿真臂关节角）。
+#   ② 独立自测进程 `follow_pose`（不依赖任何服务，直接吃相机，是①行为的可验证对照）。
+# 分辨率刻意不继承 hardware.camera：那一块是给推流/标定用的 1280x800，而本模块的预算由
 # follow_bench_frontend 在真实工位图上量出来。下面每个数都能追到一次测量，改之前先重跑量具。
 follow:
-  mount: "eye-to-hand"          # 眼在手上时「工件动了」与「相机动了」纯视觉不可辨识，见 follow/README
+  mount: "eye-to-hand"          # 眼在手上时相机在法兰上，臂一动图像就变，「工件动了」与「相机动了」纯视觉不可辨识：必须按帧减掉臂反馈，那是独立阶段（P5），不是一个开关
 
   camera:
     width: 640                  # 硬件 D2C 对齐支持的最大分辨率为 640x480 (848x480 及以上仅支持软对齐)
     height: 480                 # 640x480 走硬件 D2C (ASIC 芯片计算，0% 主机 CPU 占用)
     fps: 15                     # 640x480@15fps：单帧 40ms < 66.7ms 预算，0丢帧且大幅降低总CPU占用
-    lock_path: ".orbbec.lock"   # 与相机服务互斥的 flock 文件（相对项目根）
+    lock_path: ".orbbec.lock"   # 全项目唯一的相机 flock（相对项目根），路径以本键为准；相机服务启动即持有，独立工具拿不到就报"被 PID x 占用"
     frame_timeout_ms: 1000
     first_pair_timeout_ms: 3000 # 彩色比深度晚上线约 333 ms，等第一个「成对」帧组才算就绪
     allow_unaligned: false      # true 会让深度/彩色各用一套内参（基线 23.735mm），只给排障
@@ -142,3 +146,18 @@ follow:
     max_cycles: 0               # 0 = 一直跑
     calib_path: "configs/calib/calibration_result.yaml"
     log_level: "info"
+
+  # 臂侧镜像：把上面的相机系修正量换算成 CR5 关节角，喂给页面的仿真臂。
+  # C++ 侧只解析+校验这一段（读到同一份配置就得对同一份配置负责），真正的消费方是 app 后端
+  # apps/follow/services/follow_service.py。
+  arm:
+    mode: "sim"                 # sim = 只驱动页面仿真臂；real = 真实臂开关，P5 控制层接入前点击即被拒绝
+    home_joints_deg: [0.0, 0.0, -90.0, -90.0, -90.0, 0.0]
+                                # = DobotDriver.go_home() 那一档。"启动"先把仿真臂摆到这里，并把
+                                #   它锁成基线（不是实时位姿 —— 用实时位姿当基准会形成正反馈）
+    camera_to_base_fallback_euler_deg: [0.0, 0.0, 0.0]
+                                # 手眼标定缺失/为 eye-in-hand 时的退路 R_cb：基座系下相机轴朝向
+                                #   [rx,ry,rz]，R = Rz·Ry·Rx，单位度。这是**降级**（方向会有偏差），
+                                #   用的是哪一个会写进状态的 r_cb_source，不会悄悄生效
+    poll_hz: 20                 # 后端拉相机服务快照的频率（1~50），页面看到的刷新率就是它
+    teach_save_map: true        # 示教时把参考地图落盘到 teach.map_path（false = 只在内存里，重启即失）

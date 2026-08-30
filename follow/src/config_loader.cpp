@@ -56,6 +56,45 @@ void add(std::vector<ConfigProblem>* out, bool fatal, const std::string& text) {
   out->push_back(ConfigProblem{fatal, text});
 }
 
+// 定长数值序列（关节角 / 欧拉角）。长度不对在**这里**报：等到 check_config 再报，就得为每个
+// 键把值搬过去一遍，而"键名只出现在一处"是这份配置报错能不能对上号的关键。
+void fetch_vec(const YAML::Node& node, const std::string& key, size_t want,
+               const std::string& prefix, std::vector<double>* dst,
+               std::vector<std::string>* errors) {
+  if (!node.IsMap()) {
+    return;
+  }
+  const YAML::Node v = node[key];
+  if (!v) {
+    return;
+  }
+  if (!v.IsSequence()) {
+    errors->push_back(prefix + key + " 期望 " + std::to_string(want) + " 个数的序列，实际不是一个列表");
+    return;
+  }
+  std::vector<double> got;
+  for (const auto& e : v) {
+    try {
+      got.push_back(e.as<double>());
+    } catch (const YAML::Exception& ex) {
+      errors->push_back(prefix + key + " 有一个元素不是数: " + ex.msg);
+      return;
+    }
+  }
+  if (got.size() != want) {
+    errors->push_back(prefix + key + " 需要 " + std::to_string(want) + " 个值，实到 " +
+                      std::to_string(got.size()) + " 个");
+    return;
+  }
+  for (double x : got) {
+    if (!std::isfinite(x)) {
+      errors->push_back(prefix + key + " 含非有限值（nan/inf），拒绝");
+      return;
+    }
+  }
+  *dst = std::move(got);
+}
+
 std::string abs_or_empty(const std::string& root, const std::string& p) {
   if (p.empty()) {
     return {};
@@ -186,7 +225,7 @@ bool load_config(const std::string& path, FollowConfig* cfg, std::string* err) {
   }
   if (!raw.IsMap()) {
     if (err) {
-      *err = "follow: 应是一个映射（下面挂 camera/frontend/track/teach/runtime），实际是一个值 —— 检查缩进";
+      *err = "follow: 应是一个映射（下面挂 camera/frontend/track/teach/runtime/arm），实际是一个值 —— 检查缩进";
     }
     return false;
   }
@@ -270,6 +309,19 @@ bool load_config(const std::string& path, FollowConfig* cfg, std::string* err) {
     fetch<std::string>(rt, "log_level", "字符串", "follow.runtime.", &cfg->log_level, &errors);
   }
 
+  // arm 段**只有 Python 后端读**（C++ 不发臂，一轮也不发）。仍然在这里解析并校验：这是
+  // follow_node 的自测通道，读到同一份配置就得对同一份配置负责 —— 否则后端拿着一个
+  // 写错的 home 角去示教，而 `follow_pose` 全程一声不吭。
+  const YAML::Node arm = section(f, "arm", "follow.", &errors);
+  {
+    fetch<std::string>(arm, "mode", "字符串", "follow.arm.", &cfg->arm_mode, &errors);
+    fetch_vec(arm, "home_joints_deg", 6, "follow.arm.", &cfg->arm_home_joints_deg, &errors);
+    fetch_vec(arm, "camera_to_base_fallback_euler_deg", 3, "follow.arm.",
+              &cfg->arm_fallback_euler_deg, &errors);
+    fetch<int>(arm, "poll_hz", "整数", "follow.arm.", &cfg->arm_poll_hz, &errors);
+    fetch<bool>(arm, "teach_save_map", "布尔", "follow.arm.", &cfg->arm_teach_save_map, &errors);
+  }
+
   if (!errors.empty()) {
     std::ostringstream os;
     os << "配置项类型错误（这些键根本没生效，先修它们）:";
@@ -308,6 +360,11 @@ ConfigProblems check_config(FollowConfig* cfg, const std::string& root) {
   } else if (cfg->capture.fps > 15) {
     add(items, false, "camera.fps = " + std::to_string(cfg->capture.fps) +
                           "：预算按 15 fps 量出来的（848x480 + 200 特征 ≈ 53 ms/帧）。");
+  }
+  if (w > 640) {
+    add(items, false,
+        "camera.width = " + std::to_string(w) + " 超出硬件 D2C 档（对齐只到 640x480）：相机服务里跑"
+        "follow 会退回软对齐，把这份开销压到主机 CPU 上；独立跑 follow_pose 不受影响。");
   }
   if (cfg->capture.first_pair_timeout_ms < 500) {
     add(items, true, "camera.first_pair_timeout_ms = " +
@@ -448,6 +505,21 @@ ConfigProblems check_config(FollowConfig* cfg, const std::string& root) {
       cfg->log_level != "error") {
     add(items, false, "runtime.log_level = " + cfg->log_level + " 不认识，按 info 处理。");
   }
+
+  // --- 机械臂镜像（值由 Python 后端消费，C++ 只负责"这份配置是不是自洽的"）---
+  if (cfg->arm_mode != "sim" && cfg->arm_mode != "real") {
+    add(items, true, "arm.mode = " + cfg->arm_mode + " 不认识（sim | real）");
+  } else if (cfg->arm_mode == "real") {
+    // **警告，不是错误**：follow 默认关闭，一个还没接上的开关绝不能让相机服务连推流都起不来。
+    // 真正的拒绝发生在点击时（follow_service：真实臂控制路径未接入 P5）。
+    add(items, false,
+        "arm.mode=real：真实臂控制路径未接入（P5），跟随按钮会被后端拒绝 —— 仿真镜像请用 sim。");
+  }
+  if (cfg->arm_poll_hz < 1 || cfg->arm_poll_hz > 50) {
+    add(items, false, "arm.poll_hz = " + std::to_string(cfg->arm_poll_hz) +
+                          " 超出 1~50：后端会夹到区间端点再用（上界是 C++ 快照接口的实测容量，"
+                          "再高只是把自板的轮询开销堆在取流线程旁边）。");
+  }
   return out;
 }
 
@@ -472,6 +544,16 @@ std::string describe(const FollowConfig& c) {
   os << "  runtime  : mount=" << c.mount << "  dry_run=" << (c.dry_run ? "是" : "否")
      << "  servo_p=" << (c.enable_servo_p ? "开" : "关") << "  health=:" << c.health_port
      << "  max_cycles=" << c.max_cycles << "\n";
+  os << "  arm      : mode=" << c.arm_mode << "  home=[";
+  for (size_t i = 0; i < c.arm_home_joints_deg.size(); ++i) {
+    os << (i ? "," : "") << c.arm_home_joints_deg[i];
+  }
+  os << "]deg  poll=" << c.arm_poll_hz << "Hz  teach_save_map="
+     << (c.arm_teach_save_map ? "是" : "否") << "  fallback_euler=[";
+  for (size_t i = 0; i < c.arm_fallback_euler_deg.size(); ++i) {
+    os << (i ? "," : "") << c.arm_fallback_euler_deg[i];
+  }
+  os << "]deg （本段由 Python 后端消费，见 follow_service）\n";
   return os.str();
 }
 

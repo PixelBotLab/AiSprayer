@@ -67,6 +67,18 @@ struct CameraStatus {
     bool calibration_mode = false;
     bool depth_stream_enabled = true;
     bool depth_align_enabled = true;
+    // 交付分辨率与配置分辨率**不是一回事**：follow 使能时取流档位会被切到 follow.camera.*。
+    // 内参是按哪一档取的必须由状态说清楚 —— 用 1280x800 的 fx 去反投影 640x480 的网格，
+    // 产出的点云自洽但全错，而且下游看不出任何异常。
+    int capture_width = 0;
+    int capture_height = 0;
+    int capture_fps = 0;
+    bool follow_profile = false;
+    // 实际起来的对齐方式："hw" / "sw" / "disabled"。"disabled" 时深度帧**不在**彩色像素坐标系里，
+    // 拿彩色内参反投影会得出自洽但全错的点云 —— 所以它必须是可查的状态，而不是只体现在日志里。
+    std::string depth_align_mode = "disabled";
+    // 内参是设备给的还是编译期默认值。默认值只在 follow 的判据里等于"没有内参"。
+    bool intrinsics_loaded = false;
     uint64_t total_frames = 0;
     uint64_t dropped_frames = 0;
 };
@@ -131,6 +143,13 @@ struct AppConfig {
 
     // Calibration default
     CalibrationConfig calib_default;
+
+    // 设备仲裁锁（flock 文件，例 /home/.../AiSprayer/.orbbec.lock）。follow 那三个独立工具
+    // （follow_node / follow_pose / follow_capture_selftest）本来就抢这把锁，本进程过去不拿 ——
+    // 于是"谁先 open 设备"由 libusb 决定，现场表现为两路都装作在跑。现在双方都拿，冲突变成
+    // 一句能读的"被 PID x 占用"。值由 main.cpp 从 follow.camera.lock_path 灌进来（全项目只允许
+    // 一处解析那个键），已经解析成绝对路径。空 = 不做进程间仲裁（回放/单测）。
+    std::string device_lock_path = "";
 };
 
 } // namespace orbbec_service

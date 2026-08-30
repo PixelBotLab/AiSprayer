@@ -155,6 +155,8 @@ TEST(Config, ValuesFromYamlWin) {
   const ConfigProblems p = check_config(&c, "/r");
   EXPECT_TRUE(p.ok()) << p.joined();           // 640x480@30 合法
   EXPECT_TRUE(has_warning(p, "camera.fps"));   // 但超预算，必须提示
+  for (const auto& i : p.items)
+    EXPECT_EQ(i.text.find("硬件 D2C 档"), std::string::npos) << i.text;  // 640 宽不该被提示
 }
 
 TEST(Config, FatalRules) {
@@ -210,13 +212,15 @@ TEST(Config, TunablesWarnInsteadOfFailing) {
   FollowConfig c = with_defaults();
   c.track.max_corr_m = 0.5;       // 远超 2.6·voxel，会被体素邻域截断
   c.frontend.max_features = 400;  // CPU 前端超预算
+  c.capture.width = 848;          // 超出硬件 D2C 档：服务里会退回软对齐
   c.dry_run = false;              // 发臂警告
   const ConfigProblems p = check_config(&c, "/r");
-  EXPECT_TRUE(p.ok()) << p.joined();  // 三个都只是提示，不该拦启动
-  EXPECT_GE(p.warnings(), 3u) << p.joined();
+  EXPECT_TRUE(p.ok()) << p.joined();  // 都只是提示，不该拦启动
+  EXPECT_GE(p.warnings(), 4u) << p.joined();
   EXPECT_TRUE(has_warning(p, "2.6·voxel_m"));
   EXPECT_TRUE(has_warning(p, "ServoP"));
   EXPECT_TRUE(has_warning(p, "max_features"));
+  EXPECT_TRUE(has_warning(p, "硬件 D2C 档"));
 }
 
 TEST(Config, DescribeShowsEveryGate) {
@@ -225,6 +229,104 @@ TEST(Config, DescribeShowsEveryGate) {
   for (const char* needle : {"848x480", "18081", "dry_run", "sigma_t", "inlier_ratio", "voxel"}) {
     EXPECT_NE(d.find(needle), std::string::npos) << needle;
   }
+}
+
+// arm 段是 Python 后端消费的，C++ 一个指令也不发。仍然要钉住：一份两边共用的配置，
+// 不能在任一边"读不到就安静用默认"。
+TEST(Config, ArmDefaultsAreSelfConsistent) {
+  write_yaml("arm_defaults.yaml", "follow: {}\n");
+  FollowConfig c;
+  std::string err;
+  ASSERT_TRUE(load_config(tmp("arm_defaults.yaml"), &c, &err)) << err;
+  EXPECT_EQ(c.arm_mode, "sim");
+  ASSERT_EQ(c.arm_home_joints_deg.size(), 6u);
+  EXPECT_EQ(c.arm_home_joints_deg[2], -90.0);  // = DobotDriver.go_home()
+  EXPECT_EQ(c.arm_fallback_euler_deg.size(), 3u);
+  EXPECT_EQ(c.arm_poll_hz, 20);
+  EXPECT_TRUE(c.arm_teach_save_map);
+  const ConfigProblems p = check_config(&c, "/r");
+  EXPECT_TRUE(p.ok()) << p.joined();
+  EXPECT_NE(describe(c).find("mode=sim"), std::string::npos) << describe(c);
+}
+
+TEST(Config, ArmValuesFromYamlWin) {
+  write_yaml("arm_ok.yaml",
+             "follow:\n"
+             "  arm:\n"
+             "    mode: real\n"
+             "    home_joints_deg: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]\n"
+             "    camera_to_base_fallback_euler_deg: [90.0, 0.0, -45.0]\n"
+             "    poll_hz: 5\n"
+             "    teach_save_map: false\n");
+  FollowConfig c;
+  std::string err;
+  ASSERT_TRUE(load_config(tmp("arm_ok.yaml"), &c, &err)) << err;
+  EXPECT_EQ(c.arm_mode, "real");
+  EXPECT_EQ(c.arm_home_joints_deg[5], 6.0);
+  EXPECT_EQ(c.arm_fallback_euler_deg[0], 90.0);
+  EXPECT_EQ(c.arm_poll_hz, 5);
+  EXPECT_FALSE(c.arm_teach_save_map);
+}
+
+// mode=real 是**警告**：follow 默认关闭，一个还没接上的开关绝不能让相机服务连推流都起不来。
+// 真正的拒绝发生在点击时（follow_service）。poll_hz 越界同理 —— 后端会夹，但要说明它在夹。
+TEST(Config, ArmUnsafeButNotBlockingIsWarning) {
+  FollowConfig c = with_defaults();
+  c.arm_mode = "real";
+  c.arm_poll_hz = 200;
+  const ConfigProblems p = check_config(&c, "/r");
+  EXPECT_TRUE(p.ok()) << p.joined();
+  EXPECT_TRUE(has_warning(p, "arm.mode=real")) << p.joined();
+  EXPECT_TRUE(has_warning(p, "P5")) << p.joined();
+  EXPECT_TRUE(has_warning(p, "arm.poll_hz")) << p.joined();
+
+  FollowConfig d = with_defaults();
+  d.arm_mode = "mock";
+  const ConfigProblems q = check_config(&d, "/r");
+  EXPECT_FALSE(q.ok());
+  EXPECT_TRUE(has_fatal(q, "arm.mode")) << q.joined();
+}
+
+// 关节角写少一个、poll_hz 写成汉字：都必须指名道姓，而不是"看起来用了默认值"。
+TEST(Config, ArmTypeErrorsAreNamed) {
+  write_yaml("arm_bad.yaml",
+             "follow:\n"
+             "  arm:\n"
+             "    home_joints_deg: [0.0, 0.0, -90.0]\n"
+             "    poll_hz: twenty\n"
+             "    teach_save_map: 是\n");
+  FollowConfig c;
+  std::string err;
+  EXPECT_FALSE(load_config(tmp("arm_bad.yaml"), &c, &err));
+  EXPECT_NE(err.find("follow.arm.home_joints_deg"), std::string::npos) << err;
+  EXPECT_NE(err.find("follow.arm.poll_hz"), std::string::npos) << err;
+  EXPECT_NE(err.find("follow.arm.teach_save_map"), std::string::npos) << err;
+}
+
+TEST(Config, ArmScalarBlockIsReportedNotThrown) {
+  write_yaml("arm_scalar.yaml", "follow:\n  arm: sim\n");
+  FollowConfig c;
+  std::string err;
+  ASSERT_FALSE(load_config(tmp("arm_scalar.yaml"), &c, &err));
+  EXPECT_NE(err.find("follow.arm"), std::string::npos) << err;
+}
+
+// 仓库里那份生产配置也必须过自己的校验：它是两边（C++ 与 Python 后端）共用的唯一事实来源，
+// 写坏了要在单测里炸，而不是等到有人把相机插上。
+TEST(Config, RepoConfigIsValid) {
+  const std::string root = find_project_root();
+  if (root.empty()) {
+    GTEST_SKIP() << "不在仓库里跑（找不到 configs/aisprayer_config.yaml）";
+  }
+  FollowConfig c;
+  std::string err;
+  ASSERT_TRUE(load_config("", &c, &err)) << err;
+  const ConfigProblems p = check_config(&c, root);
+  EXPECT_TRUE(p.ok()) << p.joined();
+  EXPECT_EQ(c.capture.width * c.capture.height, 640 * 480);  // 硬件 D2C 只有这一档
+  EXPECT_FALSE(c.capture.allow_unaligned);
+  EXPECT_EQ(c.arm_mode, "sim");
+  EXPECT_EQ(c.arm_home_joints_deg.size(), 6u);
 }
 
 // 健康快照是 Python 门面唯一的观测口：NaN 不能变成非法 JSON 字面量，控制字符不能提前

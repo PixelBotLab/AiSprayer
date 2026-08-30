@@ -205,6 +205,9 @@ mk_media_input_h264(media, nalu_data, nalu_len, pts, dts);
 | `/api/v1/camera/corners` | `GET` | 获取最新检测到的标定角点 | 标定采点验证 |
 | `/api/v1/camera/save_frame` | `POST` | **核心抓拍接口**：保存彩色+深度数据到指定目录 | 标定采集/作业留存 |
 | `/api/v1/stream/info` | `GET` | 查询实时视频流播放地址列表 | 前端接入 |
+| `/api/v1/camera/follow` | `POST` | 使能/关闭工位跟随（切换取流档位，默认关闭） | 实时跟随 |
+| `/api/v1/camera/follow/teach` | `POST` | 以当前画面冻结一版参考基准（可选落盘） | 示教/换工件 |
+| `/api/v1/camera/follow/status` | `GET` | 读取跟随快照：位姿、增量、σ、丢帧与判据状态 | 仿真臂镜像/排障 |
 
 ---
 
@@ -362,6 +365,88 @@ mk_media_input_h264(media, nalu_data, nalu_len, pts, dts);
 
 ---
 
+#### 7. 使能/关闭工位跟随 (`POST /api/v1/camera/follow`)
+- **请求体**：`{"enabled": true}`（`enabled` 必填且必须是布尔，否则 400）
+- **副作用**：使能会**重启取流 pipeline** —— 切到 `follow.camera` 档位（640x480@15 + 硬件 D2C）
+  并重新取内参；关闭时退回 `hardware.camera` 档位。百毫秒级，接口同步返回结果。
+- **响应**：`code=0` 表示档位已经切换，`data` 为切换后的快照；起不来时 `code=-1`、HTTP **503**，
+  `msg` 是原话（例如档位被标定模式占用、follow 配置读坏了）。
+
+```json
+{"code": 0, "msg": "follow enabled",
+ "data": {"enabled": true, "status": "no_map", "taught": false, "align": "hardware",
+          "capture_width": 640, "capture_height": 480}}
+```
+
+#### 8. 示教参考基准 (`POST /api/v1/camera/follow/teach`)
+- **请求体**：`{"save_map": false}`（可省略，默认只在内存里建基准）
+- 收 `follow.teach.frames` 帧做时间域深度均值，冻结成新的参考地图并**原子换给**工作线程
+  （正在配准的那一帧不会被抽走）。`save_map: true` 时同时落盘到 `follow.teach.map_path`。
+- 失败同样回 503 + `msg`，且**不会**留下半张地图：判据与运行期取帧共用同一条 `frameUsable`。
+
+#### 9. 跟随快照 (`GET /api/v1/camera/follow/status`)
+只读一份 latest 快照——**绝不在 HTTP 线程里跑 GICP**（一帧几十毫秒，会把 REST 卡成串行队列）。
+`/api/v1/camera/status` 里只有一个 `follow_profile` 布尔（当前 pipeline 跑的是 `follow.camera` 还是
+`hardware.camera` 档位）；跟随的实时数字只有这一条路能拿到，app 后端按 `follow.arm.poll_hz` 轮询它。
+
+```json
+{
+  "code": 0, "msg": "success",
+  "data": {
+    "enabled": true, "connected": true, "taught": true, "has_pose": true,
+    "status": "ok", "estimator": "gicp", "reason": "",
+    "pose_mm": [812.4, -37.1, 1455.8], "pose_rpy_deg": [1.2, -0.4, 0.7],
+    "norm_t_mm": 3.9, "norm_r_deg": 1.5, "holding_last_pose": false,
+    "delta_r": [[0.999, -0.012, 0.004], [0.012, 0.999, -0.008], [-0.004, 0.008, 0.999]],
+    "delta_t_m": [0.0031, -0.0008, 0.0012],
+    "sigma_t_mm": [0.17, 0.19, 0.22], "sigma_r_deg": [0.03, 0.02, null],
+    "gicp_inliers": 412, "inlier_ratio": 0.71, "gicp_cost": 0.00042, "cloud_points": 580,
+    "compute_ms": 28.4, "fps": 14.8, "frames": 1204, "dropped": 3, "rejected": 0,
+    "smooth_used": 5,
+    "map_hash": 1234567890, "map_voxels": 3021, "map_path": ".../follow/out/reference.frmap",
+    "align": "hardware", "capture_width": 640, "capture_height": 480,
+    "teach_capture_width": 640, "teach_capture_height": 480, "snapshot_ts_ms": 1724990000000
+  }
+}
+```
+- `status` 词表 = `follow::to_string(Status)` 再加 worker 独有的 `disabled` / `no_map` / `no_frame`。
+- `status != ok` 时 `pose_*` 是**上一个可信值**（`holding_last_pose=true`），不是本帧读数。
+- `sigma_*` 里的非有限值序列化成 `null`，不能变成非法 JSON 字面量。
+- `capture_*` 与 `teach_capture_*` 不一致时修正量仍然算得出，但点云采样密度差一截、门会变严，
+  所以必须报出来，而不是假装"米制空间与分辨率无关"。
+
+### 6.3 follow 作为库跑在本进程里的约束
+
+`follow_worker.hpp/.cpp` 是 follow 与相机服务之间那道唯一的墙。三条不可让的设计约束，都是
+"这台板子上只有一条取流路径"逼出来的：
+
+1. **不再 new 一个 `follow::OrbbecCapture`**。本进程启动时就拿到了 `.orbbec.lock`（路径来自
+   `follow.camera.lock_path`，全项目唯一定义处），正是为了不让第二路 `ob::Pipeline` 存在；
+   因此 follow 消费的是 `CameraDriver` **已经在交付**的那一份对齐帧。
+2. **工作线程用 `getLatestFrame` + `frame_index` 去重，不能用 `waitForNextFrame`**：后者会推进
+   驱动里的共享游标，主循环与 worker 互相吃掉对方的帧，现象是"两边都掉帧但谁也看不出谁在读"。
+   算不过来时**丢帧并计数**（`dropped`）—— 丢了不是错误，悄悄算了旧帧才是错误。同一毫秒内的两帧
+   无法区分（`FrameData` 上是主机时钟，没有厂商设备时间戳），同样按丢帧处理，不造假 `+1ns`。
+3. **板载 IMU 陀螺流由 `CameraDriver` 以 ~200Hz 独立启动**（`camera_driver.cpp:351-382`，出厂外参
+   `T_cam_gyro` 在同函数 `:328-339` 读取），每帧配准前由 `FollowWorker` 注入跟踪器
+   （`follow_worker.cpp:490-496` → `CameraDriver::drainGyroSamples`）。它**只当旋转初值、不当测量**
+   （三档初值的第 2 档，见 `odometry.cpp:198-209`）。⚠ 服务里的图像帧时间戳是**主机 `system_clock`**
+   （`camera_driver.cpp:586-587`），陀螺样本是**设备时间**（`:364`），两者是否同域尚未实测 —— 不同域
+   的后果是这一档静默失效。详见 `follow_system_design.md` §5.5。
+
+与 `follow_pose` 的一致性是这个模块能验收的前提：示教走同一个 `build_reference_map()`
+（`follow/teach_core.hpp`）、平滑走同一个 `PoseSmoother`、输出走同一个 `to_dobot()`。所以
+"follow_pose 里量对的数"才蕴含"服务推给页面的数是同一套算法算的"，而不是两份实现各自看着对。
+
+`follow` 的配置读坏了（yaml 类型错、`check_config` 报致命）时，服务**照样要起来**：
+`FollowWorker::setBlocked(reason)` 记下原因，`setEnabled` 一律拒绝，`/follow/status` 报同一条原话。
+否则运维看到的只是"点了没反应"。
+
+> 端到端链路、算法判据门全表、IMU、臂侧 IK、仿真臂联动、配置参考、实测数据、测试清单、
+> 排障手册与维护红线：**见同目录 `follow_system_design.md`**。本节只是本服务视角的三条硬约束。
+
+---
+
 ## 7. 模块划分与代码组织结构
 
 规划将代码置于 `app/src/core/hardware/camera/orbbec_camera_service/` 目录下：
@@ -370,7 +455,8 @@ mk_media_input_h264(media, nalu_data, nalu_len, pts, dts);
 app/src/core/hardware/camera/orbbec_camera_service/
 ├── CMakeLists.txt                      # 构建配置
 ├── docs/                               # 文档目录
-│   └── orbbec_camera_service_design.md # 本设计方案
+│   ├── orbbec_camera_service_design.md # 本设计方案
+│   └── follow_system_design.md         # follow 工位跟随：完整设计与维护手册
 ├── include/                            # 核心头文件
 │   ├── camera_driver.hpp               # OrbbecSDK v2 封装（设备管理、数据流、D2C）
 │   ├── corner_detector.hpp             # 亚像素角点检测与标记叠加模块
@@ -379,6 +465,7 @@ app/src/core/hardware/camera/orbbec_camera_service/
 │   ├── zlm_streamer.hpp                # ZLMediaKit 推流封装（RTSP/WebRTC 虚拟源）
 │   ├── async_disk_writer.hpp           # 异步文件存储引擎（无锁队列 + 文件落地）
 │   ├── http_server.hpp                 # REST API HTTP 服务器
+│   ├── follow_worker.hpp               # follow 作为库跑在本进程里的那道墙（见 6.3）
 │   ├── config.hpp                      # 统一配置结构（configs/aisprayer_config.yaml 解析）
 │   └── types.hpp                       # 通用数据结构定义（FrameData, Pose, Intrinsics）
 ├── src/                                # 源码实现
@@ -390,6 +477,7 @@ app/src/core/hardware/camera/orbbec_camera_service/
 │   ├── zlm_streamer.cpp
 │   ├── async_disk_writer.cpp
 │   ├── http_server.cpp
+│   ├── follow_worker.cpp
 │   └── query_hw_d2c.cpp
 └── run.sh                              # 启动脚本
 ```

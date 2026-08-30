@@ -67,6 +67,8 @@ tmp/
 ros2_ws/
 data/runs/*/output/
 data/runs/0/output/
+# gen_synth 生成的合成序列（follow_replay 验收门数据），随时可重跑出来，不入库
+/out/
 # 模型文件 (可选：如果模型很大不建议进 Git，可以保持忽略)
 # models/*.pt
 # models/*.onnx

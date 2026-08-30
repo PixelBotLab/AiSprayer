@@ -70,6 +70,17 @@ struct FollowConfig {
   int max_cycles = 0;            // 0 = 一直跑；>0 给自测用
   std::string log_level = "info";
 
+  // --- 臂侧映射（follow.arm.*）---
+  // 消费方是 app 的 Python 跟随服务（驱动仿真臂），**不是**这里的 C++ worker。那为什么要
+  // 在 C++ 里读一遍？因为 `follow:` 块是两边共用的一份文件：写错一个键（`mod`、`poll_hz: 二十`）
+  // 如果没人解析，就要等到有人点了"启动"才炸，而那时的报错已经隔了两层。启动时一次报全，
+  // 是这份配置唯一的廉价检查点。
+  std::string arm_mode = "sim";                    // sim | real（real 本轮由后端拒绝）
+  std::vector<double> arm_home_joints_deg{0.0, 0.0, -90.0, -90.0, -90.0, 0.0};
+  std::vector<double> arm_fallback_euler_deg{0.0, 0.0, 0.0};
+  int arm_poll_hz = 20;
+  bool arm_teach_save_map = true;
+
   std::string source;            // 实际读到的文件；空 = 全用内置默认
   std::vector<std::string> notes;  // "键 X 不存在，用默认 Y" 之外的补充说明
 };

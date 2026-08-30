@@ -24,6 +24,7 @@ import { computeNormalClientSide } from './interactive/normalComputation';
 import { InteractiveCanvas } from './interactive/InteractiveCanvas';
 import { TemplateTopBar } from './interactive/TemplateFileManager';
 import { TemplateFileList } from './interactive/TemplateFileList';
+import { FollowPanel } from './interactive/FollowPanel';
 import { InteractiveActionColumn } from './interactive/InteractiveActionColumn';
 
 interface InteractiveOpProps {
@@ -254,6 +255,17 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     };
   }, []);
 
+
+  // ─── 10. Follow（相机跟随驱动仿真臂）────────────────────────────────────
+  // 只记一件事："跟随此刻有没有在驱动臂"。仿真臂只有一个写入者 —— 轨迹回放和跟随都往
+  // onSimulationJointsChange 上推关节角，两边同时写等于每帧换一次目标，臂会抖成抽奖。
+  // 所以互斥放在**入口**（谁在跑就挡住另一个），不在下游做优先级仲裁。
+  const [followJoints, setFollowJoints] = useState<number[] | null>(null);
+
+  const handleFollowJoints = (joints: number[] | null) => {
+    setFollowJoints(joints);
+    if (onSimulationJointsChange) onSimulationJointsChange(joints);
+  };
 
   // Load template list on mount
   useEffect(() => {
@@ -754,6 +766,17 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     targetPathId?: number | null,
     overrideReport?: VerificationReport | null
   ) => {
+    if (followJoints) {
+      // 跟随正在驱动仿真臂：回放再写一遍就是两个写入者抢同一台臂。让用户显式停跟随，
+      // 而不是我们替他停 —— 那样相机那边的示教状态就成了页面上的一个意外。
+      setModalConfig({
+        isOpen: true,
+        title: 'Follow 正在驱动仿真臂',
+        message: '轨迹回放与相机跟随写的是同一台仿真臂。请先点 Follow 行的停止按钮，再回放轨迹。',
+        type: 'alert',
+      });
+      return;
+    }
     stopSimulation();
     const rep = overrideReport
       || (stateType === 'poi' ? poiReport
@@ -1478,6 +1501,13 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
               }}
             />
           </div>
+
+          {/* Follow 行：贴在文件列表底下。放在 flex-1 容器**外面** —— 文件多了要能滚，
+              而这排按钮是常驻控制，不该被列表挤下去。 */}
+          <FollowPanel
+            isReplaying={!!simulationState}
+            onFollowJoints={handleFollowJoints}
+          />
         </div>
       </div>
 
