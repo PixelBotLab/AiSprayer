@@ -287,6 +287,7 @@ class FollowService:
             self._baseline_q = None
             self._target_q = None
             self._ik_failed = False
+            self._last_error = ""
             self._last_frames = -1
             self._last_emit_key = None
             self._emit_q_deg = None

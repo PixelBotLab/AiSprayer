@@ -10,6 +10,7 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <string>
 
 #include "follow/config_loader.hpp"
@@ -229,9 +230,33 @@ TEST(Config, TunablesWarnInsteadOfFailing) {
 TEST(Config, DescribeShowsEveryGate) {
   const FollowConfig c = with_defaults();
   const std::string d = describe(c);
-  for (const char* needle : {"848x480", "18081", "dry_run", "sigma_t", "inlier_ratio", "voxel"}) {
+  for (const char* needle : {"848x480", "18081", "dry_run", "sigma_t", "inlier_ratio", "voxel",
+                             "enable_imu"}) {
     EXPECT_NE(d.find(needle), std::string::npos) << needle;
   }
+}
+
+// enable_imu 必须两边一起认：独立工具看 CaptureParams，相机服务从同一份 yaml 抄到
+// AppConfig.enable_imu。只解析不打印 = 运维关了以后日志还是默认"开着"。
+TEST(Config, EnableImuFromYamlIsHonouredAndDescribed) {
+  write_yaml("imu_off.yaml",
+             "follow:\n"
+             "  camera:\n"
+             "    enable_imu: false\n");
+  FollowConfig off;
+  std::string err;
+  ASSERT_TRUE(load_config(tmp("imu_off.yaml"), &off, &err)) << err;
+  EXPECT_FALSE(off.capture.enable_imu);
+  EXPECT_NE(describe(off).find("enable_imu=否"), std::string::npos) << describe(off);
+
+  write_yaml("imu_on.yaml",
+             "follow:\n"
+             "  camera:\n"
+             "    enable_imu: true\n");
+  FollowConfig on;
+  ASSERT_TRUE(load_config(tmp("imu_on.yaml"), &on, &err)) << err;
+  EXPECT_TRUE(on.capture.enable_imu);
+  EXPECT_NE(describe(on).find("enable_imu=是"), std::string::npos) << describe(on);
 }
 
 // arm 段是 Python 后端消费的，C++ 一个指令也不发。仍然要钉住：一份两边共用的配置，
@@ -331,17 +356,28 @@ TEST(Config, RepoConfigIsValid) {
   EXPECT_EQ(p.warnings(), 0u) << p.joined();
   EXPECT_EQ(c.capture.width * c.capture.height, 640 * 480);  // 硬件 D2C 只有这一档
   EXPECT_FALSE(c.capture.allow_unaligned);
+  EXPECT_TRUE(c.capture.enable_imu);  // 关掉必须两边一起关；仓库默认开
   EXPECT_EQ(c.arm_mode, "sim");
   EXPECT_EQ(c.arm_home_joints_deg.size(), 6u);
 
   // 静止/零偏/缓冲这几项必须是 yaml 里的度/毫秒换算过来的，不是结构体默认值：
   // 两边数值本来就不同（默认 enter 0.008 rad/s，yaml 0.45°/s ≈ 0.00785），撞对了才会绿。
-  EXPECT_NEAR(c.track.gyro_still.enter_rad_s, 0.80 * kDeg2Rad, 1e-9);
-  EXPECT_NEAR(c.track.gyro_still.exit_rad_s, 1.5 * kDeg2Rad, 1e-9);
+  EXPECT_NEAR(c.track.gyro_still.enter_rad_s, 0.45 * kDeg2Rad, 1e-9);
+  EXPECT_NEAR(c.track.gyro_still.exit_rad_s, 0.60 * kDeg2Rad, 1e-9);
   EXPECT_GT(c.track.gyro_still.exit_rad_s, c.track.gyro_still.enter_rad_s) << "迟滞方向被配置写反了";
   EXPECT_EQ(c.track.gyro_still.bias_bootstrap_samples, 100);
-  EXPECT_EQ(c.track.gyro_max_freeze_ms, 0);
+  EXPECT_EQ(c.track.gyro_max_freeze_ms, 30000);
   EXPECT_EQ(c.track.gyro_horizon_ns, 1'000'000'000);
+}
+
+TEST(Config, NonFiniteTrackValuesAreFatal) {
+  FollowConfig c = with_defaults();
+  c.track.voxel_m = std::nan("");
+  c.track.gyro_still.enter_rad_s = std::numeric_limits<double>::infinity();
+  const ConfigProblems p = check_config(&c, "/r");
+  EXPECT_FALSE(p.ok()) << p.joined();
+  EXPECT_TRUE(has_fatal(p, "track.voxel_m")) << p.joined();
+  EXPECT_TRUE(has_fatal(p, "track.gyro_still_enter_dps")) << p.joined();
 }
 
 // 健康快照是 Python 门面唯一的观测口：NaN 不能变成非法 JSON 字面量，控制字符不能提前

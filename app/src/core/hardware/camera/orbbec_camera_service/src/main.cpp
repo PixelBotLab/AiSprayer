@@ -151,6 +151,8 @@ int main(int argc, char** argv) {
     // 锁路径为空 ⇒ CameraDriver 不做进程间仲裁（并会为此单独喊一次）。配置坏了就不能拿一个可能
     // 不对的锁路径去挡别人，所以这里连同锁一起放弃。
     config.device_lock_path = follow_block_reason.empty() ? fcfg.capture.lock_path : std::string();
+    // 即便 follow 配置被 block，这个键仍按解析结果交给 CameraDriver：默认 true，关了必须两边一起关。
+    config.enable_imu = fcfg.capture.enable_imu;
 
     LOG_INFO("Main", "Initializing Core Subsystems on RK3588 (Stats report interval: ", stats_interval_sec, "s)...");
 

@@ -169,6 +169,7 @@ json HttpServer::followSnapshotJson(const FollowSnapshot& fs) {
     // 陀螺链路自检，单独一组：这几个字段是给"功能没生效"和"生效了但场景不对"分诊用的，
     // 页面正常路径不读它们（gyro_still=false 到底是"相机在动"还是"根本没样本"，就看这里）。
     j["gyro"] = {{"time_ready", fs.gyro_time_ready},   // 设备→主机时间基是否已定标
+                 {"extrinsics_loaded", fs.gyro_extrinsics_loaded},  // T_cam_gyro 是否读到合法非 Identity 旋转
                  {"buf", fs.gyro_buf},                 // 跟踪器缓冲长度
                  {"samples", fs.gyro_frame_samples},   // 本帧积分窗口真正用到的样本数
                  {"dead_frames", fs.gyro_dead_frames}, // 连续"有缓冲却积不到样本"的帧数
@@ -217,6 +218,7 @@ void HttpServer::setupRoutes() {
             {"capture_fps", st.capture_fps},
             {"follow_profile", st.follow_profile},
             {"intrinsics_loaded", st.intrinsics_loaded},
+            {"gyro_extrinsics_loaded", st.gyro_extrinsics_loaded},
             {"total_frames", st.total_frames},
             {"dropped_frames", st.dropped_frames}
         };

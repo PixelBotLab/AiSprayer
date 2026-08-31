@@ -4,14 +4,14 @@
 // ob::Pipeline —— 而本进程已经 take 了 .orbbec.lock，正是为了不让第二路取流存在。设备只有
 // 一条取流路径，所以 follow 消费 CameraDriver **已经在交付**的那一份对齐帧。代价写清楚，
 // 别留给下一个读代码的人猜：
-//   * 帧时间戳是本进程打的主机毫秒时钟（不是厂商设备时钟），粒度比 15 fps 的帧周期粗，于是
-//     "同一毫秒内的两帧"无法区分 —— 处理成丢帧（见 loop()），不造假 +1ns 时间。
-//   * 板载 IMU 陀螺仪由 CameraDriver 以 ~200Hz 独立流启动并读取硬件外参 T_cam_gyro；它的设备
-//     时间戳被 GyroTimeBase 平移到上面那个主机时钟域（不平移的话 follow 的积分窗口一个样本也
-//     框不到，而这没有任何外部症状 —— 见 gyro_time_base.hpp）。每帧配准前由 drainGyroSamples
-//     注入跟踪器，三个用途分别是：①帧间旋转初值 ②离群帧互验门（P3）—— 这两个在 libfollow 里；
-//     ③静止检测（P1）—— 检测器在 libfollow，**冻/解冻与冻结时限的策略在这个类里**。
-//     示教期另做静止门（P2）。
+//   * 跟踪用的时间戳必须与陀螺同一域：FrameData::track_ts_ns = GyroTimeBase::toHostNs(设备 µs)。
+//     timestamp_ms 仍是主机到达时刻（日志/存盘），但**不能**拿它当积分窗口 —— USB 延迟一旦比
+//     定标时的最小延迟大出几十/几百 ms，66 ms 窗口刚好框空，现象就是"缓冲有样本、积分恒为 0"。
+//     未定标时 track_ts_ns=0，退回 timestamp_ms；那时陀螺样本也会被丢掉，两条路径一起空转。
+//   * 板载 IMU 陀螺仪由 CameraDriver 以 ~200Hz 独立流启动并读取硬件外参 T_cam_gyro。每帧配准前
+//     由 drainGyroSamples 注入跟踪器，三个用途分别是：①帧间旋转初值 ②离群帧互验门（P3）——
+//     这两个在 libfollow 里；③静止检测（P1）—— 检测器在 libfollow，**冻/解冻与冻结时限的策略
+//     在这个类里**。示教期另做静止门（P2）。
 //
 // 线程模型：一条自己的工作线程 + 一份 latest 快照（HTTP 侧只读快照，绝不在请求线程里算 GICP）。
 // 帧从 CameraDriver::getLatestFrame 取，**不能用 waitForNextFrame**：那个接口会推进驱动里的
@@ -95,6 +95,7 @@ struct FollowSnapshot {
     // ---- 陀螺通道自检：区分"这条链路坏了"和"链路好的、相机确实在动" ----
     // P0 那类失效的特征就是：外部只看输出完全正常。所以每帧把决策依据摆出来。
     bool gyro_time_ready = false;     // 设备→主机时间基定标已完成（未就绪时样本全被丢弃）
+    bool gyro_extrinsics_loaded = false;  // T_cam_gyro 是否从设备读到合法非 Identity 旋转
     int gyro_buf = 0;                 // 跟踪器陀螺缓冲当前长度
     int gyro_frame_samples = 0;       // 本帧积分窗口内真正用到的样本数
     uint64_t gyro_dead_frames = 0;    // 连续"缓冲非空却积不到样本"的帧数 = 时间域不同的指纹
@@ -219,6 +220,7 @@ private:
     uint64_t last_frame_index_ = 0;
     bool have_frame_index_ = false;
     int64_t last_ts_ns_ = 0;
+    bool last_using_device_ts_ = false;  // 刚从主机到达时刻切到设备钟时必须重置，否则时间戳倒退
 
     // 只由工作线程读写，最后原样抄进快照 ⇒ 不需要锁。
     uint64_t frames_ = 0;        // 真正解算过的帧

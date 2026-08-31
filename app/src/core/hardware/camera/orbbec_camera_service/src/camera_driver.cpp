@@ -3,6 +3,7 @@
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <chrono>
+#include <cmath>
 #include <unistd.h>
 
 namespace orbbec_service {
@@ -112,6 +113,7 @@ void CameraDriver::resetHardwareConnection() {
         status_.capture_height = 0;
         status_.capture_fps = 0;
         status_.intrinsics_loaded = false;
+        status_.gyro_extrinsics_loaded = false;
         status_.depth_align_mode = "disabled";
         status_.depth_align_enabled = false;
     }
@@ -367,8 +369,11 @@ bool CameraDriver::configureAndStartPipeline() {
         LOG_WARN("Camera", "Pipeline 已起来但内参未刷新：视频流继续，follow 将拒绝运行。");
     }
 
-    // 4. 读取出厂标定外参 T_cam_gyro 并开启 200Hz 板载 IMU 陀螺仪流（仅在 Follow 模式下开启）
-    if (follow_mode_) {
+    // 4. 读取出厂标定外参 T_cam_gyro 并开启 200Hz 板载 IMU 陀螺仪流。
+    //    两个门都要过：follow 档（非 follow 没有积分窗口）+ follow.camera.enable_imu。
+    //    以前这里不看 enable_imu，yaml 关掉以后独立工具认、相机服务不认 —— 运维会以为关了。
+    if (follow_mode_ && config_.enable_imu) {
+        bool gyro_extrinsics_loaded = false;
         try {
             auto calib = pipe_->getCalibrationParam(pipe_config);
             auto e_gyro_color = calib.extrinsics[OB_SENSOR_GYRO][OB_SENSOR_COLOR];
@@ -376,9 +381,40 @@ bool CameraDriver::configureAndStartPipeline() {
                            e_gyro_color.rot[3], e_gyro_color.rot[4], e_gyro_color.rot[5],
                            e_gyro_color.rot[6], e_gyro_color.rot[7], e_gyro_color.rot[8];
             t_cam_gyro_ << e_gyro_color.trans[0], e_gyro_color.trans[1], e_gyro_color.trans[2];
-        } catch (const ob::Error&) {
+
+            // 某些设备不抛异常、直接给全零旋转。那不是 Identity，isApprox(I) 过不去，
+            // 若不拦会被当成"已标定"—— 后续 ω 全变成 0，静止检测永远判静。
+            const bool valid_rotation = follow::is_valid_rotation(R_cam_gyro_);
+            const bool looks_unspecified =
+                R_cam_gyro_.isApprox(Eigen::Matrix3d::Identity(), 1e-6) && t_cam_gyro_.norm() < 1e-6;
+            if (!valid_rotation) {
+                LOG_WARN("Camera", "陀螺外参 T_cam_gyro 不是合法旋转（det=",
+                         R_cam_gyro_.determinant(), "）：回退 Identity。零偏补偿残差会随相机姿态变化，",
+                         "静止门可能进不去 —— 看 /follow/status 的 gyro.resid_dps");
+                R_cam_gyro_ = Eigen::Matrix3d::Identity();
+                t_cam_gyro_ = Eigen::Vector3d::Zero();
+            } else if (looks_unspecified) {
+                LOG_WARN("Camera", "陀螺外参 T_cam_gyro 读取成功但为 Identity（可能设备未标定）：",
+                         "陀螺数据将在设备坐标系，零偏补偿会因相机姿态产生残差");
+            } else {
+                gyro_extrinsics_loaded = true;
+                LOG_INFO("Camera", "陀螺外参 T_cam_gyro 已加载：R=[",
+                         R_cam_gyro_(0,0), ",", R_cam_gyro_(0,1), ",", R_cam_gyro_(0,2), "; ",
+                         R_cam_gyro_(1,0), ",", R_cam_gyro_(1,1), ",", R_cam_gyro_(1,2), "; ",
+                         R_cam_gyro_(2,0), ",", R_cam_gyro_(2,1), ",", R_cam_gyro_(2,2), "] t=[",
+                         t_cam_gyro_(0), ",", t_cam_gyro_(1), ",", t_cam_gyro_(2), "] mm");
+            }
+        } catch (const ob::Error& e) {
             R_cam_gyro_ = Eigen::Matrix3d::Identity();
             t_cam_gyro_ = Eigen::Vector3d::Zero();
+            LOG_WARN("Camera", "陀螺外参 T_cam_gyro 读取失败（", e.getMessage(), "）：",
+                     "回退到 Identity，零偏补偿残差会随相机姿态变化（可达 0.5~0.7°/s），",
+                     "静止门可能进不去 —— 看 /follow/status 的 gyro.resid_dps");
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(status_mutex_);
+            status_.gyro_extrinsics_loaded = gyro_extrinsics_loaded;
         }
 
         try {
@@ -394,9 +430,9 @@ bool CameraDriver::configureAndStartPipeline() {
                             auto gf = frame->as<ob::GyroFrame>();
                             if (!gf) return;
                             auto val = gf->getValue();
-                            // getTimeStampUs() 是**设备自开机 µs**，而帧时间戳是本进程
-                            // system_clock 的 epoch ms —— 不换算就入队，follow 的积分窗口
-                            // 一帧样本也框不到，而现象只是"陀螺像是一直在动"（静默失效）。
+                            // getTimeStampUs() 是**设备自开机 µs**。入队前必须经 GyroTimeBase
+                            // 换到与 FrameData::track_ts_ns 同一域；不换算时 follow 的积分窗口
+                            // 一帧样本也框不到，现象只是"陀螺像是一直在动"（静默失效）。
                             const int64_t ts_ns = gyro_time_base_.toHostNs(gf->getTimeStampUs());
                             if (ts_ns == 0) {
                                 return;  // 时间基还没定标（约 0.5 s）：丢掉，别把两个域混进队列
@@ -423,6 +459,14 @@ bool CameraDriver::configureAndStartPipeline() {
         }
     } else {
         has_imu_ = false;
+        R_cam_gyro_ = Eigen::Matrix3d::Identity();
+        t_cam_gyro_ = Eigen::Vector3d::Zero();
+        if (follow_mode_ && !config_.enable_imu) {
+            LOG_INFO("Camera", "follow.camera.enable_imu=false：不启动陀螺流"
+                               "（帧间初值 / 离群门 / 静止冻结 / 示教静止门全部跳过）");
+        }
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        status_.gyro_extrinsics_loaded = false;
     }
 
     return true;
@@ -659,25 +703,27 @@ void CameraDriver::captureLoop() {
             cur_frame.frame_index = frame_count_++;
             cur_frame.timestamp_ms = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count();
+            cur_frame.device_ts_us =
+                (depth_frame && depth_frame->getTimeStampUs() > 0)
+                    ? depth_frame->getTimeStampUs()
+                    : ((color_frame && color_frame->getTimeStampUs() > 0)
+                           ? color_frame->getTimeStampUs()
+                           : 0);
 
-            // 陀螺时间基定标：配对的必须是"**这一帧**的设备戳 ↔ 刚给它打的主机戳"，而且主机侧
-            // 要用已经截到毫秒的 timestamp_ms 而不是重新取一次 now() —— follow 看到的帧时间戳
-            // 就是那个值，两边同一量化才谈得上对齐，否则陀螺会比帧多出至多 1 ms 的独立抖动。
-            {
-                const uint64_t dev_us =
-                    (depth_frame && depth_frame->getTimeStampUs() > 0)
-                        ? depth_frame->getTimeStampUs()
-                        : ((color_frame && color_frame->getTimeStampUs() > 0)
-                               ? color_frame->getTimeStampUs()
-                               : 0);
-                if (gyro_time_base_.offerPair(dev_us,
-                                              static_cast<int64_t>(cur_frame.timestamp_ms) * 1000000)) {
-                    LOG_INFO("Camera", "陀螺时间基已定标: offset=",
-                             gyro_time_base_.offset_ns() / 1000000, "ms, 配对=",
-                             GyroTimeBase::kProbePairs, "帧, 延迟抖动=",
-                             gyro_time_base_.spread_ns() / 1000000, "ms, 定标前丢弃样本=",
-                             gyro_time_base_.dropped_before_ready());
-                }
+            // 陀螺时间基定标：配对的必须是"**这一帧**的设备戳 ↔ 刚给它打的主机戳"。
+            // 冻结的是最小 USB 延迟那一对。follow 不能再用本帧的到达时刻当积分窗口 —— 本帧
+            // 延迟一旦比最小值大出几十/几百 ms（336L 实测 350~450 ms），66 ms 窗口刚好框不到
+            // 已经按最小延迟换算过的陀螺样本，现象就是"缓冲有样本、积分恒为 0"。
+            if (gyro_time_base_.offerPair(cur_frame.device_ts_us,
+                                          static_cast<int64_t>(cur_frame.timestamp_ms) * 1000000)) {
+                LOG_INFO("Camera", "陀螺时间基已定标: offset=",
+                         gyro_time_base_.offset_ns() / 1000000, "ms, 配对=",
+                         GyroTimeBase::kProbePairs, "帧, 延迟抖动=",
+                         gyro_time_base_.spread_ns() / 1000000, "ms, 定标前丢弃样本=",
+                         gyro_time_base_.dropped_before_ready());
+            }
+            if (gyro_time_base_.ready() && cur_frame.device_ts_us > 0) {
+                cur_frame.track_ts_ns = gyro_time_base_.toHostNs(cur_frame.device_ts_us);
             }
 
             // Process Color Frame

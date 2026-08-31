@@ -10,7 +10,11 @@ namespace orbbec_service {
 
 struct FrameData {
     uint64_t frame_index = 0;
-    uint64_t timestamp_ms = 0;
+    uint64_t timestamp_ms = 0;   // 主机到达时刻（日志 / 存盘 / 帧率）
+    uint64_t device_ts_us = 0;   // 设备开机 µs：深度优先，否则彩色；0 = 本帧没带设备戳
+    // 与陀螺同一时间域：GyroTimeBase::toHostNs(device_ts_us)。未定标为 0，follow 必须回退
+    // 到 timestamp_ms——那时陀螺样本也会被丢掉，两条路径一起空转，不会各走各的钟。
+    int64_t track_ts_ns = 0;
     cv::Mat color;        // BGR888 or RGB888, CV_8UC3
     cv::Mat depth;        // Z16, 16-bit depth in mm, CV_16UC1
     bool has_color = false;
@@ -79,6 +83,8 @@ struct CameraStatus {
     std::string depth_align_mode = "disabled";
     // 内参是设备给的还是编译期默认值。默认值只在 follow 的判据里等于"没有内参"。
     bool intrinsics_loaded = false;
+    // 陀螺外参是否从设备读到非 Identity 值。false = 回退到 Identity，零偏补偿残差会因相机姿态变化。
+    bool gyro_extrinsics_loaded = false;
     uint64_t total_frames = 0;
     uint64_t dropped_frames = 0;
 };
@@ -127,6 +133,10 @@ struct AppConfig {
     int camera_height = 800;
     int camera_fps = 30;
     bool enable_depth_align = true;
+    // follow.camera.enable_imu：Follow 档位下要不要起板载陀螺流。默认开，与 CaptureParams
+    // 一致。关了就整条 IMU 链路（初值 / 离群门 / 静止冻结 / 示教静止门）一起空转，必须由
+    // CameraDriver 认这个键，不能只让独立工具 follow_pose 认。
+    bool enable_imu = true;
     
     // Video streaming params
     int stream_width = 1280;

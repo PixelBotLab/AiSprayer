@@ -359,6 +359,17 @@ TEST(Uncertainty, AnisotropyGateCatchesWhatAbsoluteGateMisses) {
   EXPECT_FALSE(ur.within(2.0, 0.2, 15.0));
 }
 
+TEST(Extrinsics, RejectsZeroMatrixThatIsNotIdentity) {
+  Eigen::Matrix3d zero = Eigen::Matrix3d::Zero();
+  EXPECT_FALSE(is_valid_rotation(zero)) << "全零旋转会被当成已标定，ω 全变成 0";
+  EXPECT_TRUE(is_valid_rotation(Eigen::Matrix3d::Identity()));
+  Eigen::Matrix3d R =
+      Eigen::AngleAxisd(0.3, Eigen::Vector3d::UnitY()).toRotationMatrix();
+  EXPECT_TRUE(is_valid_rotation(R));
+  R.row(0) = R.row(1);
+  EXPECT_FALSE(is_valid_rotation(R));
+}
+
 // ---------------------------------------------------------------- 陀螺
 
 TEST(Gyro, MatchesAnalyticConstantRateIntegration) {

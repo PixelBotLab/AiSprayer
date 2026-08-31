@@ -102,8 +102,8 @@ struct TrackParams {
   //  ② P3 离群门：帧间旋转与陀螺积分互验，不一致的疑似坏帧不采纳（gyro_rot_gate_deg）；
   //  ③ P1 静止检测（still_det_）：相机没在转时旋转噪声被上层冻住，见 gyro_filter.hpp。
   // **①②依赖陀螺样本与帧时间戳同一时间域**：336L 的 getTimeStampUs 是"自开机 µs"（实测末值
-  // 1.57e9 µs），而服务路径的帧时间戳是主机 epoch 毫秒 —— 不同域时 ①② 静默全灭（积分窗口
-  // 一个样本都框不进来）。对齐在取流层做（camera_driver 的 gyro_ts_offset_ns_），这里只留
+  // 1.57e9 µs）。服务路径必须把帧和陀螺都经 GyroTimeBase::toHostNs 换到同一主机域；若帧仍用
+  // 到达时刻、陀螺按最小 USB 延迟换算，①② 会静默全灭（积分窗口一个样本都框不进来）。这里只留
   // tripwire：TrackResult::gyro_samples 恒为 0 而 gyro_buf 非空，就是那种失效的唯一外部痕迹。
   size_t gyro_buf_max = 4096;         // 只作为乱序/异常时的兜底上限
   int64_t gyro_max_gap_ns = 100'000'000;
@@ -170,8 +170,8 @@ class Tracker {
   // seed 固定 ⇒ RANSAC 可复现；测试里显式换种子做蒙特卡洛。
   explicit Tracker(TrackParams p, const ReferenceMap& map, uint32_t seed = 0x5EEDu);
 
-  // 336L 陀螺：rad/s，相机系。**要求与 track() 的 ts_ns 同一时间域**（服务路径由取流层把设备
-  // 钟标到主机钟）；不同域时这里不会崩，但积分窗口框不到任何样本，①② 两档静默失效。
+  // 336L 陀螺：rad/s，相机系。**要求与 track() 的 ts_ns 同一时间域**（服务路径：帧与陀螺都走
+  // GyroTimeBase::toHostNs）；不同域时这里不会崩，但积分窗口框不到任何样本，①② 两档静默失效。
   // 同一份样本也喂给静止检测器（它只用向量、不碰时间轴），所以两个消费方永远吃同一批数据。
   void push_gyro(int64_t ts_ns, const Eigen::Vector3d& omega_cam_rad_s);
 

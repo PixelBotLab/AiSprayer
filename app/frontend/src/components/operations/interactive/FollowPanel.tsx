@@ -64,7 +64,11 @@ interface FollowSnapshot {
   gyro?: {
     /** 设备时钟 → 主机时钟的偏移是否已定标。false = 旋转通道的陀螺证据全部无效。 */
     time_ready?: boolean;
+    /** T_cam_gyro 是否从设备读到合法非 Identity 旋转。false = ω 还在设备系。 */
+    extrinsics_loaded?: boolean;
+    buf?: number;
     samples?: number;
+    dead_frames?: number;
     bias_dps?: number;
     resid_dps?: number;
     bias_ready?: boolean;
@@ -335,11 +339,23 @@ export const FollowPanel: React.FC<FollowPanelProps> = ({ isReplaying, onFollowJ
           </span>
           {snap?.rot_gated ? <span title={`离群门拦下 ${snap.rot_gated} 帧：视觉解算与陀螺角速度不一致`}>拒 {snap.rot_gated}</span> : null}
         </div>
-        {/* 陀螺时钟没定标 = 旋转通道的初始化和离群门全部失效，且不报错，所以单独占一行红字。 */}
+        {/* 陀螺失效全是静默的：输出看起来正常，必须单独占一行红字。 */}
         {running && snap?.gyro && snap.gyro.time_ready === false && (
           <div className="text-[9px] truncate text-rose-400/90"
                title="设备时间戳与主机时钟的偏移还没测出来：陀螺样本被全部丢弃，旋转通道只剩纯视觉解算。">
             陀螺时钟未定标 · 旋转通道降级
+          </div>
+        )}
+        {running && snap?.gyro && (snap.gyro.dead_frames ?? 0) > 0 && (
+          <div className="text-[9px] truncate text-rose-400/90"
+               title={`缓冲 ${snap.gyro.buf ?? 0} 条样本，本帧窗口却积到 ${snap.gyro.samples ?? 0} 条：帧与陀螺不在同一时间域。`}>
+            陀螺窗口空转 {snap.gyro.dead_frames} 帧 · 缓冲 {snap.gyro.buf ?? 0} / 窗口 {snap.gyro.samples ?? 0}
+          </div>
+        )}
+        {running && snap?.gyro && snap.gyro.time_ready && snap.gyro.extrinsics_loaded === false && (
+          <div className="text-[9px] truncate text-amber-400/80"
+               title="T_cam_gyro 未从设备读到合法旋转，ω 还在设备系：零偏残差会随相机姿态变，静止门可能进不去。">
+            陀螺外参 Identity · 静止门可能失效
           </div>
         )}
         {(error || state?.last_error || snap?.reason) && (

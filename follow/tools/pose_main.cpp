@@ -553,6 +553,12 @@ void print_pose_line(const Palette& pal, const PrintGate& gate, int64_t n, const
       static_cast<long long>(n), p.t[0], p.t[1], p.t[2], p.r[0], p.r[1], p.r[2], p.norm_t, p.norm_r,
       pal.wrap(pal.status(to_string(r.status)), state).c_str(), est, r.gicp_inliers, r.inlier_ratio,
       st_max, sr_max, ms);
+  if (r.gyro_pushed > 0 || r.gyro_samples > 0 || r.gyro_bias_ready) {
+    std::printf("  gyro=%d/%d pushed/samples bias=%.3f resid=%.3f deg/s still=%s used=%s",
+                r.gyro_pushed, r.gyro_samples, r.gyro_bias_rad_s * kRad2Deg,
+                r.gyro_resid_rad_s * kRad2Deg, r.gyro_still ? "YES" : "NO",
+                r.gyro_used ? "YES" : "NO");
+  }
   if (gate.snap_quiet() > 0) {
     std::printf("  %s〔静默 %lld 帧 · 其间最大偏离 %.2fmm/%.3fdeg〕%s", pal.dim,
                 static_cast<long long>(gate.snap_quiet()), gate.snap_t(), gate.snap_r(), pal.off);
@@ -590,8 +596,10 @@ void print_banner(const Palette& pal, const FollowConfig& cfg, const OrbbecCaptu
                 ch.d2c_offset_ms, static_cast<long long>(ch.unpaired_framesets));
   }
   if (cal.has_imu) {
-    std::printf("  %s惯导%s  板载 IMU 陀螺仪已开流  采样率 ~%d Hz  外参 T_cam_gyro t=(%.2f, %.2f, %.2f) mm\n",
-                pal.bold, pal.off, cal.gyro_sample_rate_hz, cal.t_cam_gyro[0], cal.t_cam_gyro[1], cal.t_cam_gyro[2]);
+    std::printf("  %s惯导%s  板载 IMU 陀螺仪已开流  采样率 ~%d Hz  外参 %s  t=(%.2f, %.2f, %.2f) mm\n",
+                pal.bold, pal.off, cal.gyro_sample_rate_hz,
+                cal.gyro_extrinsics_loaded ? "T_cam_gyro" : "Identity（设备未标定，零偏残差会随姿态变）",
+                cal.t_cam_gyro[0], cal.t_cam_gyro[1], cal.t_cam_gyro[2]);
   } else {
     std::printf("  %s惯导%s  未开启或设备无 IMU 陀螺仪\n", pal.bold, pal.off);
   }
@@ -660,7 +668,7 @@ int run(const Args& args) {
   }
 
   auto map = std::make_unique<ReferenceMap>();
-  if (!teach_reference(cap, tp, "", map.get(), &err, 10)) {  // 均值 10 帧做参考基准
+  if (!teach_reference(cap, tp, "", map.get(), &err, cfg.teach_frames)) {  // 使用与服务相同的示教帧数
     LOG_AT(LogLevel::kError, "teach") << "示教失败: " << err;
     cap.close();
     return kExitNoMap;
@@ -750,7 +758,7 @@ int run(const Args& args) {
       seg.report("重新调零");
       std::string te;
       auto fresh = std::make_unique<ReferenceMap>();
-      if (!teach_reference(cap, tp, "", fresh.get(), &te, 10)) {
+      if (!teach_reference(cap, tp, "", fresh.get(), &te, cfg.teach_frames)) {  // 与首次示教使用同一帧数
         LOG_AT(LogLevel::kError, "teach") << "重新调零失败: " << te << "（沿用旧基准）";
       } else {
         map = std::move(fresh);

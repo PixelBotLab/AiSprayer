@@ -116,7 +116,7 @@ private:
     Eigen::Matrix3d R_cam_gyro_ = Eigen::Matrix3d::Identity();
     Eigen::Vector3d t_cam_gyro_ = Eigen::Vector3d::Zero();
     bool has_imu_ = false;
-    // 陀螺样本进队列前一律换算到"和 FrameData::timestamp_ms 同一个域"（主机 ns）。
+    // 陀螺样本进队列前一律经 GyroTimeBase 换到与 FrameData::track_ts_ns 同一域。
     // 忘了这一步的后果不是崩溃而是静默：follow 的积分窗口框不到任何样本。
     GyroTimeBase gyro_time_base_;
 

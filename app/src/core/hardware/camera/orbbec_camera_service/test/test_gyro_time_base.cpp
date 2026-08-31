@@ -159,10 +159,13 @@ TEST(GyroTimeBaseSeam, CalibratedOutputIsUsableByFollowIntegrator) {
     }
     ASSERT_TRUE(tb.ready());
 
-    // 帧窗口用**主机域**时间戳（服务里就是 system_clock 的 epoch ms）。
+    // 帧窗口必须用 toHostNs(本帧设备戳)，不能用本帧到达时刻：后者带着本帧 USB 延迟，
+    // 与冻结的最小延迟差几百 ms 时 66 ms 窗口正好框空。
     const uint64_t dev_win_us = kDevBaseUs + (GyroTimeBase::kProbePairs - 1) * kFrameUs;
-    const int64_t t0 = static_cast<int64_t>(dev_win_us) * kUs + kTrueOffsetNs + latencies_ns[7];
-    const int64_t t1 = t0 + kFrameUs * kUs;
+    const int64_t t0 = tb.toHostNs(dev_win_us);
+    const int64_t t1 = tb.toHostNs(dev_win_us + kFrameUs);
+    ASSERT_GT(t0, 0);
+    ASSERT_GT(t1, t0);
 
     // 同一段陀螺，两种写法：裸设备戳 vs 经时间基换算。
     std::vector<follow::GyroSample> raw, fixed;
@@ -193,6 +196,48 @@ TEST(GyroTimeBaseSeam, CalibratedOutputIsUsableByFollowIntegrator) {
         Eigen::AngleAxisd(kW * static_cast<double>(ok.span_ns) * 1e-9, Eigen::Vector3d::UnitZ())
             .toRotationMatrix();
     EXPECT_LT((ok.R - expect).norm(), 1e-9) << "换算后的角度与时长不成比例：dt 被动过了";
+}
+
+// 336L 现场：定标冻结的是最小 USB 延迟，后续帧到达时刻可以再晚 350~450 ms。
+// follow 若拿本帧到达时刻当积分窗口，陀螺（已按最小延迟换算）一个样本也进不去；
+// 必须用同一套 toHostNs(本帧设备戳)。
+TEST(GyroTimeBaseSeam, ArrivalTimeMissesWhenUsbJitterExceedsFramePeriod) {
+    constexpr uint64_t kDevBaseUs = 1'569'657'460ULL;
+    const int64_t kTrueOffsetNs = 1'788'000'000'000'000'000LL - static_cast<int64_t>(kDevBaseUs) * kUs;
+    constexpr int64_t kFrameUs = 66'667;
+    constexpr int64_t kGyroUs = 5'000;
+    constexpr int64_t kUsbJitterNs = 400 * kMs;
+
+    const int64_t latencies_ns[GyroTimeBase::kProbePairs] = {3 * kMs, 9 * kMs, 2 * kMs, 7 * kMs,
+                                                             4 * kMs, 8 * kMs, 5 * kMs, 6 * kMs};
+    GyroTimeBase tb;
+    for (int i = 0; i < GyroTimeBase::kProbePairs; ++i) {
+        const uint64_t dev_us = kDevBaseUs + i * kFrameUs;
+        tb.offerPair(dev_us, hostOf(kTrueOffsetNs, dev_us, latencies_ns[i]));
+    }
+    ASSERT_TRUE(tb.ready());
+
+    const uint64_t t0_dev_us = kDevBaseUs + GyroTimeBase::kProbePairs * kFrameUs;
+    const uint64_t t1_dev_us = t0_dev_us + kFrameUs;
+    const int64_t arrival_t0 = hostOf(kTrueOffsetNs, t0_dev_us, kUsbJitterNs);
+    const int64_t arrival_t1 = hostOf(kTrueOffsetNs, t1_dev_us, kUsbJitterNs);
+    const int64_t aligned_t0 = tb.toHostNs(t0_dev_us);
+    const int64_t aligned_t1 = tb.toHostNs(t1_dev_us);
+    ASSERT_GT(aligned_t0, 0);
+    ASSERT_GT(aligned_t1, aligned_t0);
+
+    std::vector<follow::GyroSample> gyros;
+    for (int64_t off = 0; off <= kFrameUs; off += kGyroUs) {
+        gyros.push_back(follow::GyroSample{tb.toHostNs(t0_dev_us + off), Eigen::Vector3d(0, 0, 0.5)});
+    }
+
+    const follow::GyroDelta dead = follow::integrate_gyro(gyros, arrival_t0, arrival_t1);
+    EXPECT_EQ(dead.samples_used, 0) << "到达时刻窗口在 400ms USB 抖动下居然还能框到样本";
+    EXPECT_FALSE(dead.valid());
+
+    const follow::GyroDelta ok = follow::integrate_gyro(gyros, aligned_t0, aligned_t1);
+    EXPECT_GT(ok.samples_used, 5) << "同一套 toHostNs 仍积不到：接缝还是错的";
+    EXPECT_TRUE(ok.valid());
 }
 
 }  // namespace

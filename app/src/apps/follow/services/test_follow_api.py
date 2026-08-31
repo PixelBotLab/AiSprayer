@@ -150,11 +150,24 @@ class TestFollowApi(unittest.TestCase):
     def test_stop_clears_service_state_even_when_camera_service_is_gone(self):
         """停止必须几乎总是成功：留在"已使能"里退出，会把档位卡在 640x480 上。"""
         self.svc._active = True
+        self.svc._last_error = "上一轮示教失败：收帧超时"
         self.svc._target_q = self.svc._baseline_q = __import__("numpy").radians([0, 0, -90, -90, -90, 0])
         r = self.client.post("/api/follow/stop")     # _cpp 打向不可达端口 ⇒ 503
         self.assertEqual(r.status_code, 503, r.text)
         self.assertFalse(self.svc._active)           # 但服务侧状态照样清干净
         self.assertIsNone(self.svc._target_q)
+        self.assertEqual(self.svc._last_error, "")   # 已解决的失败原因不许挂到停止之后
+
+    def test_stop_clears_stale_last_error_on_success(self):
+        """成功停止同样清 last_error：页面否则会显示一条已经解决了的错误。"""
+        self.svc._active = True
+        self.svc._last_error = "ik_failed"
+        self.svc._cpp = lambda kind, payload=None, timeout=1.0: (
+            True, "", {"enabled": False, "capture_width": 1280, "capture_height": 800})
+        r = self.client.post("/api/follow/stop")
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertFalse(self.svc._active)
+        self.assertEqual(self.svc._last_error, "")
 
     # ----------------------------------------------------------------- 请求体
     def test_body_is_optional(self):

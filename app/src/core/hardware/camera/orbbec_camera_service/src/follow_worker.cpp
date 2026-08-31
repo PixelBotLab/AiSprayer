@@ -257,10 +257,12 @@ bool FollowWorker::doEnable(std::string* err) {
              cfg_.capture.fps, "fps（640x480 是硬件 D2C 的上限档），示教帧数=", cfg_.teach_frames,
              "。下一步 POST /api/v1/camera/follow/teach。");
     // 陀螺能力一次性讲清楚，出问题时日志里能对上号：三个用途，各自可关。
-    LOG_INFO("Follow", "陀螺能力：①静止冻结（陀螺确认静止时旋转通道冻住、平移照常更新）②离群门 ",
+    LOG_INFO("Follow", "陀螺能力：enable_imu=", (cfg_.capture.enable_imu ? "true" : "false"),
+             " ①静止冻结（陀螺确认静止时旋转通道冻住、平移照常更新）②离群门 ",
              cfg_.track.gyro_rot_gate_deg, "°（帧间旋转 vs 陀螺积分互验，0=关）③示教静止门 ",
              cfg_.teach_max_motion_deg_s, "°/s",
-             camera_->hasImu() ? "（0=关）" : "（本机无 IMU，自动跳过）");
+             !cfg_.capture.enable_imu ? "（配置关闭）"
+                                      : (camera_->hasImu() ? "（0=关）" : "（本机无 IMU，自动跳过）"));
     return true;
 }
 
@@ -460,7 +462,8 @@ bool FollowWorker::teach(bool save_map, std::string* err) {
         // 改写，我们的 Mat 句柄靠引用计数自会保住这块内存。（follow_device 那边要 clone，是因为
         // 它自己复用取流缓冲 —— 两层的契约不同，别照抄。）
         depths.push_back(fd.depth);
-        last_ts_ns = static_cast<int64_t>(fd.timestamp_ms) * 1000000;
+        last_ts_ns = fd.track_ts_ns > 0 ? fd.track_ts_ns
+                                        : static_cast<int64_t>(fd.timestamp_ms) * 1000000;
         cap_w = fd.depth.cols;
         cap_h = fd.depth.rows;
     }
@@ -560,6 +563,7 @@ void FollowWorker::loop() {
             tracker_gen_ = gen;
             have_frame_index_ = false;
             last_ts_ns_ = 0;
+            last_using_device_ts_ = false;
             has_logged_pose_ = false;
             quiet_log_frames_ = 0;
             quiet_max_dt_ = 0.0;
@@ -688,9 +692,18 @@ void FollowWorker::loop() {
         }
         last_reject_reason_.clear();
 
-        // 主机毫秒换算。粒度比帧周期粗，同一毫秒内的两帧在这里不可区分 —— 与其造一个 +1ns 的
-        // 假时间，不如记成一次丢帧（15 fps = 66 ms/帧，实测极少发生，真发生说明取流在抖）。
-        const int64_t ts_ns = static_cast<int64_t>(fd.timestamp_ms) * 1000000;
+        // 积分窗口必须与陀螺同一时间域：优先用设备戳经 GyroTimeBase 换算后的 track_ts_ns。
+        // 未定标时回退主机到达时刻——那时陀螺样本也被丢掉，不会各走各的钟。
+        // 定标完成那一帧会从到达时刻切到更早的设备钟（USB 延迟 350~450 ms），必须重置
+        // last_ts_ns_，否则 Tracker 会把它当 stale 丢掉，而积分窗口永远框不到刚切过来的样本。
+        const bool using_device_ts = fd.track_ts_ns > 0;
+        if (using_device_ts != last_using_device_ts_) {
+            last_ts_ns_ = 0;
+            last_using_device_ts_ = using_device_ts;
+        }
+        const int64_t ts_ns = using_device_ts
+                                  ? fd.track_ts_ns
+                                  : static_cast<int64_t>(fd.timestamp_ms) * 1000000;
         if (ts_ns <= last_ts_ns_) {
             ++dropped_;
             PublishOnRelease lock(snap_mutex_, broker_);   // 出作用域即发布：见 pose_broker.hpp
@@ -781,6 +794,7 @@ void FollowWorker::loop() {
         snap_.rot_frozen = rot_frozen_;
         snap_.frozen_ms = rot_frozen_ ? (steady_now_ms() - frozen_since_ms_) : 0;
         snap_.gyro_time_ready = camera_->gyroTimeBaseReady();
+        snap_.gyro_extrinsics_loaded = cst.gyro_extrinsics_loaded;
         snap_.gyro_buf = r.gyro_buf;
         snap_.gyro_frame_samples = r.gyro_samples;
         snap_.gyro_dead_frames = gyro_dead_frames_;
@@ -873,6 +887,12 @@ void FollowWorker::loop() {
                 len += std::snprintf(log_buf + len, sizeof(log_buf) - len,
                                      "  〔静止·旋转冻结 %lld 帧〕",
                                      static_cast<long long>(still_frames_));
+            }
+            if (len < (int)sizeof(log_buf) - 80) {
+                len += std::snprintf(log_buf + len, sizeof(log_buf) - len,
+                                     "  gyro=%d/%d still=%s resid=%.2f dps",
+                                     r.gyro_pushed, r.gyro_samples,
+                                     r.gyro_still ? "YES" : "NO", r.gyro_resid_rad_s * kRad2Deg);
             }
 
             LOG_INFO("Follow", log_buf);

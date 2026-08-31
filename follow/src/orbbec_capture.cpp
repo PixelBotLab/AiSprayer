@@ -454,6 +454,7 @@ bool OrbbecCapture::open(const CaptureParams& p, std::string* err) {
     }
 
     // 读取传感器间外参矩阵（GYRO -> COLOR）
+    s.calib.gyro_extrinsics_loaded = false;
     try {
       OBCalibrationParam calib_param = s.pipe->getCalibrationParam(s.cfg);
       const auto& e_gyro_color = calib_param.extrinsics[OB_SENSOR_GYRO][OB_SENSOR_COLOR];
@@ -461,6 +462,14 @@ bool OrbbecCapture::open(const CaptureParams& p, std::string* err) {
                             e_gyro_color.rot[3], e_gyro_color.rot[4], e_gyro_color.rot[5],
                             e_gyro_color.rot[6], e_gyro_color.rot[7], e_gyro_color.rot[8];
       s.calib.t_cam_gyro << e_gyro_color.trans[0], e_gyro_color.trans[1], e_gyro_color.trans[2];
+      // 全零旋转不是 Identity：isApprox(I) 过不去会被当成已标定，ω 全变成 0。
+      if (!is_valid_rotation(s.calib.R_cam_gyro)) {
+        s.calib.R_cam_gyro = Eigen::Matrix3d::Identity();
+        s.calib.t_cam_gyro = Eigen::Vector3d::Zero();
+      } else if (!(s.calib.R_cam_gyro.isApprox(Eigen::Matrix3d::Identity(), 1e-6) &&
+                   s.calib.t_cam_gyro.norm() < 1e-6)) {
+        s.calib.gyro_extrinsics_loaded = true;
+      }
     } catch (const ob::Error&) {
       s.calib.R_cam_gyro = Eigen::Matrix3d::Identity();
       s.calib.t_cam_gyro = Eigen::Vector3d::Zero();

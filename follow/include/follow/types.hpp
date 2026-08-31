@@ -31,6 +31,16 @@ struct CameraIntrinsics {
   }
 };
 
+// 设备给的 T_cam_gyro 有时是全零、不是 Identity。isApprox(I) 过不去会被当成"已标定"，
+// 之后 ω 全变成 0，静止检测永远判静。正交性放宽到 1e-2：出厂矩阵常是 float。
+inline bool is_valid_rotation(const Eigen::Matrix3d& R) {
+  if (!R.allFinite()) {
+    return false;
+  }
+  return std::abs(R.determinant() - 1.0) < 0.05 &&
+         (R * R.transpose()).isApprox(Eigen::Matrix3d::Identity(), 1e-2);
+}
+
 enum class Status {
   kOk,              // 有位姿，可观
   kDegenerate,      // 解算器"成功"但自由度不可观 —— 绝不能当 kOk 用

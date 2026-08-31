@@ -57,6 +57,7 @@ struct DeviceCalib {
   double baseline_mm = 0.0;   // D2C 平移的 x 分量，实测 -23.735
   Eigen::Matrix3d R_cam_gyro = Eigen::Matrix3d::Identity();  // 陀螺仪系 -> 相机系旋转矩阵
   Eigen::Vector3d t_cam_gyro = Eigen::Vector3d::Zero();      // 陀螺仪系 -> 相机系平移向量(mm)
+  bool gyro_extrinsics_loaded = false;                       // 合法非 Identity；false 时 ω 在设备系
   bool has_imu = false;
   int gyro_sample_rate_hz = 0;
   bool valid() const { return color.valid(); }

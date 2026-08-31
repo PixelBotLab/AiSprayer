@@ -374,6 +374,32 @@ bool load_config(const std::string& path, FollowConfig* cfg, std::string* err) {
 
 ConfigProblems check_config(FollowConfig* cfg, const std::string& root) {
   ConfigProblems out;
+  if (cfg == nullptr) {
+    add(&out.items, true, "配置对象为空");
+    return out;
+  }
+  auto require_finite = [&out](double value, const char* key) {
+    if (!std::isfinite(value)) {
+      add(&out.items, true, std::string(key) + " 必须是有限数值（拒绝 nan/inf）");
+    }
+  };
+  require_finite(cfg->frontend.quality_level, "frontend.quality_level");
+  require_finite(cfg->track.zmin_m, "track.zmin_m");
+  require_finite(cfg->track.zmax_m, "track.zmax_m");
+  require_finite(cfg->track.voxel_m, "track.voxel_m");
+  require_finite(cfg->track.max_corr_m, "track.max_corr_m");
+  require_finite(cfg->track.max_trans_sigma_mm, "track.trans_sigma_mm");
+  require_finite(cfg->track.max_rot_sigma_deg, "track.rot_sigma_deg");
+  require_finite(cfg->track.max_group_anisotropy, "track.group_anisotropy");
+  require_finite(cfg->track.min_residual_var_scale, "track.min_residual_var_scale");
+  require_finite(cfg->track.min_inlier_ratio, "track.min_inlier_ratio");
+  require_finite(cfg->track.gyro_rot_gate_deg, "track.gyro_rot_gate_deg");
+  require_finite(cfg->track.gyro_still.enter_rad_s, "track.gyro_still_enter_dps");
+  require_finite(cfg->track.gyro_still.exit_rad_s, "track.gyro_still_exit_dps");
+  require_finite(cfg->track.gyro_still.bias_alpha, "track.gyro_bias_alpha");
+  require_finite(cfg->teach_max_motion_deg_s, "teach.max_motion_deg_s");
+  require_finite(cfg->arm_max_joint_vel_deg_s, "arm.max_joint_vel_deg_s");
+
   auto* items = &out.items;
   for (const auto& n : cfg->notes) {
     add(items, false, n);
@@ -593,7 +619,8 @@ std::string describe(const FollowConfig& c) {
   os << "  camera   : " << c.capture.width << "x" << c.capture.height << "@" << c.capture.fps
      << "  首帧对超时=" << c.capture.first_pair_timeout_ms << "ms  帧超时="
      << c.capture.frame_timeout_ms << "ms  allow_unaligned="
-     << (c.capture.allow_unaligned ? "是" : "否") << "\n";
+     << (c.capture.allow_unaligned ? "是" : "否")
+     << "  enable_imu=" << (c.capture.enable_imu ? "是" : "否") << "\n";
   os << "  lock     : " << (c.capture.lock_path.empty() ? "(不互斥)" : c.capture.lock_path) << "\n";
   os << "  frontend : " << c.frontend_kind << "  max_features=" << c.frontend.max_features
      << "  min_dist=" << c.frontend.min_distance_px << "px\n";

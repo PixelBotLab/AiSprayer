@@ -19,7 +19,7 @@
 | 配准精度、判据门、σ 门限 | §4.7 §4.8 | `follow_replay` 的 p95 门会动；页面 σz 读数含义变 |
 | 分辨率/帧率/对齐方式 | §3 §6.1 | 内参、点密度、`min_cloud_points`、硬件 D2C 可用性一起变 |
 | 示教逻辑（帧数、均值、落盘） | §4.2 §4.3 | 参考地图内容哈希变 ⇒ 旧 `.frmap` 必须重示教 |
-| 陀螺仪 | §5 | 两条消费路径时间戳域不同，**这是当前最大的坑** |
+| 陀螺仪 | §5 | `GyroTimeBase` 把设备 µs 换到主机域；`enable_imu` 两条路径都认 |
 | 臂的映射/IK | §7 | `mirror.py` 是唯一数学出处，改它必须同步改 29 条单测 |
 | 页面按钮、实时刷新 | §8 | 仿真臂只有一个写入者，互斥在入口 |
 | 配置键 | §9 | C++ 与 Python 各读一份，struct 默认 / yaml / 代码硬编码三处不一致 |
@@ -453,40 +453,49 @@ ob::GyroFrame (~200 Hz, 独立 sensor 回调)
 三条各有一条单测（`Gyro.MatchesAnalyticConstantRateIntegration` / `Gyro.ReportsStaleWhenImuStoppedUpdating`
 / `Gyro.EmptyAndOutOfWindowBuffersAreNotSilentlyUsable`）。
 
-### 5.4 `enable_imu: false` 的效力 —— **只有一条路径认它**
+### 5.4 `enable_imu: false` 的效力 —— **两条路径都认它**
 
-`follow.camera.enable_imu` 只在 `orbbec_capture.cpp:470` 被判断。
-**相机服务的 `CameraDriver` 不看这个键**：它无条件尝试起陀螺流，起不来就 `has_imu_=false` 并
-打一条 info（`camera_driver.cpp` 第 4 段（`OB_SENSOR_GYRO` 起流））。
+`follow.camera.enable_imu` 在两处同时生效：
 
-> 维护提示：想关服务里的陀螺，改这个 yaml 键**没有用**。要么在 第 4 段起流处 加判断，
-> 要么接受"总是尝试启动"。目前后者是有意的（失败代价仅是一条日志），但它和配置键的语义不一致，
-> 读到 `enable_imu` 就以为能控制全局的人会判断错。
+| 路径 | 判断点 | 关了会怎样 |
+|---|---|---|
+| 独立工具 | `orbbec_capture.cpp` 起陀螺流处 | 不起 `OB_SENSOR_GYRO`，`calib.has_imu=false` |
+| 相机服务 | `camera_driver.cpp` `configureAndStartPipeline()` 第 4 段：`follow_mode_ && config_.enable_imu` | 不起陀螺流，打一条 info；`has_imu_=false` |
 
-### 5.5 两条路径的时间域不同 —— **未验证的高风险点**
+键从同一份 yaml 进 `FollowConfig.capture.enable_imu`，再由 `main.cpp` 抄到
+`AppConfig.enable_imu` 交给 `CameraDriver`。默认 `true`。关了 = 整条 IMU 链路
+（帧间初值 / 离群门 / 静止冻结 / 示教静止门）一起空转，这是刻意的：
+只关一半会让"配置关掉了陀螺"和"服务里其实还在积"各说各话。
+
+启动日志必须能还原这个键（`describe()` 的 `camera` 行有 `enable_imu=`，
+`FollowWorker::doEnable` 的"陀螺能力"行也会点名）。
+
+### 5.5 两条路径的时间域 —— **已用 GyroTimeBase 对齐（离线钉死）**
 
 | 路径 | 图像帧 `ts_ns` | 陀螺样本 `ts_ns` | 同域？ |
 |---|---|---|---|
-| `follow_pose` / `follow_node` | `depthFrame()->getTimeStampUs()*1000`（`orbbec_capture.cpp:613`） | `gyroFrame()->getTimeStampUs()*1000`（`:483`） | ✅ 同一设备时钟 |
-| 相机服务内 follow | `fd.timestamp_ms * 1e6`，而 `timestamp_ms` 是 **`system_clock` epoch ms**（`camera_driver.cpp` `captureLoop()` 里 `cur_frame.timestamp_ms = system_clock…` → `follow_worker.cpp:479`） | `getTimeStampUs()*1000` = **设备时间**（`camera_driver.cpp` 陀螺回调里的 `ts_ns = getTimeStampUs()*1000`） | ❌ **不同域** |
+| `follow_pose` / `follow_node` | `depthFrame()->getTimeStampUs()*1000` | `gyroFrame()->getTimeStampUs()*1000` | ✅ 同一设备时钟 |
+| 相机服务内 follow | `FrameData.track_ts_ns = GyroTimeBase::toHostNs(device_ts_us)`；未定标时退回 `timestamp_ms`（同时丢掉陀螺样本） | `toHostNs(getTimeStampUs())`；未定标返回 0 并丢弃 | ✅ 同一主机域（定标后） |
 
-`integrate_gyro(gyro_, prev_ts_ns_, ts_ns, …)` 要求两者同域。如果设备时间不是 epoch 微秒
-（多数 Orbbec 固件返回的是"自开机"µs），后果是**静默无效**：所有陀螺样本永远落在
-`[t0,t1]` 窗口之外 ⇒ `samples_used == 0` ⇒ `stale=true` ⇒ `valid()=false` ⇒ 第 2 档永不触发。
-不会算错，但"IMU 优化"这一项在服务里等于没有 —— 而且**当前无法从外部看出**：
-`r.gyro_used` 没有进 `FollowSnapshot`，也没有进 `followSnapshotJson()`，页面上看不到。
+336L 的 `getTimeStampUs()` 是**自开机 µs**（实测末值 ~1.57e9），`timestamp_ms` 是主机
+epoch 毫秒。直接混用会静默框空积分窗口 —— 这是曾经的现场。修法不是改公共
+`timestamp_ms`（编码器 / 存图还要用到达时刻），而是：
 
-**标记为未验证**，因为我没有在相机在场时实测过设备时间戳的域。**验它的步骤**（10 分钟）：
+1. `GyroTimeBase` 用 8 对"本帧设备戳 ↔ 本帧主机到达时刻"取**最小延迟**那一对冻结钟差
+   （NTP 同一条理由：延迟恒正，最小值最接近真钟差）。见 `gyro_time_base.hpp`。
+2. 陀螺入队前一律 `toHostNs()`；未就绪返回 0，调用方必须丢弃（混域比没样本更难查）。
+3. follow 跟踪用 `track_ts_ns`，**不能**拿本帧到达时刻当积分窗口：USB 抖动实测
+   350~450 ms，定标冻结的是最小延迟，本帧再晚几十/几百 ms 时 66 ms 窗口刚好框空。
+4. 定标完成那一帧会从到达时刻切到更早的设备钟，`FollowWorker` 必须重置 `last_ts_ns_`，
+   否则 Tracker 当 stale 丢掉。
 
-1. `./follow/build/follow_probe_device`，看 `ts_us=` 的量级：`1.7e15` 量级 = epoch µs（两域勉强
-   可比，只是精度差 1000 倍）；`1e10` 量级 = 自开机 µs（不同域，第 2 档永不触发）。
-   打印点 `follow/tools/probe_device.cpp:273-275,422-428,531`。
-2. 要长期可见性：把 `r.gyro_used` 加进 `FollowSnapshot` 与 `followSnapshotJson()`
-   （`follow_worker.hpp:83` 附近 + `http_server.cpp:104` 附近），并同步加进
-   `FollowPanel.tsx` 的 `FollowSnapshot` 接口，然后盯一次"手动快速晃动相机"时的 `estimator`/`gyro_used`。
-3. 若确认不同域，**正确的修法不是**把帧时间戳换成设备时间（`FrameData` 是相机服务的公共结构，
-   影响编码器与存图），而是在 `FollowWorker` 侧建立 `host_ms ↔ device_us` 的一次性偏移标定，
-   或者把 gyro 样本重采样到主机域。**先测再改。**
+离线钉死在 `test_gyro_time_base.cpp`：`GyroTimeBaseSeam.CalibratedOutputIsUsableByFollowIntegrator`
+与 `ArrivalTimeMissesWhenUsbJitterExceedsFramePeriod`。现场指纹是
+`gyro.buf > 0 && gyro.samples == 0` 连续 ≥30 帧 ⇒ `checkGyroChannel()` 打 ERROR；
+快照字段 `gyro.time_ready / buf / samples / dead_frames` 给外部看（不是已经去掉的
+`gyro_used` 布尔 —— 那个只说"这一帧当初值没用陀螺"，分诊不够）。
+
+停流 / 换档 / 重连必须 `gyro_time_base_.reset()`：设备可能换了时间戳原点。
 
 ---
 
@@ -503,9 +512,10 @@ ob::GyroFrame (~200 Hz, 独立 sensor 回调)
    Context/Pipeline/取流线程；同一进程两份 driver 比两份进程更难查。也**绝不链 `follow_health`**：
    状态由本进程自己的 `http_server` 报，两处报同一个数必然不一致。
    实际只链 `follow` + `follow_config`（`:86-87`）。
-3. **拿不到厂商 SDK 的设备时间戳**：`FrameData.timestamp_ms` 是主机毫秒时钟，粒度比 15 fps 的
-   帧周期（66 ms）粗。"同一毫秒内的两帧"不可区分 ⇒ 处理成**丢帧并计数**，不造假 `+1ns`
-   （`follow_worker.cpp:477-486`）。真发生说明取流在抖。
+3. **跟踪时间戳必须与陀螺同一域**：`FrameData.timestamp_ms` 仍是主机到达时刻（日志 / 存盘 /
+   帧率，粒度比 15 fps 的 66 ms 粗，同毫秒两帧当丢帧计）。跟踪用的是
+   `track_ts_ns = GyroTimeBase::toHostNs(device_ts_us)`（§5.5）。未定标时退回到达时刻，
+   同时丢掉陀螺样本 —— 两条路径一起空转，不会各走各的钟。
 
 代价与收益都写在这里，别留给下一个读代码的人猜。
 
@@ -781,7 +791,7 @@ T_target = Δ_base · T_baseline               # 左乘，mirror.py:148
 | `camera.lock_path` | `.orbbec.lock` | 相机服务 | 路径以本键为准（§3.1） |
 | `camera.first_pair_timeout_ms` | `3000` | 独立工具 | 彩色暖机 333 ms 的余量 |
 | `camera.allow_unaligned` | `false` | 独立工具 | `true` 只给排障；生产下 false 是正确性要求 |
-| `camera.enable_imu` | `true` | **只有独立工具** | 见 §5.4 |
+| `camera.enable_imu` | `true` | **两条路径** | 独立工具 + 相机服务（`AppConfig.enable_imu`）；见 §5.4 |
 | `frontend.kind` | `cpu` | 两个 | `superpoint` 需板端 `.rknn`，本板转不出来 |
 | `frontend.max_features/quality_level/min_distance_px` | `200/0.01/16` | 两个 | 预算按"能塞进帧预算"定（§4.4） |
 | `track.zmin_m/zmax_m` | `0.30/2.50` | 两个 | 实测数据集深度 0.74~2.59 m |
@@ -908,7 +918,8 @@ cd follow/build && ./follow_pose            # 有相机时；默认 dry_run，�
 - 缓慢平移/旋转工件时 `estimator` 是否稳定在 `gicp`、`sigma_t_mm` 是否 < 2 mm。
 - 遮挡 → 恢复：`sparse` 连击是否 ≤15、超限时是否 `lost` 且位姿保持。
 - 手动快速晃动相机时 `frames/dropped/rejected` 与 `compute_ms` 的关系。
-- **§5.5 的时间域问题**（唯一一条必须先测才能决定要不要改代码的）。
+- 使能后 `/follow/status` 的 `gyro.time_ready=true`、`gyro.samples` 在晃相机时 > 0
+  （时间基已离线钉死，这条确认设备在场时定标真的完成）。
 - 页面：三按钮各点一次、刷新页面后 WS 重连并恢复显示、回放/跟随互斥两条路径。
 
 ### 11.4 测试覆盖到了什么 / **没**覆盖什么
@@ -923,7 +934,7 @@ Python 29 + 10 条。命名测试点里明确钉住的契约：单位口径、Na
 - C++ `FollowWorker` 的任何行为（无 mock 的 `CameraDriver`，只能上机或用 `/follow/status` 手测）。
 - HTTP 端点的 400/409/503 分支（只测了 Python 侧的分类）。
 - 前端组件（无 JS 测试）。
-- 陀螺第 2 档在**服务里**是否生效（§5.5）。
+- 陀螺第 2 档在**真实相机抖动**下的收益（离线接缝已测，上机只验证定标完成）。
 - 多帧示教在真实散斑下的收益（合成数据的散斑模型不真）。
 
 ---
@@ -936,8 +947,8 @@ Python 29 + 10 条。命名测试点里明确钉住的契约：单位口径、Na
 |---|---|---|---|
 | 1 | **快照陈旧无门限** | `_poll_once` 只看 `frames` 变没变；C++ 卡死但 HTTP 还活着 ⇒ 页面显示一个"活着但其实没动"的数。`snapshot_ts_ms` 字段已经有了，没人用它 | `follow_service.py:396-406`；`follow_worker.hpp:94` |
 | 2 | **臂配置只在启动时解析一次** | 改 yaml 后必须重启 app 后端，页面上没有任何提示 | `follow_service.py:81` |
-| 3 | **`gyro_used` 不可观测 + 时间域存疑** | §5.5 | `follow_worker.cpp:490-496` |
-| 4 | **`stop()` 不清 `_last_error`** | 停止后状态里还挂着上一次的失败原因，页面会显示一条"已经解决了的错误" | `follow_service.py:201-208` |
+| 3 | ~~`gyro_used` 不可观测 + 时间域存疑~~ **已修** | 时间基见 §5.5；快照 `gyro.*` 组 | `gyro_time_base.*` / `followSnapshotJson` |
+| 4 | ~~`stop()` 不清 `_last_error`~~ **已修** | 停止时清掉，成功/失败都清 | `follow_service.py` `stop()` |
 | 5 | `_emit` 去重键不含 `reason` | `reason` 单独变化时不广播（页面 tooltip 会旧一拍） | `follow_service.py:458-459` |
 | 6 | **eye-in-hand 的语义在两侧不一致** | C++ `mount` 只接受 `eye-to-hand`；Python 的降级文案里提到它 ⇒ 读到那句话的人会以为有这个模式 | `follow_service.py:125-126` |
 | 7 | 无奇异性/速度与加速度检查 | 仿真臂无妨；真机 P5 必须先有 | — |
@@ -976,7 +987,7 @@ Python 29 + 10 条。命名测试点里明确钉住的契约：单位口径、Na
 |---|---|---|---|
 | `odometry.hpp:99` | "P4 之前不接实机数据，接口和单测先留着" | 两条路径都在喂真陀螺 | 注释该更新（含 `max_gap`/`gyro_buf_max` 的真实地位） |
 | `odometry.hpp:133` | "P4 之前没有调用方" | `node_main.cpp:390`、`follow_worker.cpp:494` 都是调用方 | 同上 |
-| `follow_worker.hpp:6-8` | "拿不到厂商 SDK 的设备时间戳" | 仍然成立，但下面第 9-10 行讲陀螺时没说清"帧时间戳是主机域" | §5.5 修时间域时一并写清 |
+| `follow_worker.hpp` 顶注释 | 曾写"拿不到厂商 SDK 的设备时间戳" | 跟踪已走 `track_ts_ns`；`timestamp_ms` 仍是到达时刻 | 头注释已改成 §5.5 那套 |
 
 发现新漂移就往这张表里加一行，别默默改代码留旧注释 —— 这套代码的注释是**判据的一部分**，
 好几条注释本身就对应一条断言。
