@@ -336,6 +336,12 @@ bool FollowWorker::teach(bool save_map, std::string* err) {
     double motion_max_rad_s = 0.0;
     uint64_t motion_samples = 0;
 
+    if (motion_gate_on) {
+        // 进入示教收帧窗口前，先排空历史累积样本，确保静止门只统计从点击示教开始的真实窗口
+        std::vector<follow::GyroSample> discard_gyro;
+        camera_->drainGyroSamples(&discard_gyro);
+    }
+
     while (static_cast<int>(depths.size()) < need) {
         if (!running_) {
             if (err) *err = "服务正在退出，示教中止。";
