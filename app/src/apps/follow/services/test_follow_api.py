@@ -42,7 +42,8 @@ class TestFollowApi(unittest.TestCase):
         self._saved = (dict(self.svc._arm), self.svc._R_cb, self.svc._R_cb_source,
                        self.svc._active, self.svc._baseline_q, self.svc._target_q,
                        self.svc._upstream_down, self.svc._fail_upstream,
-                       self.svc._last_error, dict(self.svc._snapshot), fs_mod.CPP_BASE_URL)
+                       self.svc._last_error, dict(self.svc._snapshot), fs_mod.CPP_BASE_URL,
+                       self.svc._push, self.svc._push_enabled)
         self.svc._active = False
         self.svc._baseline_q = None
         self.svc._target_q = None
@@ -58,15 +59,22 @@ class TestFollowApi(unittest.TestCase):
             self.svc._R_cb = np.eye(3)
         fs_mod.CPP_BASE_URL = _UNREACHABLE           # 默认：相机服务不在
         self.svc._ensure_poller = lambda: None       # 单测里不许起轮询线程
+        # 推送订阅也不许起：真连上在跑的相机服务，后端就会往这个单例灌真帧，
+        # 断言读到的就不再是自己喂进去的那一份。
+        self.svc._ensure_stream = lambda: None
+        self.svc._stop_stream = lambda: None
+        self.svc._push = None
+        self.svc._push_enabled = False               # 默认走轮询口径；推送用例自己打开
         app = FastAPI()
         app.include_router(follow_router)
         self.client = TestClient(app)
 
     def tearDown(self):
-        (mode, R_cb, src, active, base, tgt, down, failup, err, snap, url) = self._saved
-        # _cpp/_ensure_poller 是被用例临时替换的**实例属性**：不逐个清干净，下一个用例会
-        # 继承上一个的假实现，然后出现"明明该 503 却成功了"这种最难查的假绿。
-        for attr in ("_cpp", "_ensure_poller"):
+        (mode, R_cb, src, active, base, tgt, down, failup, err, snap, url,
+         push, push_enabled) = self._saved
+        # _cpp/_ensure_poller/_ensure_stream/_stop_stream 是被用例临时替换的**实例属性**：
+        # 不逐个清干净，下一个用例会继承上一个的假实现，然后出现"明明该 503 却成功了"这种最难查的假绿。
+        for attr in ("_cpp", "_ensure_poller", "_ensure_stream", "_stop_stream"):
             self.svc.__dict__.pop(attr, None)
         self.svc._arm = mode
         self.svc._R_cb = R_cb
@@ -79,6 +87,8 @@ class TestFollowApi(unittest.TestCase):
         self.svc._last_error = err
         self.svc._snapshot = snap
         self.fs_mod.CPP_BASE_URL = url
+        self.svc._push = push
+        self.svc._push_enabled = push_enabled
 
     # ------------------------------------------------------------------ status
     def test_status_always_answers(self):

@@ -52,6 +52,23 @@ interface FollowSnapshot {
   capture_height: number;
   teach_capture_width: number;
   teach_capture_height: number;
+  // 以下全是**可选**：新增的陀螺通道诊断，老服务不发这些字段时面板照常工作（读不到就不显示）。
+  /** 陀螺判定相机静止 ⇒ 旋转通道被有意冻结在冻结点上（平移照常更新）。 */
+  gyro_still?: boolean;
+  /** 冻结真的生效中（区别于"陀螺说静止但还在 hold-off 窗口里"）。 */
+  rot_frozen?: boolean;
+  /** 本次已冻结多久（ms）。到上限会被强制解冻 —— 陀螺零偏不能无限期吞掉真实旋转。 */
+  frozen_ms?: number;
+  /** 离群门拦下的坏帧累计数：视觉解算与陀螺角速度不一致 ⇒ 拒收并沿用上一位姿。 */
+  rot_gated?: number;
+  gyro?: {
+    /** 设备时钟 → 主机时钟的偏移是否已定标。false = 旋转通道的陀螺证据全部无效。 */
+    time_ready?: boolean;
+    samples?: number;
+    bias_dps?: number;
+    resid_dps?: number;
+    bias_ready?: boolean;
+  };
 }
 
 interface FollowState {
@@ -66,6 +83,11 @@ interface FollowState {
   arm_baseline_deg: number[] | null;
   joints_deg: number[] | null;
   target_pose: number[] | null;
+  /** 位姿数据面此刻走哪条路：'push' = 相机服务 SSE 推来，'poll' = 后端兜底轮询。
+   *  **可选**：推送接入前的服务不发这两个字段，面板照常工作。 */
+  data_plane_mode?: string;
+  /** 走轮询时的原因（开关未开 / 尚无一帧 / 已 Xs 无数据）。推送正常时为空。 */
+  data_plane_reason?: string;
   follow: Partial<FollowSnapshot> & { error?: string };
 }
 
@@ -297,12 +319,29 @@ export const FollowPanel: React.FC<FollowPanelProps> = ({ isReplaying, onFollowJ
           <span className="text-slate-600">|</span>
           <span title="相机相对示教位的位移增量（基座系映射前）">Δt {fmt(dtMm)} mm</span>
           <span title="旋转增量，由 delta_r 的 trace 反解">ΔR {fmt(dRdeg, 2)}°</span>
+          {/* 冻结时 ΔR 会停住不动，和"卡死"在画面上长得一样 —— 必须说清这是有意停的（平移仍在更新）。 */}
+          {snap?.rot_frozen && (
+            <span
+              className="text-sky-400/90"
+              title={`陀螺判定相机静止，旋转通道已冻结 ${fmt(snap.frozen_ms, 0)}ms（到上限会强制解冻）。平移照常更新。`}
+            >
+              ·冻结 {fmt(snap.frozen_ms, 0)}ms
+            </span>
+          )}
           <span className="text-slate-600">|</span>
           <span title="沿光轴的 1σ 重复性；— 表示本帧没有稠密解算">σz {fmt(sigmaT, 2)} mm</span>
           <span title={`${snap?.fps ?? 0} fps, 帧 ${snap?.frames ?? 0}, 丢帧 ${snap?.dropped ?? 0}/拒收 ${snap?.rejected ?? 0}`}>
             {fmt(snap?.fps, 0)}fps
           </span>
+          {snap?.rot_gated ? <span title={`离群门拦下 ${snap.rot_gated} 帧：视觉解算与陀螺角速度不一致`}>拒 {snap.rot_gated}</span> : null}
         </div>
+        {/* 陀螺时钟没定标 = 旋转通道的初始化和离群门全部失效，且不报错，所以单独占一行红字。 */}
+        {running && snap?.gyro && snap.gyro.time_ready === false && (
+          <div className="text-[9px] truncate text-rose-400/90"
+               title="设备时间戳与主机时钟的偏移还没测出来：陀螺样本被全部丢弃，旋转通道只剩纯视觉解算。">
+            陀螺时钟未定标 · 旋转通道降级
+          </div>
+        )}
         {(error || state?.last_error || snap?.reason) && (
           <div
             className={`text-[9px] truncate ${error || heldByIk ? 'text-amber-400/90' : 'text-slate-500'}`}
@@ -317,6 +356,14 @@ export const FollowPanel: React.FC<FollowPanelProps> = ({ isReplaying, onFollowJ
             {snap?.teach_capture_width && snap.teach_capture_width !== snap.capture_width
               ? ` (示教 ${snap.teach_capture_width}x${snap.teach_capture_height})` : ''}
             {` · 基线 ${state?.arm_baseline_deg ? state.arm_baseline_deg.map((v) => v.toFixed(1)).join(',') : '—'}`}
+            {/* 轮询本身不算故障，但"配了推送却安静地退回轮询"是推送链路坏掉的唯一线索 ——
+                闭环最怕的是停在旧位姿上而页面看起来跟得好，所以这条必须显出来。 */}
+            {state?.data_plane_mode === 'push'
+              ? <span title="位姿由相机服务经 SSE 推来，兜底轮询待命中"> · 推送</span>
+              : state?.data_plane_mode === 'poll'
+                ? <span className="text-amber-400/80"
+                        title={state.data_plane_reason || '位姿由后端轮询取得'}> · 轮询兜底</span>
+                : null}
           </div>
         )}
       </div>

@@ -289,6 +289,35 @@ bool load_config(const std::string& path, FollowConfig* cfg, std::string* err) {
                &errors);
     fetch<double>(tr, "gyro_rot_gate_deg", "小数", "follow.track.",
                   &cfg->track.gyro_rot_gate_deg, &errors);
+    // 静止检测的门限按 **deg/s** 暴露（人只在度/秒的量级上判断"算不算在动"），跨界换弧度。
+    constexpr double kDeg2Rad = 0.017453292519943295;
+    double still_enter_dps = 0.0;
+    double still_exit_dps = 0.0;
+    fetch<double>(tr, "gyro_still_enter_dps", "小数", "follow.track.", &still_enter_dps, &errors);
+    fetch<double>(tr, "gyro_still_exit_dps", "小数", "follow.track.", &still_exit_dps, &errors);
+    if (still_enter_dps > 0.0) {
+      cfg->track.gyro_still.enter_rad_s = still_enter_dps * kDeg2Rad;
+    }
+    if (still_exit_dps > 0.0) {
+      cfg->track.gyro_still.exit_rad_s = still_exit_dps * kDeg2Rad;
+    }
+    // 窗口长度按**样本数**而不是毫秒：检测器刻意不认时间轴（见 gyro_filter.hpp），这里用采样率
+    // 换算会把一个"故意与采样率无关"的设计重新绑回去。@200Hz 时 20 样本 = 100 ms。
+    fetch<int>(tr, "gyro_still_window", "整数", "follow.track.",
+               &cfg->track.gyro_still.window_samples, &errors);
+    fetch<int>(tr, "gyro_still_confirm", "整数", "follow.track.",
+               &cfg->track.gyro_still.confirm_samples, &errors);
+    fetch<int>(tr, "gyro_bias_bootstrap", "整数", "follow.track.",
+               &cfg->track.gyro_still.bias_bootstrap_samples, &errors);
+    fetch<double>(tr, "gyro_bias_alpha", "小数", "follow.track.",
+                  &cfg->track.gyro_still.bias_alpha, &errors);
+    fetch<int>(tr, "gyro_max_freeze_ms", "整数", "follow.track.",
+               &cfg->track.gyro_max_freeze_ms, &errors);
+    int gyro_horizon_ms = 500;
+    fetch<int>(tr, "gyro_horizon_ms", "整数", "follow.track.", &gyro_horizon_ms, &errors);
+    if (gyro_horizon_ms > 0) {
+      cfg->track.gyro_horizon_ns = static_cast<int64_t>(gyro_horizon_ms) * 1'000'000;
+    }
     fetch<double>(tr, "sparse_inlier_dist_m", "小数", "follow.track.",
                   &cfg->track.sparse.inlier_dist_m, &errors);
     fetch<int>(tr, "sparse_min_inliers", "整数", "follow.track.", &cfg->track.sparse.min_inliers,
@@ -542,6 +571,19 @@ ConfigProblems check_config(FollowConfig* cfg, const std::string& root) {
   if (cfg->track.gyro_rot_gate_deg < 0.0) {
     add(items, false, "track.gyro_rot_gate_deg 为负，按 0（关闭离群门）处理。");
   }
+  // 迟滞方向反了不会报错、只会让"快出"变成永远出不来（检测器构造期会把它夹成 enter）。
+  if (cfg->track.gyro_still.exit_rad_s < cfg->track.gyro_still.enter_rad_s) {
+    add(items, false, "track.gyro_still_exit_dps 必须大于 gyro_still_enter_dps，否则退出静止的门"
+                      "会被构造期夹回进入门（迟滞消失，冻结可能再也解不开）。");
+  }
+  if (cfg->track.gyro_max_freeze_ms < 0) {
+    add(items, false, "track.gyro_max_freeze_ms 为负，按 0（不限时）处理。");
+  }
+  if (cfg->track.gyro_horizon_ns < 200'000'000) {
+    add(items, false, "track.gyro_horizon_ms = " +
+                          std::to_string(cfg->track.gyro_horizon_ns / 1'000'000) +
+                          " 小于 200ms：离群门的互验窗口会被缓冲本身截断，门等于半关。");
+  }
   return out;
 }
 
@@ -564,6 +606,16 @@ std::string describe(const FollowConfig& c) {
      << "  sparse_streak<=" << c.track.max_sparse_streak << "\n";
   os << "  teach    : " << c.map_path << "  frames=" << c.teach_frames
      << "  max_motion=" << c.teach_max_motion_deg_s << "deg/s\n";
+  // 陀螺的三种用途都必须在这里露出来：它们任一失效都是静默的（不影响任何已解出的结果），
+  // 只有"启动时打印的生效值 + 快照里的诊断计数"两处能把它们变成可见。
+  os << "  gyro     : 离群门=" << c.track.gyro_rot_gate_deg << "deg  静止门 "
+     << c.track.gyro_still.enter_rad_s * 57.295779513082322 << "~"
+     << c.track.gyro_still.exit_rad_s * 57.295779513082322
+     << "deg/s(残差) 窗口=" << c.track.gyro_still.window_samples
+     << " 确认=" << c.track.gyro_still.confirm_samples
+     << " 零偏bootstrap=" << c.track.gyro_still.bias_bootstrap_samples
+     << " 最长冻结=" << c.track.gyro_max_freeze_ms << "ms  缓冲="
+     << c.track.gyro_horizon_ns / 1'000'000 << "ms\n";
   os << "  runtime  : mount=" << c.mount << "  dry_run=" << (c.dry_run ? "是" : "否")
      << "  servo_p=" << (c.enable_servo_p ? "开" : "关") << "  health=:" << c.health_port
      << "  max_cycles=" << c.max_cycles << "\n";

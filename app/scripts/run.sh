@@ -41,10 +41,12 @@ fi
 echo "[0/2] Cleaning up any existing AiSprayer processes..."
 pkill -9 -f "main.py" 2>/dev/null
 pkill -9 -f "vite" 2>/dev/null
+pkill -9 -f "orbbec_camera_service" 2>/dev/null
 
-echo "Checking and freeing ports 8000 and 5173..."
-lsof -t -i :8000 | xargs -r kill -9 2>/dev/null
-lsof -t -i :5173 | xargs -r kill -9 2>/dev/null
+echo "Checking and freeing required ports..."
+for port in 8000 5173 18080 8554 8008 1935; do
+    lsof -t -i :$port | xargs -r kill -9 2>/dev/null
+done
 
 # Give OS a moment to reap processes
 sleep 1
@@ -100,11 +102,13 @@ cleanup() {
     [ -n "$FRONTEND_PID" ] && kill -9 "$FRONTEND_PID" 2>/dev/null
     pkill -9 -f "main.py" 2>/dev/null
     pkill -9 -f "vite" 2>/dev/null
+    pkill -9 -f "orbbec_camera_service" 2>/dev/null
     
     # 3. Forcefully free ports
-    echo "Forcefully freeing ports 8000 and 5173..."
-    lsof -t -i :8000 | xargs -r kill -9 2>/dev/null
-    lsof -t -i :5173 | xargs -r kill -9 2>/dev/null
+    echo "Forcefully freeing required ports..."
+    for port in 8000 5173 18080 8554 8008 1935; do
+        lsof -t -i :$port | xargs -r kill -9 2>/dev/null
+    done
     
     # 4. Restoring file ownership to target user so root files are never left behind
     if [ -n "$SUDO_USER" ]; then
@@ -114,10 +118,10 @@ cleanup() {
     fi
 
     # Double check and verify ports are free
-    if lsof -t -i :8000 >/dev/null || lsof -t -i :5173 >/dev/null; then
+    if lsof -t -i :8000 >/dev/null || lsof -t -i :5173 >/dev/null || lsof -t -i :18080 >/dev/null; then
         echo "Warning: Failed to free some ports."
     else
-        echo "Ports 8000 and 5173 are verified free."
+        echo "Required ports are verified free."
     fi
     
     echo "AiSprayer stopped successfully."

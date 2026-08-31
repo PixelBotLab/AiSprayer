@@ -65,6 +65,9 @@ void CameraDriver::stopPipelineAndSensors() {
         std::lock_guard<std::mutex> g_lock(gyro_mtx_);
         gyro_queue_.clear();
     }
+    // 时间基随停流作废：设备重启会换时间戳原点，主机侧的排队路径也重建了。留着旧偏移动起来
+    // 像"标定还在"，实际上把一个新未知量当成常量。
+    gyro_time_base_.reset();
     has_imu_ = false;
 
     if (pipe_) {
@@ -391,7 +394,13 @@ bool CameraDriver::configureAndStartPipeline() {
                             auto gf = frame->as<ob::GyroFrame>();
                             if (!gf) return;
                             auto val = gf->getValue();
-                            int64_t ts_ns = static_cast<int64_t>(gf->getTimeStampUs()) * 1000;
+                            // getTimeStampUs() 是**设备自开机 µs**，而帧时间戳是本进程
+                            // system_clock 的 epoch ms —— 不换算就入队，follow 的积分窗口
+                            // 一帧样本也框不到，而现象只是"陀螺像是一直在动"（静默失效）。
+                            const int64_t ts_ns = gyro_time_base_.toHostNs(gf->getTimeStampUs());
+                            if (ts_ns == 0) {
+                                return;  // 时间基还没定标（约 0.5 s）：丢掉，别把两个域混进队列
+                            }
                             Eigen::Vector3d omega_raw(val.x, val.y, val.z);
                             Eigen::Vector3d omega_cam = R_cam_gyro_ * omega_raw;
 
@@ -402,7 +411,9 @@ bool CameraDriver::configureAndStartPipeline() {
                             }
                         });
                         has_imu_ = true;
-                        LOG_INFO("Camera", "Started IMU Gyro stream (~200Hz) with hardware extrinsics.");
+                        LOG_INFO("Camera", "Started IMU Gyro stream (~200Hz) with hardware extrinsics; "
+                                           "时间基定标中（前 ", GyroTimeBase::kProbePairs,
+                                 " 帧配对），期间陀螺样本先丢弃");
                     }
                 }
             }
@@ -648,6 +659,26 @@ void CameraDriver::captureLoop() {
             cur_frame.frame_index = frame_count_++;
             cur_frame.timestamp_ms = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count();
+
+            // 陀螺时间基定标：配对的必须是"**这一帧**的设备戳 ↔ 刚给它打的主机戳"，而且主机侧
+            // 要用已经截到毫秒的 timestamp_ms 而不是重新取一次 now() —— follow 看到的帧时间戳
+            // 就是那个值，两边同一量化才谈得上对齐，否则陀螺会比帧多出至多 1 ms 的独立抖动。
+            {
+                const uint64_t dev_us =
+                    (depth_frame && depth_frame->getTimeStampUs() > 0)
+                        ? depth_frame->getTimeStampUs()
+                        : ((color_frame && color_frame->getTimeStampUs() > 0)
+                               ? color_frame->getTimeStampUs()
+                               : 0);
+                if (gyro_time_base_.offerPair(dev_us,
+                                              static_cast<int64_t>(cur_frame.timestamp_ms) * 1000000)) {
+                    LOG_INFO("Camera", "陀螺时间基已定标: offset=",
+                             gyro_time_base_.offset_ns() / 1000000, "ms, 配对=",
+                             GyroTimeBase::kProbePairs, "帧, 延迟抖动=",
+                             gyro_time_base_.spread_ns() / 1000000, "ms, 定标前丢弃样本=",
+                             gyro_time_base_.dropped_before_ready());
+                }
+            }
 
             // Process Color Frame
             if (color_frame && color_frame->dataSize() > 0) {

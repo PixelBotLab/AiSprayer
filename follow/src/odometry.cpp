@@ -119,16 +119,34 @@ void Tracker::push_gyro(int64_t ts_ns, const Eigen::Vector3d& omega_cam_rad_s) {
   if (!omega_cam_rad_s.allFinite()) {
     return;  // 一个 NaN 样本会把整段积分染成 NaN，而 NaN 的 R 能通过所有比较
   }
-  gyro_.push_back(GyroSample{ts_ns, omega_cam_rad_s});
+
+  // 同源样本喂静止检测器：它只用向量、不碰时间轴，与积分路径不会各算各的。
+  // 注意：静止检测器必须吃裸数据，因为它自己内部负责估计零偏。
+  still_det_.push(omega_cam_rad_s);
+  ++gyro_this_frame_;  // 与时间戳无关的"IMU 还活着"计数：静止判据的存活前提（见 track_impl）
+
+  // 写入缓冲的数据必须扣掉已经学到的零偏，否则 integrate_gyro 长时间积分时纯零偏会积出
+  // 巨大的假旋转（1°/s 零偏 * 2 秒 = 2°），导致离群门误判并永久死锁。
+  Eigen::Vector3d omega_clean = omega_cam_rad_s;
+  if (still_det_.bias_ready()) {
+    omega_clean -= still_det_.bias_vec();
+  }
+  gyro_.push_back(GyroSample{ts_ns, omega_clean});
+
+  // 按**时间**裁剪，不是只按条数：一帧的积分窗口只有 66 ms 宽（离群门的窗口另有上限），而
+  // gyro_buf_max 条 @200Hz 是 20 秒历史 —— integrate_gyro 每帧从头走一遍那些样本却一个都用
+  // 不到。条数上限留着，只兜"时间戳乱序让时间条件永远不成立"这一种异常。
+  while (gyro_.size() > 2 && ts_ns - gyro_.front().ts_ns > p_.gyro_horizon_ns) {
+    gyro_.pop_front();
+  }
   while (gyro_.size() > p_.gyro_buf_max) {
     gyro_.pop_front();
   }
-  // 同源样本喂静止检测器：它只看向量模、不碰时间轴，与积分路径不会各算各的。
-  still_det_.push(omega_cam_rad_s);
 }
 
 TrackResult Tracker::track(const FeatureFrame& curr, const cv::Mat& depth_mm, int64_t ts_ns) {
   TrackResult r = track_impl(curr, depth_mm, ts_ns);
+  gyro_this_frame_ = 0;  // 一帧的账在这一帧结：下一帧的存活判据只看下一帧收到的样本
 
   // 只有真出了点云的帧才进"上一帧"。坏帧当参考帧会把下一帧的初值一起带坏；
   // 时间戳倒退的帧更不能覆盖 prev_ts_ns_，否则下一次同样的乱序会被当成正常。
@@ -160,6 +178,8 @@ TrackResult Tracker::track_impl(const FeatureFrame& curr, const cv::Mat& depth_m
     r.estimator = e;
     T_vel_ = T_last_good_.inverse() * T;
     T_last_good_ = T;
+    last_good_ts_ns_ = ts_ns;   // 离群门的积分起点：必须和"T_last_good_ 是哪一帧"绑定
+    have_last_good_ts_ = true;
     r.T_ref_cam = T;
     if (e == Estimator::kGicp) {
       sparse_streak_ = 0;
@@ -204,21 +224,49 @@ TrackResult Tracker::track_impl(const FeatureFrame& curr, const cv::Mat& depth_m
   if (have_frame_) {
     gyro = integrate_gyro(gyro_, prev_ts_ns_, ts_ns, p_.gyro_max_gap_ns);
   }
-  // P1 静止判定随帧报出：只在陀螺数据新鲜（本窗口积分有效）时才表态，
-  // IMU 停更时宁可信"不知道"，也不能拿旧样本冒充"静止"。
-  r.gyro_still = gyro.valid() && still_det_.still();
+  r.gyro_samples = gyro.samples_used;
+  r.gyro_buf = static_cast<int>(gyro_.size());
+  r.gyro_pushed = gyro_this_frame_;
+  r.gyro_resid_rad_s = still_det_.recent_resid_rad_s();
+  r.gyro_bias_rad_s = still_det_.bias_rad_s();
+  r.gyro_bias_ready = still_det_.bias_ready();
+  // P1 静止判定随帧报出。这里刻意**不**拿 gyro.valid() 当前提：检测器的判据只用样本向量、
+  // 与时间轴无关，用它自己的时间无关性去 gate 一个时间相关的积分结果，等于把"陀螺与帧不同
+  // 时间域"这类故障伪装成"相机一直在动"—— 服务路径上真实发生过，且从外部完全看不出来。
+  // 取而代之的两个存活条件也都与时间域无关：
+  //  · bias_ready：零偏还在累积均值阶段，残差门限没有意义；
+  //  · 本帧收到了新样本：IMU 停更时窗口会一直卡在最后一批旧样本上，必须当"不知道"。
+  r.gyro_still = still_det_.still() && r.gyro_bias_ready && r.gyro_pushed > 0;
 
-  // P3 离群门：候选解的帧间旋转必须与同窗口陀螺积分一致（测地线距离 ≤ 门限）。
+  // P3 离群门：候选解的旋转增量必须与**同一段时间**的陀螺积分一致（测地线距离 ≤ 门限）。
   // 陀螺是唯一能在"结果被采纳之前"独立验证旋转的信息源：一次坏帧（滑坡/遮挡后的假收敛）
   // 的帧间旋转会和陀螺差出度级角度，而正常帧两者差在噪声级（0.0几度）。
   // 退化场景不误伤：弱方向上 GICP 的旋转留在初值上不动（见下面 adopt 的注释），
   // 帧间旋转≈初值链上的运动，与陀螺仍一致。
-  const auto rot_gate = [&](const Eigen::Isometry3d& T_cand) {
-    if (p_.gyro_rot_gate_deg <= 0.0 || !gyro.valid()) {
+  //
+  // **区间两边必须严格对齐**，这是本门最容不下错的一点：稠密候选是相对 T_last_good_ 算的，
+  // 而 last_good 可能已经隔着若干被 hold 的帧。若陀螺只积一帧，门误差 ≈ (区间长度差)×角速度
+  // ⇒ 转速越高越容易过门 ⇒ 拦下一次之后每帧都更越过门，正反馈锁死；且相机停下也解不开
+  // （累计旋转仍超门），只能重新示教。所以按候选各自的参照时刻积分对应区间。
+  const auto rot_gate = [&](const Eigen::Isometry3d& T_cand, const Eigen::Isometry3d& T_ref,
+                            int64_t ref_ts_ns) {
+    if (p_.gyro_rot_gate_deg <= 0.0 || ref_ts_ns <= 0) {
       return false;
     }
-    const Eigen::Matrix3d R_delta = T_last_good_.rotation().transpose() * T_cand.rotation();
-    r.rot_gate_err_deg = rot_geodesic_deg(gyro.R, R_delta);
+    const int64_t span = ts_ns - ref_ts_ns;
+    // 区间超过缓冲跨度就不判：几秒的窗口里陀螺零偏本身就已经是门限量级，互验没有意义。
+    if (span <= 0 || span > p_.gyro_horizon_ns) {
+      return false;
+    }
+    // 上一帧就是参照帧时（绝大多数情况）直接复用上面算好的单帧积分，不重复遍历缓冲。
+    const GyroDelta g = (ref_ts_ns == prev_ts_ns_)
+                            ? gyro
+                            : integrate_gyro(gyro_, ref_ts_ns, ts_ns, p_.gyro_max_gap_ns);
+    if (!g.valid()) {
+      return false;  // 这段没有可用样本（IMU 停更 / 时间域不同）⇒ 不判，而不是"判成坏帧"
+    }
+    r.rot_gate_err_deg =
+        rot_geodesic_deg(g.R, T_ref.rotation().transpose() * T_cand.rotation());
     return r.rot_gate_err_deg > p_.gyro_rot_gate_deg;
   };
 
@@ -260,7 +308,8 @@ TrackResult Tracker::track_impl(const FeatureFrame& curr, const cv::Mat& depth_m
   }
 
   if (overlapped && g.converged && g.inliers >= static_cast<size_t>(min_inliers)) {
-    if (rot_gate(g.T)) {
+    // 参照 = T_last_good_ 及其所属时刻。没有它就没有合法区间（不能拿"未知"当"没动"）。
+    if (rot_gate(g.T, T_last_good_, have_last_good_ts_ ? last_good_ts_ns_ : 0)) {
       // 疑似坏帧：不采纳、位姿保持上一可信值。不更新 T_last_good_ 也就不会污染后续初值；
       // 本帧仍可当下一帧的稀疏参照（track() 里 prev 的更新条件不含 kRotGated）。
       r.rot_gated = true;
@@ -283,7 +332,8 @@ TrackResult Tracker::track_impl(const FeatureFrame& curr, const cv::Mat& depth_m
   // ---- 几何可用但求解失败：特征递推当替补，受连击上限约束 ----
   if (overlapped && sp && sparse_streak_ < std::max(1, p_.max_sparse_streak)) {
     const Eigen::Isometry3d T_sp = T_last_good_ * sp->T_prev_from_curr;
-    if (rot_gate(T_sp)) {
+    // 参照 = 上一帧：sp->T_prev_from_curr 测的就是"prev → curr"这一段，陀螺也只积这一段。
+    if (rot_gate(T_sp, T_last_good_, prev_ts_ns_)) {
       r.rot_gated = true;
       return hold(Status::kRotGated);
     }

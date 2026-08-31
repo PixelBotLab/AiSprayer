@@ -21,6 +21,7 @@ from __future__ import annotations
 import math
 import os
 import sys
+import time
 import unittest
 
 import numpy as np
@@ -32,6 +33,7 @@ from apps.follow.mirror import (  # noqa: E402
     rotation_camera_to_base_fallback, tcp_pose_ctrl_from_joints,
 )
 from apps.follow.services import follow_service as fs_mod  # noqa: E402
+from apps.follow.services.pose_stream import PoseStream  # noqa: E402
 from apps.follow.trajectory import JointTrajectorySmoother  # noqa: E402
 from apps.calib.services.hand_eye.geometry import matrix_to_pose, pose_to_matrix  # noqa: E402
 from core.hardware.robot.cr5_kinematics import CR5Kinematics  # noqa: E402
@@ -348,20 +350,36 @@ class TestTrajectorySmoother(unittest.TestCase):
         self.assertFalse(sm.moving)
 
 
+def _snap(frames: int, delta_t, delta_r=None) -> dict:
+    """一条"C++ 解出了一帧"的最小快照。"""
+    return {"enabled": True, "has_pose": True, "status": "ok", "frames": frames,
+            "delta_r": (np.eye(3) if delta_r is None else delta_r).reshape(3, 3).tolist(),
+            "delta_t_m": list(delta_t)}
+
+
+def _stub_service() -> fs_mod.FollowService:
+    """
+    一个**永不出网、永不起线程**的 FollowService：轴映射钉成单位阵（期望值可手算）、基线
+    = home、轮询线程与推送订阅两个入口全部堵死。
+
+    两个用例类共用这一份，是因为"忘了堵 `_ensure_stream`"这种缺陷只在一个类里出现时，
+    失败要等到相机服务恰好在跑才现形 —— 那时服务端会往单例里灌真帧，和测试自己的假快照
+    抢同一个 `_target_q`，表现出来就是断言莫名其妙地不稳。
+    """
+    svc = fs_mod.FollowService()
+    svc._R_cb = np.eye(3)
+    svc._baseline_q = np.radians(np.asarray(HOME_DEG))
+    svc._ensure_poller = lambda: None      # 测试里不起轮询线程
+    svc._ensure_stream = lambda: None      # 也不起订阅线程
+    svc._stop_stream = lambda: None
+    return svc
+
+
 class TestFollowServiceGuards(unittest.TestCase):
     """服务层的四条不变量：拒绝真实臂、保持上一目标、停止清空、后端失联可被看见。"""
 
     def setUp(self):
-        self.svc = fs_mod.FollowService()
-        self.svc._R_cb = np.eye(3)              # 钉死轴映射，让期望值可手算
-        self.svc._baseline_q = np.radians(np.asarray(HOME_DEG))
-        self.svc._ensure_poller = lambda: None   # 测试里不起轮询线程
-
-    @staticmethod
-    def _snap(frames: int, delta_t, delta_r=None) -> dict:
-        return {"enabled": True, "has_pose": True, "status": "ok", "frames": frames,
-                "delta_r": (np.eye(3) if delta_r is None else delta_r).reshape(3, 3).tolist(),
-                "delta_t_m": list(delta_t)}
+        self.svc = _stub_service()
 
     def test_real_mode_is_refused_not_faked(self):
         self.svc._arm["mode"] = "real"
@@ -380,13 +398,13 @@ class TestFollowServiceGuards(unittest.TestCase):
     def test_holds_last_target_on_ik_failure(self):
         self.svc._active = True
         self.svc._target_q = self.svc._baseline_q.copy()
-        self.svc._fetch_snapshot = lambda: self._snap(1, [0.020, 0.0, 0.0])
+        self.svc._fetch_snapshot = lambda: _snap(1, [0.020, 0.0, 0.0])
         self.svc._poll_once()
         solved = self.svc._target_q.copy()
         self.assertFalse(self.svc._ik_failed)
         self.assertGreater(float(np.linalg.norm(solved - self.svc._baseline_q)), 1e-4)
 
-        self.svc._fetch_snapshot = lambda: self._snap(2, [50.0, 50.0, 50.0])
+        self.svc._fetch_snapshot = lambda: _snap(2, [50.0, 50.0, 50.0])
         self.svc._poll_once()
         self.assertTrue(self.svc._ik_failed)
         self.assertIn("ik", self.svc._last_error)
@@ -395,7 +413,7 @@ class TestFollowServiceGuards(unittest.TestCase):
     def test_duplicate_frame_is_not_resolved_twice(self):
         self.svc._active = True
         self.svc._target_q = self.svc._baseline_q.copy()
-        snap = self._snap(7, [0.020, 0.0, 0.0])
+        snap = _snap(7, [0.020, 0.0, 0.0])
         calls = {"n": 0}
 
         def _solve(*_a, **_k):
@@ -416,7 +434,7 @@ class TestFollowServiceGuards(unittest.TestCase):
         self.svc._active = True
         self.svc._target_q = self.svc._baseline_q.copy()
         held = self.svc._target_q.copy()
-        snap = self._snap(3, [0.5, 0.5, 0.5])
+        snap = _snap(3, [0.5, 0.5, 0.5])
         snap["status"] = "lost"                 # 丢目标：C++ 报 last-trustworthy，但 ok=False
         snap["has_pose"] = False
         self.svc._fetch_snapshot = lambda: snap
@@ -483,7 +501,7 @@ class TestFollowServiceGuards(unittest.TestCase):
         self.svc._smoother.reset()
         self.svc._smoother.push_target(self.svc._baseline_q)
         self.svc._target_q = self.svc._baseline_q.copy()
-        self.svc._fetch_snapshot = lambda: self._snap(1, [0.030, 0.0, 0.0])
+        self.svc._fetch_snapshot = lambda: _snap(1, [0.030, 0.0, 0.0])
         got = []
         self.svc.register_ws_callback(lambda m: got.append(m))
         self.svc._poll_once()                    # 解算 → keyframe 进队列
@@ -493,6 +511,136 @@ class TestFollowServiceGuards(unittest.TestCase):
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0]["type"], "follow_state")
         self.assertEqual(len(got[0]["data"]["joints_deg"]), 6)
+
+
+class TestDataPlane(unittest.TestCase):
+    """
+    数据面选路（推送 ⇄ 兜底轮询）。钉的是四条会安静出错的性质：
+    推送新鲜时轮询一次都不出网；推送变凉/没起来/被关掉时轮询立刻接管且说清原因；
+    两条路共用同一个 `_ingest`（否则同一帧会解出两个目标）；停订阅时不许持锁（真线上是死锁）。
+    """
+
+    def setUp(self):
+        self.svc = _stub_service()
+        self.svc._active = True
+        self.svc._target_q = self.svc._baseline_q.copy()
+        self.svc._push_enabled = True
+        # 用**真的** PoseStream 但不 start()：构造它不开 socket，而 `last_event_age()` /
+        # `stats()` 就走的真是实现。手写替身一旦和真类字段漂移，测试只剩自证。
+        self.stream = PoseStream("http://127.0.0.1:1", self.svc._on_push_snapshot)
+        self.svc._push = self.stream
+        self.fetched: list = []
+
+        def _fetch() -> dict:
+            self.fetched.append(1)
+            return _snap(len(self.fetched) + 1, [0.020, 0.0, 0.0])
+
+        self.svc._fetch_snapshot = _fetch
+
+    def _age(self, seconds) -> None:
+        """把订阅端的"最近一帧"打到 seconds 秒前；None = 一帧都没收到过。"""
+        self.stream._last_event_mono = 0.0 if seconds is None else time.monotonic() - seconds
+
+    def _stale(self) -> float:
+        return self.svc._push_stale_s + 1.0
+
+    def test_fresh_push_keeps_poller_off_the_network(self):
+        self._age(0.0)
+        self.svc._poll_once()
+        self.assertEqual(self.fetched, [], "推送活着还去拉：和推送抢同一份 C++ 快照")
+        dp = self.svc.status()["data_plane"]
+        self.assertEqual(dp["mode"], "push")
+        self.assertNotIn("reason", dp)                # 正常态不该有"为什么退化了"
+
+    def test_stale_push_hands_data_plane_back_to_poll(self):
+        self._age(self._stale())
+        self.svc._poll_once()
+        self.assertEqual(len(self.fetched), 1)
+        dp = self.svc.status()["data_plane"]
+        self.assertEqual(dp["mode"], "poll")
+        self.assertIn("退回轮询", dp["reason"])
+
+    def test_no_event_yet_still_polls(self):
+        """启动后的第一个 poll 周期里推送还不该被当成"活着"，否则闭环开局是瞎的。"""
+        self._age(None)
+        self.svc._poll_once()
+        self.assertEqual(len(self.fetched), 1)
+        self.assertIn("尚无一帧", self.svc.status()["data_plane"]["reason"])
+
+    def test_push_switch_off_is_pure_poll(self):
+        self.svc._push_enabled = False
+        self._age(0.0)                                 # 即便流上是新鲜的
+        self.svc._poll_once()
+        self.assertEqual(len(self.fetched), 1)
+        dp = self.svc.status()["data_plane"]
+        self.assertEqual(dp["mode"], "poll")
+        # 原因必须是"开关未开"，不是下游症状"线程未运行" —— 后者会把人支使去查根本没起的线程。
+        self.assertIn("开关未开", dp["reason"])
+
+    def test_reason_is_present_even_before_subscribe(self):
+        """没点"启动"时 `push` 子对象不存在，但 reason 键必须在：页面不该按调用历史分支渲染。"""
+        self.svc._push = None
+        dp = self.svc.status()["data_plane"]
+        self.assertEqual(dp["mode"], "poll")
+        self.assertIn("订阅未启动", dp["reason"])
+
+    def test_both_paths_funnel_into_one_ingest(self):
+        seen: list = []
+        self.svc._ingest = lambda snap: seen.append(snap)
+        self._age(0.0)
+        pushed = _snap(11, [0.010, 0.0, 0.0])
+        self.svc._on_push_snapshot(pushed)             # 推送这条路
+        self.svc._poll_once()                          # 推送新鲜 ⇒ 轮询不该再喂一次
+        self.assertEqual(seen, [pushed])
+        self._age(self._stale())
+        polled = _snap(12, [0.010, 0.0, 0.0])
+        self.svc._fetch_snapshot = lambda: polled
+        self.svc._poll_once()                          # 兜底这条路
+        self.assertEqual(seen, [pushed, polled], "两条路喂给的不是同一个入口或不是同一份载荷")
+
+    def test_pushed_frame_actually_moves_arm(self):
+        """推送帧必须走完整解算链：只测"回调被调了"不够，方向错了页面看起来仍在跟。"""
+        self._age(0.0)
+        self.svc._on_push_snapshot(_snap(1, [0.020, 0.0, 0.0]))
+        self.assertFalse(self.svc._ik_failed)
+        # R_cb = 单位阵 ⇒ 相机 X 平移原样落在基座 X 上：J1 应当离开基线
+        self.assertGreater(float(np.linalg.norm(self.svc._target_q - self.svc._baseline_q)), 1e-4)
+        self.assertEqual(self.svc._kf_queue.qsize(), 1, "解出的目标没进 33 Hz 发射链")
+
+    def test_push_snapshot_dropped_when_not_following(self):
+        """没在跟时来的帧不许写进缓存：否则"停止"之后页面还在显示一套没人用的位姿。"""
+        self.svc._active = False
+        self.svc._snapshot = {}
+        self.svc._on_push_snapshot(_snap(5, [0.5, 0.5, 0.5]))
+        self.assertEqual(self.svc._snapshot, {})
+
+    def test_stop_drops_the_stream_reference(self):
+        """停止后不许留着那条已死的流：否则状态会继续报"数据面=push"（打点还是新鲜的）。
+        这里把 setUp 的替身撤掉走真实 `_stop_stream`，只把 `PoseStream.stop` 换成记录器
+        —— join 线程不是本用例要测的东西，"引用被丢掉"才是。"""
+        self.svc.__dict__.pop("_stop_stream")
+        stopped: list = []
+        self.stream.stop = lambda: stopped.append(1)
+        self.svc._cpp = lambda kind, payload=None, timeout=1.0: (True, "", {"enabled": False})
+        ok, _msg = self.svc.stop()
+        self.assertTrue(ok)
+        self.assertEqual(stopped, [1], "没有真的停订阅线程：socket 会一直挂着")
+        self.assertIsNone(self.svc._push)
+        self.assertIn("订阅未启动", self.svc.status()["data_plane"]["reason"])
+
+    def test_stop_stream_runs_outside_service_lock(self):
+        """
+        真线上唯一的死锁成因：`_stop_stream` 要 join 读者线程，而那个线程的回调正等 `_lock`
+        —— 持锁来停就是互等到超时，而且只在"恰好有一帧正在投递"时复现。
+        判据用 `_is_owned()`（同线程、当场）：换"另一个线程去抢锁"的探针要么得非阻塞抢
+        （主线程随后又会拿锁 ⇒ 偶发假失败），要么给超时重试（bug 场景里最终也抢得到 ⇒ 白测）。
+        """
+        owned: list = []
+        self.svc._stop_stream = lambda: owned.append(self.svc._lock._is_owned())
+        self.svc._cpp = lambda kind, payload=None, timeout=1.0: (True, "", {"enabled": False})
+        ok, _msg = self.svc.stop()
+        self.assertTrue(ok)
+        self.assertEqual(owned, [False], "stop() 持着 _lock 调了 _stop_stream：真线上会死锁")
 
 
 if __name__ == "__main__":

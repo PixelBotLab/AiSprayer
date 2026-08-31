@@ -20,6 +20,9 @@ namespace {
 
 const std::string kRoot = "/tmp/follow_cfg_test";
 
+// yaml 里写度/毫秒，结构体里是弧度/纳秒 —— 换算只允许发生在 config_loader 一处。
+constexpr double kDeg2Rad = 3.14159265358979323846 / 180.0;
+
 std::string tmp(const std::string& name) { return kRoot + "/" + name; }
 
 void write_yaml(const std::string& name, const std::string& body) {
@@ -323,10 +326,22 @@ TEST(Config, RepoConfigIsValid) {
   ASSERT_TRUE(load_config("", &c, &err)) << err;
   const ConfigProblems p = check_config(&c, root);
   EXPECT_TRUE(p.ok()) << p.joined();
+  // 警告也算坏了：check_config 只对致命项 fail，键名打错会走"回落默认 + 一条警告"的路，
+  // 于是 yaml 与 struct 各说各话而单测全绿 —— 这类失效和陀螺时间域那个是同一形状。
+  EXPECT_EQ(p.warnings(), 0u) << p.joined();
   EXPECT_EQ(c.capture.width * c.capture.height, 640 * 480);  // 硬件 D2C 只有这一档
   EXPECT_FALSE(c.capture.allow_unaligned);
   EXPECT_EQ(c.arm_mode, "sim");
   EXPECT_EQ(c.arm_home_joints_deg.size(), 6u);
+
+  // 静止/零偏/缓冲这几项必须是 yaml 里的度/毫秒换算过来的，不是结构体默认值：
+  // 两边数值本来就不同（默认 enter 0.008 rad/s，yaml 0.45°/s ≈ 0.00785），撞对了才会绿。
+  EXPECT_NEAR(c.track.gyro_still.enter_rad_s, 0.80 * kDeg2Rad, 1e-9);
+  EXPECT_NEAR(c.track.gyro_still.exit_rad_s, 1.5 * kDeg2Rad, 1e-9);
+  EXPECT_GT(c.track.gyro_still.exit_rad_s, c.track.gyro_still.enter_rad_s) << "迟滞方向被配置写反了";
+  EXPECT_EQ(c.track.gyro_still.bias_bootstrap_samples, 100);
+  EXPECT_EQ(c.track.gyro_max_freeze_ms, 0);
+  EXPECT_EQ(c.track.gyro_horizon_ns, 1'000'000'000);
 }
 
 // 健康快照是 Python 门面唯一的观测口：NaN 不能变成非法 JSON 字面量，控制字符不能提前

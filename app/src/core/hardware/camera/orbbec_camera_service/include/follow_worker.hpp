@@ -4,11 +4,14 @@
 // ob::Pipeline —— 而本进程已经 take 了 .orbbec.lock，正是为了不让第二路取流存在。设备只有
 // 一条取流路径，所以 follow 消费 CameraDriver **已经在交付**的那一份对齐帧。代价写清楚，
 // 别留给下一个读代码的人猜：
-//   * 拿不到厂商 SDK 的设备时间戳。FrameData 上是主机毫秒时钟，粒度比 15 fps 的帧周期粗，
-//     于是"同一毫秒内的两帧"无法区分 —— 处理成丢帧（见 loop()），不造假 +1ns 时间。
-//   * 板载 IMU 陀螺仪由 CameraDriver 以 ~200Hz 独立流启动并读取硬件外参 T_cam_gyro，
-//     每帧配准前由 drainGyroSamples 注入跟踪器：①帧间旋转初值 ②离群帧互验门（P3）
-//     ③静止检测（P1：静止时旋转通道冻结）。示教期另做静止门（P2）。
+//   * 帧时间戳是本进程打的主机毫秒时钟（不是厂商设备时钟），粒度比 15 fps 的帧周期粗，于是
+//     "同一毫秒内的两帧"无法区分 —— 处理成丢帧（见 loop()），不造假 +1ns 时间。
+//   * 板载 IMU 陀螺仪由 CameraDriver 以 ~200Hz 独立流启动并读取硬件外参 T_cam_gyro；它的设备
+//     时间戳被 GyroTimeBase 平移到上面那个主机时钟域（不平移的话 follow 的积分窗口一个样本也
+//     框不到，而这没有任何外部症状 —— 见 gyro_time_base.hpp）。每帧配准前由 drainGyroSamples
+//     注入跟踪器，三个用途分别是：①帧间旋转初值 ②离群帧互验门（P3）—— 这两个在 libfollow 里；
+//     ③静止检测（P1）—— 检测器在 libfollow，**冻/解冻与冻结时限的策略在这个类里**。
+//     示教期另做静止门（P2）。
 //
 // 线程模型：一条自己的工作线程 + 一份 latest 快照（HTTP 侧只读快照，绝不在请求线程里算 GICP）。
 // 帧从 CameraDriver::getLatestFrame 取，**不能用 waitForNextFrame**：那个接口会推进驱动里的
@@ -32,6 +35,7 @@
 #include <opencv2/core.hpp>
 
 #include "camera_driver.hpp"
+#include "pose_broker.hpp"
 #include "follow/config_loader.hpp"
 #include "follow/frontend.hpp"
 #include "follow/odometry.hpp"
@@ -84,7 +88,19 @@ struct FollowSnapshot {
     uint64_t dropped = 0;             // 有新帧但没赶上（算不过来 / 时间戳同毫秒）
     uint64_t rejected = 0;            // 帧被守卫挡下（无深度、尺寸不符、对齐未开……）
     uint64_t rot_gated = 0;           // 被陀螺离群门拦下的帧数（P3：帧间旋转与陀螺积分不一致）
-    bool gyro_still = false;          // 陀螺确认相机静止：旋转通道已冻在冻结点上（P1）
+    bool gyro_still = false;          // 陀螺确认相机静止（P1 的判据本身，不代表真的冻住了）
+    bool rot_frozen = false;          // 旋转通道此刻**确实**冻在冻结点上：gyro_still 说"该冻"，
+                                      // 这条说"在冻"。两者分开才看得出冻结策略被时限掐断
+    int64_t frozen_ms = 0;            // 本次冻结已持续多久（时限兜底是否快要触发）
+    // ---- 陀螺通道自检：区分"这条链路坏了"和"链路好的、相机确实在动" ----
+    // P0 那类失效的特征就是：外部只看输出完全正常。所以每帧把决策依据摆出来。
+    bool gyro_time_ready = false;     // 设备→主机时间基定标已完成（未就绪时样本全被丢弃）
+    int gyro_buf = 0;                 // 跟踪器陀螺缓冲当前长度
+    int gyro_frame_samples = 0;       // 本帧积分窗口内真正用到的样本数
+    uint64_t gyro_dead_frames = 0;    // 连续"缓冲非空却积不到样本"的帧数 = 时间域不同的指纹
+    double gyro_bias_dps = 0.0;       // 静止检测器的零偏估计（度/秒）
+    double gyro_resid_dps = 0.0;      // 最近窗口残差模均值（度/秒），与 enter/exit 门限直接可比
+    bool gyro_bias_ready = false;     // 零偏仍在 bootstrap 阶段 ⇒ 静止结论还不可信
     int smooth_used = 0;              // 平均窗口里现在有几帧
 
     uint64_t map_hash = 0;            // 换工件、换体素都会变；重启后能确认还是那份基准
@@ -128,6 +144,12 @@ public:
 
     FollowSnapshot snapshot() const;
 
+    // 位姿数据面的推送钩子。HTTP 的 SSE 路由在这里 subscribe()/waitNewer()，然后**回头调
+    // snapshot()** 取内容 —— 因此拿到的内容可能比唤醒它的那个 rev 还新一帧（不会更旧）。
+    // 对"只关心当前位姿"的跟随闭环这是正确的取舍：宁可新一点，也不要为了严格一一对应而在
+    // broker 里再存一份快照。
+    PoseBroker& poseBroker() { return broker_; }
+
 private:
     void loop();
     // 档位切换线程体：setEnabled 受理的活在这里干完。失败原因落 switch_err_ 并写进快照，
@@ -139,6 +161,13 @@ private:
     // 一帧能不能拿去解算。**loop() 和 teach() 共用同一条判据**：如果示教用的帧是运行期会被
     // 拒掉的帧，那基准本身就建在坏数据上，之后每帧都在跟一个不该存在的东西比。
     bool frameUsable(const FrameData& fd, std::string* why) const;
+    // P1 静止冻结的**策略**：冻/解冻、单次冻结时限与解冻后的暂停期，就地改掉要显示的旋转通道
+    // （平移不动）。判据在 libfollow 的检测器里，但"最多冻多久"必须是墙上时钟 —— 本库不认时钟，
+    // 而它是唯一能把"恒定慢转被误判成零偏"的损害从无上界变成有界的机制，所以只能放这边。
+    void applyStillFreeze(bool gyro_still, int64_t now_ms, Eigen::Isometry3d* disp_T);
+    // 陀螺通道每帧自检。存在的理由只有一条：时间域错配的症状不是崩溃也不是丢帧，而是
+    // "陀螺看起来一直在动"，从输出上完全分辨不出来 ⇒ 必须主动把它变成一条有名有姓的 ERROR。
+    void checkGyroChannel(const follow::TrackResult& r);
 
     std::shared_ptr<CameraDriver> camera_;
     follow::FollowConfig cfg_;
@@ -178,6 +207,11 @@ private:
 
     FollowSnapshot snap_;
     mutable std::mutex snap_mutex_;
+    // 数据面推送。挂在这个类上而不是挂在 HttpServer 上，理由只有一条：**快照的唯一写者在这里**，
+    // 于是"写了快照"和"通知了订阅者"可以是同一个作用域（见 pose_broker.hpp 的 PublishOnRelease）。
+    // HTTP 侧只读它 —— 让它去猜"快照是不是又变了"就要轮询，而那正是这次要改掉的东西。
+    PoseBroker broker_;
+    int64_t last_no_frame_ms_ = 0;   // 无新帧分支上次重写快照的时刻（那条分支只动时间戳）
     // 配置坏掉时的"这台机器上 follow 跑不了"原因。由 main 在 start() 之前写一次，
     // 之后只读 ⇒ 借用 snap_mutex_ 保护（它和快照是一对必须一致的数据：状态说 disabled，原因也说为什么）。
     std::string blocked_reason_;
@@ -194,9 +228,16 @@ private:
     uint64_t still_frames_ = 0;  // 静止冻结生效的帧数（P1，退出静止时随摘要一起打）
     // P1 静止冻结：陀螺确认相机没在转时，旋转输出冻在冻结点上（平移照常更新）。
     // 冻住的是"进入静止那一刻的平滑旋转"，不是单帧值 —— 否则冻结本身会引入一次跳变。
+    // rot_frozen_ 是这件事唯一的事实来源：进入冻结必须置真，任何解冻（自然、时限、重建
+    // Tracker）必须置假。它曾经只被写 false 从没被写 true ⇒ 每帧重新采 frozen_R_，整个 P1
+    // 变成空转，而"检测到运动"那条日志成了死代码。
     bool rot_frozen_ = false;
     Eigen::Matrix3d frozen_R_ = Eigen::Matrix3d::Identity();
-    int64_t still_since_ms_ = 0;
+    int64_t frozen_since_ms_ = 0;          // 本次冻结起点（时限兜底按它算）
+    int64_t freeze_holdoff_until_ms_ = 0;  // 时限强制解冻后的暂停期：到点前不再冻
+    // 陀螺通道自检账本（见 checkGyroChannel）
+    uint64_t gyro_dead_frames_ = 0;        // 连续"缓冲非空却积不到样本"的帧数
+    bool gyro_dead_reported_ = false;      // 同一次故障只喊一遍，链路恢复后重新武装
     double last_log_norm_rad_s_ = 0.0;
     double fps_ = 0.0;
     int64_t fps_window_ms_ = 0;

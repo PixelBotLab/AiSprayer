@@ -101,18 +101,32 @@ struct TrackParams {
   //  ① 帧间旋转初值的第二档降级（见 track_impl，sparse 缺席时顶上）；
   //  ② P3 离群门：帧间旋转与陀螺积分互验，不一致的疑似坏帧不采纳（gyro_rot_gate_deg）；
   //  ③ P1 静止检测（still_det_）：相机没在转时旋转噪声被上层冻住，见 gyro_filter.hpp。
-  // 陀螺时间戳是硬件钟、帧时间戳在服务路径是主机毫秒：integrate_gyro 的窗口对齐因此存在
-  // 毫秒级误差，静止检测索性只走样本序列不碰绝对时间（GyroStillDetector）。
-  size_t gyro_buf_max = 4096;
+  // **①②依赖陀螺样本与帧时间戳同一时间域**：336L 的 getTimeStampUs 是"自开机 µs"（实测末值
+  // 1.57e9 µs），而服务路径的帧时间戳是主机 epoch 毫秒 —— 不同域时 ①② 静默全灭（积分窗口
+  // 一个样本都框不进来）。对齐在取流层做（camera_driver 的 gyro_ts_offset_ns_），这里只留
+  // tripwire：TrackResult::gyro_samples 恒为 0 而 gyro_buf 非空，就是那种失效的唯一外部痕迹。
+  size_t gyro_buf_max = 4096;         // 只作为乱序/异常时的兜底上限
   int64_t gyro_max_gap_ns = 100'000'000;
+  // 样本保留跨度 = 离群门允许判定的最长区间，**刻意是同一个数**：留得比门的区间短，门要积分
+  // 的那段样本已经被裁掉 ⇒ 门永远走"没样本所以不判"的退路，静默失效且无从发现。
+  // 1 s @200Hz = 200 条，代价可忽略；上界则受零偏漂移限制（几秒窗口里零偏本身就是门限量级）。
+  int64_t gyro_horizon_ns = 1'000'000'000;
 
-  // P3 离群门（度）：采纳帧的帧间旋转与同窗口陀螺积分的测地线距离超过它 ⇒ kRotGated。
+  // P3 离群门（度）：采纳帧的帧间旋转与**同一时间区间**陀螺积分的测地线距离超过它 ⇒ kRotGated。
   // 0 = 关闭。取 1.0°：正常帧两者差在噪声级（0.0几度），而一次真滑坡/坏帧至少是度级；
   // 退化场景里 GICP 的弱方向旋转留在初值上不动（见 track_impl 注释），与陀螺仍一致，不会误伤。
+  // 区间必须两边一致（见 track_impl 的 rot_gate）：视觉量的是"距上次采纳"，陀螺就得积分
+  // 同一段，否则一次误拦会自我放大成永久锁死。
   double gyro_rot_gate_deg = 1.0;
 
   // P1 静止检测（冻结旋转通道由消费方实施，这里只负责判"静没静"）。
   GyroStillDetector::Params gyro_still;
+
+  // 一次静止冻结的最长时限（毫秒，0 = 不限）。这是"恒定慢转与恒定零偏不可区分"的兜底：
+  // 检测器的零偏只在安静期更新，但再谨慎也架不住一段足够长的匀速转动被慢慢当成安静。
+  // 有这个上限，误冻的损害就是 `exit 门限 × 上限` 的有界台阶，解冻后靠平滑窗口自愈；
+  // 没有它，误判可以无限期挂着旋转输出。由消费方实施（本库不认墙上时钟）。
+  int gyro_max_freeze_ms = 1500;
 };
 
 struct TrackResult {
@@ -140,6 +154,15 @@ struct TrackResult {
   bool gyro_still = false;     // 陀螺确认相机没在转：消费方据此冻住旋转通道（P1）
   bool rot_gated = false;      // 本帧被 P3 离群门拦下：帧间旋转与陀螺积分不一致，未采纳
   double rot_gate_err_deg = 0.0;  // 互验的测地线距离，超门才拦；日志与调参看这个数
+  // 陀螺诊断字段。存在的唯一理由：陀螺的三种用途全都可能因为"时间域不一致 / IMU 停更 /
+  // 零偏没估出来"而静默变成没生效，而那时**其余一切看起来都正常**。消费方必须把这几个数
+  // 报出去（见 FollowSnapshot 的同名字段）。
+  int gyro_samples = 0;        // 本帧积分窗口内真正用到的样本数：缓冲非空而它恒为 0 ⇒ 时间域不同
+  int gyro_buf = 0;            // 陀螺缓冲当前长度（按 gyro_horizon_ns 裁剪后）
+  int gyro_pushed = 0;         // 本帧收到的新样本数：持续为 0 ⇒ IMU 停更/没起流（与时间戳无关）
+  double gyro_bias_rad_s = 0.0;  // 静止检测器当前的零偏估计（模）
+  double gyro_resid_rad_s = 0.0; // 最近窗口的残差模均值，与 enter/exit 门限直接可比
+  bool gyro_bias_ready = false;  // 零偏还在 bootstrap 阶段 ⇒ gyro_still 尚不可信
 };
 
 class Tracker {
@@ -147,8 +170,9 @@ class Tracker {
   // seed 固定 ⇒ RANSAC 可复现；测试里显式换种子做蒙特卡洛。
   explicit Tracker(TrackParams p, const ReferenceMap& map, uint32_t seed = 0x5EEDu);
 
-  // 336L 陀螺：与图像同一硬件时钟，rad/s，相机系。同时喂给静止检测器（只看向量模，
-  // 不碰时间轴），所以两个消费方永远吃同一份样本。
+  // 336L 陀螺：rad/s，相机系。**要求与 track() 的 ts_ns 同一时间域**（服务路径由取流层把设备
+  // 钟标到主机钟）；不同域时这里不会崩，但积分窗口框不到任何样本，①② 两档静默失效。
+  // 同一份样本也喂给静止检测器（它只用向量、不碰时间轴），所以两个消费方永远吃同一批数据。
   void push_gyro(int64_t ts_ns, const Eigen::Vector3d& omega_cam_rad_s);
 
   // curr 的 uv_px 必须是与 depth_mm 同一套内参下的全分辨率像素坐标。
@@ -173,7 +197,13 @@ class Tracker {
 
   Eigen::Isometry3d T_last_good_ = Eigen::Isometry3d::Identity();  // 对外报告的可信位姿
   Eigen::Isometry3d T_vel_ = Eigen::Isometry3d::Identity();        // 帧间运动（常数外推用）
+  // T_last_good_ 属于哪一帧。离群门拿"视觉相对上次采纳的旋转"去比，陀螺就必须积分同一段
+  // （last_good_ts_ns_ → 当前帧），不能只积一帧 —— 中间的帧被 hold 过就会两边区间不等长，
+  // 差值随被拦帧数线性增长 ⇒ 一次误拦自我放大成永久锁死。
+  int64_t last_good_ts_ns_ = 0;
+  bool have_last_good_ts_ = false;
   int sparse_streak_ = 0;  // 连续没有稠密确认的帧数
+  int gyro_this_frame_ = 0;  // push_gyro 累加、track() 归零：与时间戳无关的 IMU 存活计数
   GyroStillDetector still_det_;  // 与 gyro_ 同源样本；构造参数来自 TrackParams::gyro_still
 };
 

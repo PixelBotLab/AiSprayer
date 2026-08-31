@@ -1,0 +1,21 @@
+# Build artifacts and large binary files
+third_party/build/**
+third_party/install/**
+third_party/src/**/build/**
+third_party/src/**/release/**
+*.whl
+*.a
+*.so.*
+*.debug
+
+# Data files
+data/runs/**
+data/calib/**
+logs/**
+*.log
+
+# IDE and temp files
+.idea/
+.vscode/
+__pycache__/
+*.pyc

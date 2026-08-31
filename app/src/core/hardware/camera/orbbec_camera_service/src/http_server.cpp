@@ -5,6 +5,7 @@
 #include <opencv2/imgproc.hpp>
 #include <chrono>
 #include <cmath>
+#include "pose_broker.hpp"
 
 namespace orbbec_service {
 
@@ -27,6 +28,12 @@ bool HttpServer::start(int port) {
     port_ = port;
     server_ = std::make_unique<httplib::Server>();
 
+    // SSE 订阅者会**长期占用一个线程池线程**（provider 不返回 ⇒ 这条连接的 handler 不结束）。
+    // httplib 默认池是 max(8, cores-1)，本机 8 核 ⇒ 一共 8 路，而 follow stream 的上限就有 4 路：
+    // 几个残留客户端就能把控制面（开关/示教/状态）全排在后面，表象是"点了停止没反应"。
+    // 这些线程绝大多数时间在 CV 上睡着，多给十几个不花钱。
+    server_->new_task_queue = [] { return new httplib::ThreadPool(24); };
+
     setupRoutes();
 
     running_ = true;
@@ -43,6 +50,10 @@ void HttpServer::stop() {
     if (!running_) return;
 
     running_ = false;
+    // 先叫醒在等位姿的 SSE provider，再停 server：httplib 的 stop() 要等这些长连接的 handler 自己
+    // 结束，而 handler 每次醒来只做一次判定就回去接着睡。不先握手的话，每条残留连接都会让停机
+    // 多等一个心跳周期，而这条链路上唯一"该退出了"的信号只有 broker 能给。
+    if (follow_) follow_->poseBroker().shutdown();
     if (server_) {
         server_->stop();
     }
@@ -61,6 +72,54 @@ namespace {
 json finite_or_null(double v) {
     return std::isfinite(v) ? json(v) : json(nullptr);
 }
+
+// 一路 SSE 订阅占的名额。还名额有两个可能的时机：httplib 的 resource releaser（响应对象
+// 析构时）和这个 guard 自己的析构 —— 两者谁先到都必须只还一次，还不掉的话配额会被慢慢吃光，
+// 表现是"推送连上几次之后再也不让连"。
+class StreamSlot {
+public:
+    explicit StreamSlot(PoseBroker& broker) : broker_(broker.subscribe() ? &broker : nullptr) {}
+    ~StreamSlot() { release(); }
+    StreamSlot(const StreamSlot&) = delete;
+    StreamSlot& operator=(const StreamSlot&) = delete;
+    bool ok() const { return broker_ != nullptr; }
+    void release() {
+        if (broker_) {
+            broker_->unsubscribe();
+            broker_ = nullptr;
+        }
+    }
+
+private:
+    PoseBroker* broker_;   // 空 = 不持有名额（要么没抢到，要么已经还掉了）
+};
+
+/** 单调毫秒：只用来掐心跳节奏，所以不需要墙上时间。 */
+inline int64_t nowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// 一条连接的读游标。first 的意义：刚接上来的客户端必须先拿到**当前**这一帧，而不是等下一次
+// 快照写 —— 没有新帧时（相机挡着、还没示教）它至少要等一个心跳才有内容可看。
+struct StreamState {
+    uint64_t seen = 0;
+    bool first = true;
+    int64_t last_out_ms = 0;       // 上一次往这条连接写任何字节（事件或心跳）的时刻
+    /**
+     * 上一次**真的发出去**的那份快照的内容指纹。
+     * 按"快照被重写过"来发会虚胖一倍：worker 的空闲分支每 kIdleSleepMs 也要往前挪一次
+     * snapshot_ts_ms（实测 15 fps 的解算对着 30 事件/秒的流），而订阅者拿到的是除时钟外
+     * 逐字节相同的一帧。留着 frames + status 两个键当指纹：它们合起来覆盖"解出了一帧"和
+     * "状态变了（等待/受阻/丢目标）"两类真正需要立刻知道的事。
+     *
+     * 去重之后"等了 200ms 没人写快照"就不再等于"该发心跳了"：空闲重写照样把 waitNewer
+     * 叫醒，于是一条静止的流可以整秒不吐一个字节 —— 而对端的读超时只有几秒。所以心跳另按
+     * 墙上时间（last_out_ms）算，见 provider。
+     */
+    int64_t sent_frames = -1;
+    std::string sent_status;
+};
 
 }  // namespace
 
@@ -103,8 +162,19 @@ json HttpServer::followSnapshotJson(const FollowSnapshot& fs) {
     j["dropped"] = fs.dropped;
     j["rejected"] = fs.rejected;
     j["smooth_used"] = fs.smooth_used;
-    j["gyro_still"] = fs.gyro_still;   // 陀螺静止结论（P1：true 时旋转通道被冻结）
-    j["rot_gated"] = fs.rot_gated;     // 离群门累计拦截计数（P3）
+    j["gyro_still"] = fs.gyro_still;     // 陀螺的静止判据（P1）。注意它只是"该冻"，不等于"在冻"
+    j["rot_frozen"] = fs.rot_frozen;     // 旋转通道此刻真的被冻住（时限兜底或暂停期会让它 ≠ 上一条）
+    j["frozen_ms"] = fs.frozen_ms;       // 本次冻结已持续多久
+    j["rot_gated"] = fs.rot_gated;       // 离群门累计拦截计数（P3）
+    // 陀螺链路自检，单独一组：这几个字段是给"功能没生效"和"生效了但场景不对"分诊用的，
+    // 页面正常路径不读它们（gyro_still=false 到底是"相机在动"还是"根本没样本"，就看这里）。
+    j["gyro"] = {{"time_ready", fs.gyro_time_ready},   // 设备→主机时间基是否已定标
+                 {"buf", fs.gyro_buf},                 // 跟踪器缓冲长度
+                 {"samples", fs.gyro_frame_samples},   // 本帧积分窗口真正用到的样本数
+                 {"dead_frames", fs.gyro_dead_frames}, // 连续"有缓冲却积不到样本"的帧数
+                 {"bias_dps", fs.gyro_bias_dps},       // 零偏估计（度/秒）
+                 {"resid_dps", fs.gyro_resid_dps},     // 残差模均值（度/秒），静止门限比的是它
+                 {"bias_ready", fs.gyro_bias_ready}};  // false ⇒ 静止结论还不可信
 
     j["map_hash"] = fs.map_hash;
     j["map_voxels"] = fs.map_voxels;
@@ -531,6 +601,99 @@ void HttpServer::setupRoutes() {
         j["msg"] = "success";
         j["data"] = followSnapshotJson(follow_->snapshot());
         res.set_content(j.dump(), "application/json");
+    });
+
+    // 13. GET /api/v1/camera/follow/stream  (SSE，数据面)
+    //     位姿是"推"下来的，不再要调用方按周期来问。**控制面仍然是普通的 HTTP 请求/响应**
+    //     （开/关/示教都要一个明确的成败回执），这里搬走的只有实时位姿这一条流。
+    //
+    //     载荷 = followSnapshotJson()，和 /follow/status 的 data 字段逐字节同一份序列化。
+    //     两条路径共用一个函数不是图省事：否则"轮询看到的"和"推送看到的"迟早会漂移成两套字段，
+    //     而那种漂移都是靠前端"咦这个字段怎么没值"发现的，代价很高。
+    //
+    //     为什么是 SSE 而不是 WebSocket：本进程里的 httplib 0.18.3 没有服务端 WS（只有客户端），
+    //     而数据面是单向的 —— 双向能力在这里换不来任何东西，却要引入一次协议升级、一套帧编解码
+    //     和一处新的心跳/半开连接问题。SSE 就是"一个永不结束的 GET"，浏览器和 requests 都原生认。
+    //
+    //     重连**不补历史**：这是 latest-value 流，不是事件日志。跟随闭环只关心当前位姿，把中间
+    //     帧排队重放只会把网络抖动变成臂的抖动。要判断"我们是否真的跟上了流"，看载荷里的
+    //     frames（真正解算过的帧数，单调）而不是这里的 seq。
+    server_->Get("/api/v1/camera/follow/stream",
+                 [this, follow_unavailable](const httplib::Request& req, httplib::Response& res) {
+        if (!follow_) { follow_unavailable(res, "GET /api/v1/camera/follow/stream"); return; }
+        PoseBroker& broker = follow_->poseBroker();
+
+        // 先抢名额再挂 provider：满了就回一个明确的 503。让客户端"连上了但一帧都没有"是这里
+        // 最坏的失败方式 —— 它和"服务挂了""网络断了"在页面上长得一模一样。
+        auto slot = std::make_shared<StreamSlot>(broker);
+        if (!slot->ok()) {
+            json j;
+            j["code"] = -1;
+            j["msg"] = "follow stream 订阅已满（上限 " + std::to_string(PoseBroker::kMaxSubscribers) +
+                       "）：先关掉不再使用的订阅者";
+            res.status = 503;
+            res.set_content(j.dump(), "application/json");
+            LOG_WARN("HTTP", "GET /api/v1/camera/follow/stream -> 503（订阅已满）");
+            return;
+        }
+
+        const std::string last_id = req.get_header_value("Last-Event-ID");
+        auto st = std::make_shared<StreamState>();
+        st->seen = broker.revision();
+        res.set_header("Cache-Control", "no-cache");
+        // 中间有任何反代（nginx 默认会缓冲）都会把小帧攒成一大段，推送延迟直接变成"看不见"。
+        res.set_header("X-Accel-Buffering", "no");
+        LOG_INFO("HTTP", "follow stream 订阅接入（当前 ", broker.subscribers(), " 路，last-event-id=",
+                 last_id.empty() ? "-" : last_id, "）");
+
+        // provider 是在 handler **返回之后**才被反复调用的，所以闭包里只能放自己有生命周期的东西：
+        // 这里抓 follow_ 的副本（shared_ptr，把 worker 的命脉握在自己手里）而不是抓栈上引用。
+        auto follow = follow_;
+        res.set_chunked_content_provider(
+            "text/event-stream",
+            [follow, slot, st](size_t /*offset*/, httplib::DataSink& sink) -> bool {
+                PoseBroker& broker = follow->poseBroker();
+                // 每次被调用只做"一次唤醒 + 一次写"就返回。**绝不在 provider 里自己循环**：
+                // httplib 在每次调用 provider 之前检查 strm.is_writable()、之后检查是否正在停机，
+                // 所以"及时返回"就是对端断开和服务停机唯一的检测点。
+                if (broker.stopping()) { sink.done(); return true; }
+                const bool newer = broker.waitNewer(st->seen, PoseBroker::kHeartbeatMs);
+                if (newer) st->seen = broker.revision();   // 唤醒要用掉，哪怕这次什么都不发
+                json j = HttpServer::followSnapshotJson(follow->snapshot());
+
+                // 内容变了才发事件。**缺键即算变了**：序列化器哪天不再发 frames/status，
+                // 宁可退回"每 30ms 一帧重复"也别静默丢掉真正的新数据。
+                const bool changed =
+                    st->first || !j.contains("frames") || !j.contains("status") ||
+                    j["frames"].get<int64_t>() != st->sent_frames ||
+                    j["status"].get<std::string>() != st->sent_status;
+                // !newer 就是 waitNewer 自己超时了 ⇒ 该发心跳；newer 但内容没变时按墙上时间补
+                // （空闲重写会不停叫醒我们，光靠"超时"永远轮不到心跳）。
+                const bool ping_due = !newer || nowMs() - st->last_out_ms >= PoseBroker::kHeartbeatMs;
+                if (!changed && !ping_due) return true;
+
+                std::string head, body;
+                if (changed) {
+                    if (j.contains("frames")) st->sent_frames = j["frames"].get<int64_t>();
+                    if (j.contains("status")) st->sent_status = j["status"].get<std::string>();
+                    j["seq"] = st->seen;   // 全局快照写号：**不是**帧号，也不能当丢帧判据（见上）
+                    head = "id: " + std::to_string(st->seen) + "\n";
+                    body = "data: " + j.dump() + "\n\n";
+                    st->first = false;
+                } else {
+                    // 心跳：没有新内容时也要写字节。写失败 ⇒ 对端已经不在了，立刻结束这一路，
+                    // 名额随即回收（这是残留连接唯一会被发现的时刻）。
+                    static const char kPing[] = ": ping\n\n";
+                    body.assign(kPing, sizeof(kPing) - 1);
+                }
+                st->last_out_ms = nowMs();
+                if (!head.empty() && !sink.write(head.data(), head.size())) return false;
+                return sink.write(body.data(), body.size());
+            },
+            // chunked body 的生命周期比 handler 的栈帧长（provider 是在 handler 返回之后才被
+            // 反复调用的），所以名额不能靠 handler 里的栈对象归还。两处都会调：正常结束走
+            // releaser，写失败走 provider 返回 false —— slot 内部幂等，谁先到谁还。
+            [slot](bool /*success*/) { slot->release(); });
     });
 }
 

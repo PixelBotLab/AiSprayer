@@ -121,25 +121,40 @@ follow:
     zmin_m: 0.30
     zmax_m: 2.50                # 实测数据集深度 0.74~2.59 m
     depth_stride: 3
-    voxel_m: 0.015
+    voxel_m: 0.020
     max_corr_m: 0.035            # 实际生效门 = min(此值, 2.6*voxel_m)
     threads: 4                  # 绑 4 个 A76，不要 8
-    max_iters: 15
+    max_iters: 25
     min_cloud_points: 200
     min_gicp_inliers: 80
     trans_sigma_mm: 2.0         # 可观测门：好场景实测 0.15~0.19 mm
     rot_sigma_deg: 0.2
     group_anisotropy: 15.0      # 工件 8.9~10.1，整幅大平面 31.6/26.7
-    min_inlier_ratio: 0.30      # 低于此 = 出了示教包络，要重新示教而不是"跟丢"
+    min_inlier_ratio: 0.10      # 低于此 = 出了示教包络，要重新示教而不是"跟丢"
     max_sparse_streak: 15
-    gyro_rot_gate_deg: 1.0      # P3 离群门：帧间旋转与同窗口陀螺积分偏差超此值 ⇒ 坏帧不采纳（0=关）
+    gyro_rot_gate_deg: 10.0     # P3 离群门：帧间旋转与同窗口陀螺积分偏差超此值 ⇒ 坏帧不采纳（0=关，10°可防止快速连续转动时的多帧累积误伤）
+    # ---- P1 静止检测：判据是**减掉零偏之后的残差模**，不是 |ω| 本身 ----
+    # 336L 实测静止时 |ω| 平均 0.99°/s 且峰值≈均值（恒定值＝零偏，不是抖动）。旧版直接对 |ω|
+    # 设 1.15°/s 的门只剩 16% 余量，零偏一随温度漂就静默失效；减掉零偏后才压得到噪声级。
+    gyro_still_enter_dps: 0.80  # 残差低于它 ⇒ 连续 confirm 个样本后宣布静止（慢进）。
+                                # 原值 0.45：但外参使用 Identity（未能从 SDK 取到真实外参），
+                                # 导致不同相机姿态下零偏补偿残差可达 0.5~0.7°/s，需适当放宽
+    gyro_still_exit_dps: 1.5    # 残差高于它 ⇒ 立刻解冻（快出）。必须 > enter，否则迟滞消失
+    gyro_still_window: 20       # 均值窗口样本数（@200Hz=100ms）。按样本数不按毫秒：检测器不认时间轴
+    gyro_still_confirm: 20      # 进入静止要连续多少个样本低于 enter
+    gyro_bias_bootstrap: 100    # 开机/示教后前 N 个样本取累积均值当零偏（@200Hz=0.5s；示教完成时相机正静置在桌上，0.5s即可瞬间完成精确零偏定标，防止5秒过长导致拿起相机时的运动被误当成零偏）
+    gyro_bias_alpha: 0.001      # 之后只在安静期用小 α 的 EMA 跟热漂移（τ≈5s）。不门控会把匀速转动吸进零偏
+    gyro_max_freeze_ms: 0       # 单次冻结时限：0=不限。相机静止在桌上时持续冻结旋转通道，彻底消除周期性抖动/偶发微动
+    gyro_horizon_ms: 1000       # 陀螺缓冲跨度（1000ms 保证覆盖 USB 帧传输的 350~450ms 延迟抖动，避免缓冲被过早裁剪导致积分窗口框不到样本）
     sparse_inlier_dist_m: 0.02
     sparse_min_inliers: 12
 
   teach:
     map_path: "follow/out/reference.frmap"
-    frames: 10                  # 采集 10 帧做时间域深度均值去噪融合，消除初始散斑噪声
+    frames: 20                  # 采集 10 帧做时间域深度均值去噪融合，消除初始散斑噪声
     max_motion_deg_s: 2.0       # P2 示教静止门：收帧窗口内陀螺平均角速度超此值 ⇒ 拒绝示教（0=关，无 IMU 自动跳过）
+                                # 注意这里刻意用**绝对 |ω|**（示教时没有安静期可估零偏）：实测零偏
+                                # ≈0.99°/s，所以真正允许的"手不稳"额度只有 ~1°/s，别再往小调
 
   runtime:
     dry_run: true               # 只打印修正量，不发臂。P5 控制层接入前 false 也会被强制回 true
@@ -161,7 +176,14 @@ follow:
                                 # 手眼标定缺失/为 eye-in-hand 时的退路 R_cb：基座系下相机轴朝向
                                 #   [rx,ry,rz]，R = Rz·Ry·Rx，单位度。这是**降级**（方向会有偏差），
                                 #   用的是哪一个会写进状态的 r_cb_source，不会悄悄生效
-    poll_hz: 20                 # 后端拉相机服务快照的频率（1~50）：keyframe 的产生速率，不是页面刷新率
+    poll_hz: 20                 # **兜底**轮询率（1~50）：只在推送判为不活跃时生效，见下面 push/push_stale_ms。
+                                #   数据面已改为相机服务**推**（SSE /api/v1/camera/follow/stream），
+                                #   控制面（启动/调零/停止/示教）仍是原来的 HTTP 请求-响应，没动
     emit_hz: 33                 # 仿真臂 joints 发射频率：关节空间限速插值后按此频率推给页面（5~100）
+    push: true                  # 实时位姿走服务端推送；false = 退回纯轮询（服务端没编到该路由时用，
+                                #   行为与改动前完全一致）。关掉它不会让跟随变差，只是不再低延迟
+    push_stale_ms: 400          # 推送连续静默多久就判"此刻不算数"、由 poll_hz 接管（200~5000）。
+                                #   下限要容得下服务端 200ms 心跳 + 一帧周期（15fps≈66ms）；
+                                #   留太长的后果是臂跟着一个半秒前的位姿走，那比延迟高更糟
     max_joint_vel_deg_s: 90.0   # 平滑器限速：插值段时长由它决定，保证相邻发射点关节角变化率不超此值
     teach_save_map: true        # 示教时把参考地图落盘到 teach.map_path（false = 只在内存里，重启即失）

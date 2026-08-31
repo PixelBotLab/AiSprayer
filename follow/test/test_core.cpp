@@ -409,9 +409,62 @@ TEST(Gyro, EmptyAndOutOfWindowBuffersAreNotSilentlyUsable) {
   EXPECT_TRUE(d.stale);
 }
 
+// P0-1 回归：陀螺用设备单调钟、帧用主机 epoch，两者差 6 个数量级时积分窗口一个样本都框
+// 不进来，而**输出看起来完全正常** —— 三档初值的第 2 档、离群门、静止冻结全部静默停摆。
+// 对齐在取流层做，本库不认墙上时钟，所以这里能测的是它的两个可测面：失效留下的唯一痕迹
+// 恰好是 FollowWorker::checkGyroChannel 赖以报警的那条指纹；以及平移原点之后积分真的恢复。
+TEST(Gyro, ClockDomainMismatchIsSilentButLeavesExactlyTheTripwireFingerprint) {
+  // 实测量级（follow_probe_device）：336L 的 getTimeStampUs 末值 1.57e9 µs ≈ 上电 26 min；
+  // 主机 system_clock epoch ≈ 1.788e18 ns。混用的代价就是这个倍数。
+  constexpr int64_t kHostEpochNs = 1'788'000'000'000'000'000LL;
+  constexpr int64_t kDeviceNs = 1'570'000'000'000LL;
+  constexpr int64_t kFrameNs = 66'000'000;   // 15 fps
+  constexpr int64_t kGyroNs = 5'000'000;     // 200 Hz
+  constexpr double kW = 0.5;                 // rad/s 绕 Z
+
+  std::vector<GyroSample> device_buf;
+  for (int i = 0; i < 40; ++i) {
+    device_buf.push_back(GyroSample{kDeviceNs + i * kGyroNs, Eigen::Vector3d(0, 0, kW)});
+  }
+  ASSERT_FALSE(device_buf.empty());
+
+  const int64_t t0 = kHostEpochNs;
+  const int64_t t1 = kHostEpochNs + kFrameNs;
+  const GyroDelta dead = integrate_gyro(device_buf, t0, t1);
+
+  // 静默：不崩、不 NaN，只是"没有样本"。这就是它在页面上和"相机没动"长得一样的原因。
+  EXPECT_EQ(dead.samples_used, 0) << "两域错位本该框不到任何样本";
+  EXPECT_TRUE(dead.stale);
+  EXPECT_FALSE(dead.valid());
+  EXPECT_EQ(dead.span_ns, 0);
+  EXPECT_EQ(dead.gap_end_ns, t1 - t0) << "零覆盖时缺口应正好等于整个请求区间";
+  // 指纹：缓冲非空（IMU 在跑）而窗口积不到 ⇒ 时间域不同。checkGyroChannel 判的是这一**对**，
+  // 而不能只看 gap_end —— 单看它分不出"IMU 停更"和"两域错位"，两者都让 samples_used 为 0，
+  // 但前者该去查取流、后者该去查时间基，处置完全不同。
+  EXPECT_GT(device_buf.size(), 0u);
+
+  // 修法：只平移原点、保留设备 dt。（取到达时间打戳会把 burst 内的 dt 压成 0，那是另一种
+  // 静默少算 —— 见 gyro_time_base.hpp。）offset 让最后一条设备样本落在帧前 5 ms。
+  const int64_t offset = t0 - kDeviceNs - kGyroNs;
+  std::vector<GyroSample> host_buf;
+  for (const GyroSample& s : device_buf) {
+    host_buf.push_back(GyroSample{s.ts_ns + offset, s.omega_cam_rad_s});
+  }
+  const GyroDelta fixed = integrate_gyro(host_buf, t0, t1);
+  EXPECT_GT(fixed.samples_used, 0) << "平移后仍积不到样本：修的就不是域问题了";
+  EXPECT_TRUE(fixed.valid());
+  EXPECT_LT(fixed.gap_end_ns, kGyroNs) << "IMU 其实很新，不该报大缺口";
+  // 角度与已覆盖时长严格成比例 ⇒ 设备 dt 没被换算吃掉。
+  const Eigen::Matrix3d expect =
+      Eigen::AngleAxisd(kW * static_cast<double>(fixed.span_ns) * 1e-9, Eigen::Vector3d::UnitZ())
+          .toRotationMatrix();
+  EXPECT_LT((fixed.R - expect).norm(), 1e-9);
+}
+
 // ---------------------------------------------------------------- 陀螺静止检测器（P1）
-// 契约：窗口没攒满前不表态；进入静止要连续确认（慢进）；退出只需窗口均值超 exit（快出）。
-// 退路是写死的：上电头 100 ms 报静止会把真正的初始运动冻掉。
+// 契约：判据是"减掉零偏后的残差模"；窗口没攒满前不表态；进入静止要连续确认（慢进）；
+// 退出只需一个窗口均值超 exit（快出）。退路是写死的：上电头 100 ms 报静止会把真正的
+// 初始运动冻掉。零偏两阶段（累积均值 → 只在安静期 EMA），见 gyro_filter.hpp 类头。
 
 TEST(GyroStill, NoVerdictBeforeWindowIsFull) {
   GyroStillDetector d;  // window_samples = 20
@@ -425,7 +478,7 @@ TEST(GyroStill, NoVerdictBeforeWindowIsFull) {
 }
 
 TEST(GyroStill, StillNeedsSustainedQuietAndExitsFast) {
-  GyroStillDetector d;  // enter=0.02, exit=0.05, window=20, confirm=20
+  GyroStillDetector d;  // enter=0.008, exit=0.017, window=20, confirm=20
   const Eigen::Vector3d quiet(0.005, 0.0, 0.0);
   // 攒满窗口（20 推）后还要连续确认：第 38 推时 confirm=19，差一推不许表态。
   for (int i = 0; i < 38; ++i) {
@@ -435,7 +488,9 @@ TEST(GyroStill, StillNeedsSustainedQuietAndExitsFast) {
   EXPECT_FALSE(d.still()) << "确认推数不够就宣布静止 = 迟进失效";
   d.push(quiet);
   EXPECT_TRUE(d.still());
-  EXPECT_LT(d.recent_norm_rad_s(), 0.02);
+  // 恒定输入在累积均值下残差≈0：这正是"零偏不当运动"的第一半，见下面的专门用例。
+  EXPECT_LT(d.recent_resid_rad_s(), GyroStillDetector::Params{}.enter_rad_s);
+  EXPECT_NEAR(d.bias_rad_s(), 0.005, 1e-9);
 
   // 迟滞：enter < 均值 < exit 的抖动不解冻（实测相机放稳时的陀螺抖动落在这条带里）。
   for (int i = 0; i < 5; ++i) {
@@ -454,6 +509,52 @@ TEST(GyroStill, StillNeedsSustainedQuietAndExitsFast) {
   EXPECT_FALSE(d.still());
 }
 
+// 这一条是整个改写存在的理由：336L 实测静止时 |ω| ≈ 0.99°/s（≈0.0173 rad/s）且峰值≈均值，
+// 即"恒定零偏"。旧版直接对 |ω| 设 1.15°/s 的门，余量 16%，零偏一漂就静默失效（永远判不出
+// 静止 → P1 冻结从不触发，且外部看不出来）。减掉零偏后同样的输入必须判成静止。
+TEST(GyroStill, MeasuredConstantBiasIsNotMistakenForMotion) {
+  GyroStillDetector::Params p;
+  p.bias_bootstrap_samples = 100;  // 缩短 bootstrap，让用例能在几百推内跑完
+  GyroStillDetector d(p);
+  const Eigen::Vector3d bias(0.0173, -0.0011, 0.0006);  // 模 ≈ 0.99°/s
+  std::mt19937 rng(7);
+  std::normal_distribution<double> jitter(0.0, 0.0005);  // 静止噪声级
+  for (int i = 0; i < 300; ++i) {
+    d.push(Eigen::Vector3d(bias.x() + jitter(rng), bias.y() + jitter(rng), bias.z() + jitter(rng)));
+  }
+  EXPECT_TRUE(d.bias_ready());
+  EXPECT_GT(d.bias_rad_s(), 0.01) << "零偏没学到了实测的量级";
+  EXPECT_TRUE(d.still()) << "恒定零偏被当成了运动：P1 冻结将永久失效";
+  EXPECT_LT(d.recent_resid_rad_s(), p.enter_rad_s);
+
+  // 零偏之上叠加真转动（0.05 rad/s ≈ 2.9°/s）：必须立刻不算静止。
+  for (int i = 0; i < 40; ++i) {
+    d.push(bias + Eigen::Vector3d(0.05, 0.0, 0.0));
+  }
+  EXPECT_FALSE(d.still()) << "叠加真转动后还判静止 = 门限形同虚设";
+}
+
+// 零偏学习必须被"安静"门控住：否则一段匀速转动会被 EMA 慢慢吸进零偏，转完再也判不出静止
+// —— 那是比"判不出静止"更糟的状态（把运动当成了设备本身的偏置，永久污染）。
+TEST(GyroStill, BiasDoesNotAbsorbSustainedRotationAfterBootstrap) {
+  GyroStillDetector::Params p;
+  p.bias_bootstrap_samples = 100;
+  GyroStillDetector d(p);
+  for (int i = 0; i < 200; ++i) {
+    d.push(Eigen::Vector3d(0.002, 0.0, 0.0));  // 安静期：零偏锁到 0.002
+  }
+  ASSERT_TRUE(d.bias_ready());
+  ASSERT_TRUE(d.still());
+  const double bias_before = d.bias_rad_s();
+
+  // 持续转动 20 万样本（≈17 分钟 @200Hz）：不门控的 EMA 早就把它吸进去了。
+  for (int i = 0; i < 200000; ++i) {
+    d.push(Eigen::Vector3d(0.0, 0.0, 0.2));
+  }
+  EXPECT_FALSE(d.still()) << "匀速转动中报静止";
+  EXPECT_NEAR(d.bias_rad_s(), bias_before, 0.002) << "零偏把一段持续转动吸了进去";
+}
+
 TEST(GyroStill, NaNSamplesAreDroppedNotAveraged) {
   GyroStillDetector d;
   // 先攒进静止；之后 NaN 样本必须被挡在窗口外，而不是把均值毒成 NaN。
@@ -466,7 +567,8 @@ TEST(GyroStill, NaNSamplesAreDroppedNotAveraged) {
     d.push(Eigen::Vector3d(nan, nan, nan));
   }
   EXPECT_TRUE(d.still()) << "NaN 样本把静止结论毒掉了";
-  EXPECT_TRUE(std::isfinite(d.recent_norm_rad_s()));
+  EXPECT_TRUE(std::isfinite(d.recent_resid_rad_s()));
+  EXPECT_TRUE(std::isfinite(d.bias_rad_s())) << "NaN 进了零偏估计：它不会自己漂出去";
 }
 
 TEST(GyroStill, ContradictoryParamsAreClampedAtConstruction) {

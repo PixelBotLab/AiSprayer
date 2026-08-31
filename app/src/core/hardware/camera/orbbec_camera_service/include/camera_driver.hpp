@@ -11,6 +11,7 @@
 #include <opencv2/core.hpp>
 #include "types.hpp"
 #include "logger.hpp"
+#include "gyro_time_base.hpp"
 #include "follow/device_lock.hpp"
 #include "follow/types.hpp"
 
@@ -67,6 +68,14 @@ public:
     bool drainGyroSamples(std::vector<follow::GyroSample>* out);
     bool hasImu() const { return has_imu_; }
 
+    // 陀螺时间基（见 gyro_time_base.hpp）。未就绪时 drainGyroSamples 必然交不出样本，
+    // 而"IMU 在跑"和"样本能用于积分"是两件事 —— 只报 hasImu() 会把前者当成后者，
+    // 于是域不同这种故障在外部看起来就是"陀螺一直在动"，所以这几个数必须能读出来。
+    bool gyroTimeBaseReady() const { return gyro_time_base_.ready(); }
+    int64_t gyroTimeOffsetNs() const { return gyro_time_base_.offset_ns(); }
+    int64_t gyroTimeSpreadNs() const { return gyro_time_base_.spread_ns(); }
+    uint64_t gyroDroppedBeforeReady() const { return gyro_time_base_.dropped_before_ready(); }
+
 private:
     void captureLoop();
     bool tryConnectDevice();
@@ -107,6 +116,9 @@ private:
     Eigen::Matrix3d R_cam_gyro_ = Eigen::Matrix3d::Identity();
     Eigen::Vector3d t_cam_gyro_ = Eigen::Vector3d::Zero();
     bool has_imu_ = false;
+    // 陀螺样本进队列前一律换算到"和 FrameData::timestamp_ms 同一个域"（主机 ns）。
+    // 忘了这一步的后果不是崩溃而是静默：follow 的积分窗口框不到任何样本。
+    GyroTimeBase gyro_time_base_;
 
     // 独占设备的进程间仲裁。**必须在 make_unique<ob::Context>() 之前拿到**：拿不到就不碰 SDK，
     // 交给现有的 1500 ms 重连循环去等，而不是两路 pipeline 抢同一颗 USB 设备。

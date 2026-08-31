@@ -79,7 +79,7 @@ follow::TrackParams FollowWorker::trackParamsForCurrentStream() const {
 }
 
 void FollowWorker::setBlocked(const std::string& reason) {
-    std::lock_guard<std::mutex> lock(snap_mutex_);
+    PublishOnRelease lock(snap_mutex_, broker_);   // 出作用域即发布：见 pose_broker.hpp
     blocked_reason_ = reason;
     snap_.enabled = false;
     snap_.status = "disabled";
@@ -87,6 +87,8 @@ void FollowWorker::setBlocked(const std::string& reason) {
 }
 
 std::string FollowWorker::blockedReason() const {
+    // 只读 ⇒ 故意用 lock_guard 而不是 PublishOnRelease：读一次就把订阅者叫醒，等于把轮询
+    // 伪装成推送，白推一堆内容没变的帧。全类只有这一处和 snapshot() 是纯读。
     std::lock_guard<std::mutex> lock(snap_mutex_);
     return blocked_reason_;
 }
@@ -124,7 +126,7 @@ bool FollowWorker::setEnabled(bool enabled, std::string* err, bool* busy) {
     }
     switching_ = true;
     {
-        std::lock_guard<std::mutex> lock(snap_mutex_);
+        PublishOnRelease lock(snap_mutex_, broker_);   // 出作用域即发布：见 pose_broker.hpp
         snap_.switching = true;
         snap_.status = "switching";
         snap_.reason = enabled
@@ -149,7 +151,7 @@ void FollowWorker::switchTask(bool enable) {
     }
     switching_ = false;
     {
-        std::lock_guard<std::mutex> lock(snap_mutex_);
+        PublishOnRelease lock(snap_mutex_, broker_);   // 出作用域即发布：见 pose_broker.hpp
         snap_.switching = false;
         if (!ok) {
             snap_.status = "disabled";
@@ -181,7 +183,7 @@ bool FollowWorker::doDisable(std::string* err) {
         // "停机前的最后一帧"当实时值。档位字段一起更新，因为"退回 hardware.camera"正是
         // 这次操作要确认的结果。
         const CameraStatus cst = camera_->getStatus();
-        std::lock_guard<std::mutex> lock(snap_mutex_);
+        PublishOnRelease lock(snap_mutex_, broker_);   // 出作用域即发布：见 pose_broker.hpp
         snap_.enabled = false;
         snap_.status = "disabled";
         snap_.estimator = "none";
@@ -236,7 +238,7 @@ bool FollowWorker::doEnable(std::string* err) {
         // 同上：这次响应的 status 不能还停留在上一轮的 disabled。taught 决定下一步该点哪个。
         // 只碰 snap_mutex_ —— 和 state_mutex_ 嵌套会与工作线程的取锁顺序相反。
         const CameraStatus cst = camera_->getStatus();
-        std::lock_guard<std::mutex> lock(snap_mutex_);
+        PublishOnRelease lock(snap_mutex_, broker_);   // 出作用域即发布：见 pose_broker.hpp
         snap_.enabled = true;
         snap_.taught = have_map;
         snap_.status = have_map ? "no_frame" : "no_map";
@@ -308,6 +310,72 @@ bool FollowWorker::frameUsable(const FrameData& fd, std::string* why) const {
         return false;
     }
     return true;
+}
+
+void FollowWorker::applyStillFreeze(bool gyro_still, int64_t now_ms, Eigen::Isometry3d* disp_T) {
+    constexpr int kGyroFreezeHoldoffMinMs = 200;  // 时限设成 0 附近时暂停期不能跟着塌成 0
+
+    // 时限兜底排在最前：恒定慢转与恒定零偏在数学上是同一个信号，检测器再谨慎也架不住一段足够
+    // 长的匀速转动被判成安静。到点强制解冻并暂停同样长的一段时间，误冻的代价就从"旋转输出无限
+    // 期不更新"变成"每两个周期各丢一半更新"，且不需要人来介入 —— 这是这条链路上唯一的有界性。
+    const int cap_ms = cfg_.track.gyro_max_freeze_ms;
+    if (rot_frozen_ && cap_ms > 0 && now_ms - frozen_since_ms_ >= cap_ms) {
+        const int hold_ms = std::max(kGyroFreezeHoldoffMinMs, cap_ms);
+        LOG_WARN("Follow", "静止冻结到达时限 ", cap_ms, " ms：强制解冻并暂停 ", hold_ms,
+                 " ms 不再冻结（恒定慢速转动与陀螺零偏不可区分，这是唯一有界的兜底）。本次冻住"
+                 "旋转 ", still_frames_, " 帧；残差与零偏见 /follow/status 的 gyro_* 字段");
+        rot_frozen_ = false;
+        freeze_holdoff_until_ms_ = now_ms + hold_ms;
+        still_frames_ = 0;
+    }
+
+    if (!gyro_still) {
+        if (rot_frozen_) {
+            LOG_INFO("Follow", "陀螺检测到运动：旋转通道解冻（本次冻结 ", still_frames_, " 帧 / ",
+                     (now_ms - frozen_since_ms_), " ms，其间旋转抖动被整体抹掉）");
+            rot_frozen_ = false;
+            still_frames_ = 0;
+        }
+        return;
+    }
+    if (now_ms < freeze_holdoff_until_ms_) {
+        return;  // 暂停期内不冻：否则时限兜底会退化成"每隔 cap 毫秒抖动一次"的循环
+    }
+    if (!rot_frozen_) {
+        rot_frozen_ = true;
+        // 冻在"进入静止那一刻的平滑旋转"上。取单帧值会把冻结本身变成一次跳变。
+        frozen_R_ = disp_T->rotation();
+        frozen_since_ms_ = now_ms;
+        still_frames_ = 0;
+        LOG_INFO("Follow", "陀螺确认静止：旋转通道冻结（冻在进入静止时的平滑旋转上，平移照常更新；"
+                 "最长 ", cap_ms, " ms）");
+    }
+    disp_T->linear() = frozen_R_;
+    ++still_frames_;
+}
+
+void FollowWorker::checkGyroChannel(const follow::TrackResult& r) {
+    constexpr uint64_t kDeadFramesAlarm = 30;  // ≈2 s @15fps：够跨过一帧抖动，又不至于拖太久
+
+    // 指纹只有一条：缓冲里有样本（push_gyro 在收）而积分窗口一个都没框到（两个时钟不在同一
+    // 个域，或窗口长度超过了缓冲跨度）。这两种情况的处置完全不同 —— 后者是 gyro_horizon_ms
+    // 设小了，前者是 gyro_time_base_ 没定标 —— 所以报错文本里把定标状态一起打出来。
+    if (r.gyro_buf <= 0 || r.gyro_samples > 0) {
+        gyro_dead_frames_ = 0;
+        gyro_dead_reported_ = false;  // 链路活着时重新武装：下一次故障还得喊
+        return;
+    }
+    ++gyro_dead_frames_;
+    if (gyro_dead_frames_ < kDeadFramesAlarm || gyro_dead_reported_) {
+        return;
+    }
+    gyro_dead_reported_ = true;
+    LOG_ERROR("Follow", "陀螺通道嫌疑失效：缓冲 ", r.gyro_buf, " 条样本，却连续 ",
+              gyro_dead_frames_, " 帧的积分窗口一个样本都没框到 ⇒ 帧与陀螺不在同一时间域"
+              "（时间基定标 ", (camera_->gyroTimeBaseReady() ? "已完成" : "未完成"),
+              "，offset=", camera_->gyroTimeOffsetNs() / 1000000, " ms，定标前丢弃 ",
+              camera_->gyroDroppedBeforeReady(), " 条）。后果不是崩溃而是静默降级：帧间旋转初值"
+              "与离群门都不起作用，只有静止检测还在工作（它不看时间轴）。");
 }
 
 bool FollowWorker::teach(bool save_map, std::string* err) {
@@ -450,7 +518,7 @@ bool FollowWorker::teach(bool save_map, std::string* err) {
     // 页面"调零"按钮唯一信任的即时反馈，返回 taught=false 会让一次成功的示教看起来像失败。
     // 位姿类字段仍然只由工作线程写 —— 这里只补示教自己负责的那几项。
     {
-        std::lock_guard<std::mutex> lock(snap_mutex_);
+        PublishOnRelease lock(snap_mutex_, broker_);   // 出作用域即发布：见 pose_broker.hpp
         snap_.enabled = enabled_.load();
         snap_.taught = true;
         snap_.map_hash = hash;
@@ -498,6 +566,10 @@ void FollowWorker::loop() {
             quiet_max_dr_ = 0.0;
             rot_frozen_ = false;   // Tracker 重建 ⇒ 静止检测器也归零，旧冻结点不属于新档位/新图
             still_frames_ = 0;
+            frozen_since_ms_ = 0;
+            freeze_holdoff_until_ms_ = 0;   // 暂停期属于旧检测器那一轮，别把它带过来
+            gyro_dead_frames_ = 0;
+            gyro_dead_reported_ = false;
             if (map && !map->empty() && frontend_) {
                 tracker_ = std::make_unique<follow::Tracker>(trackParamsForCurrentStream(), *map,
                                                              kTrackerSeed);
@@ -524,7 +596,7 @@ void FollowWorker::loop() {
             }
             const CameraStatus cst = camera_->getStatus();
             const bool in_calib = camera_->isCalibrationMode();
-            std::lock_guard<std::mutex> lock(snap_mutex_);
+            PublishOnRelease lock(snap_mutex_, broker_);   // 出作用域即发布：见 pose_broker.hpp
             snap_.enabled = false;
             snap_.connected = camera_->isConnected();
             snap_.status = "disabled";
@@ -552,7 +624,7 @@ void FollowWorker::loop() {
         }
 
         if (!tracker_) {
-            std::lock_guard<std::mutex> lock(snap_mutex_);
+            PublishOnRelease lock(snap_mutex_, broker_);   // 出作用域即发布：见 pose_broker.hpp
             snap_.enabled = true;
             snap_.connected = camera_->isConnected();
             snap_.taught = false;
@@ -574,7 +646,14 @@ void FollowWorker::loop() {
         FrameData fd;
         if (!camera_->getLatestFrame(fd) || (have_frame_index_ && fd.frame_index == last_frame_index_)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(kWaitFrameSleepMs));
-            std::lock_guard<std::mutex> lock(snap_mutex_);
+            // 4ms 的轮询节奏是为了"新帧一来就动手"，但**没有新帧时没必要同样频繁地重写快照**：
+            // 这条分支只把 snapshot_ts_ms 往前挪，内容一个字没变。而现在重写一次快照就等于对外
+            // 推一帧（发布挂在快照写上）⇒ 不拦的话会以 250Hz 推同一个位姿，把真正"位姿变了"的
+            // 那几帧挤在一大片"时间变了"里。退回和其他空闲分支同量级的 30ms 报活节奏。
+            const int64_t now_report_ms = steady_now_ms();
+            if (now_report_ms - last_no_frame_ms_ < kIdleSleepMs) continue;
+            last_no_frame_ms_ = now_report_ms;
+            PublishOnRelease lock(snap_mutex_, broker_);   // 出作用域即发布：见 pose_broker.hpp
             snap_.enabled = true;
             snap_.connected = camera_->isConnected();
             // 只有本来就"没有任何读数"时才改成 no_frame：算完一帧之后 status 是本帧真结果，
@@ -592,7 +671,7 @@ void FollowWorker::loop() {
         std::string why;
         if (!frameUsable(fd, &why)) {
             ++rejected_;
-            std::lock_guard<std::mutex> lock(snap_mutex_);
+            PublishOnRelease lock(snap_mutex_, broker_);   // 出作用域即发布：见 pose_broker.hpp
             snap_.enabled = true;
             snap_.connected = true;
             snap_.rejected = rejected_;
@@ -614,7 +693,7 @@ void FollowWorker::loop() {
         const int64_t ts_ns = static_cast<int64_t>(fd.timestamp_ms) * 1000000;
         if (ts_ns <= last_ts_ns_) {
             ++dropped_;
-            std::lock_guard<std::mutex> lock(snap_mutex_);
+            PublishOnRelease lock(snap_mutex_, broker_);   // 出作用域即发布：见 pose_broker.hpp
             snap_.dropped = dropped_;
             snap_.snapshot_ts_ms = steady_now_ms();
             continue;
@@ -635,13 +714,19 @@ void FollowWorker::loop() {
         const double ms = static_cast<double>(steady_now_ms() - t0);
         ++frames_;
 
-        // P3 离群门：帧间旋转与同窗口陀螺积分偏差超门限 ⇒ 这帧不采纳（Tracker 已 hold 上一可信值）。
-        // 坏帧通常成串出现（遮挡抖动、反光闪烁），每一帧都记一笔，事后按累计数看严重程度。
+        // 陀螺通道自检：时间域错配没有任何输出上的症状，只能主动查（见 checkGyroChannel）。
+        checkGyroChannel(r);
+
+        // P3 离群门：帧间旋转与同区间陀螺积分偏差超门限 ⇒ 这帧不采纳（Tracker 已 hold 上一可信值）。
+        // 计数逐帧准确，日志节流：坏帧通常成串出现（遮挡抖动、反光闪烁），每帧一条 WARN 会把
+        // 真正要看的遥测行冲掉，而日志落在板上还抢 IO。第一条必打，之后每 10 条打一条。
         if (r.rot_gated) {
             ++rot_gated_;
-            LOG_WARN("Follow", "离群门拦下坏帧：帧间旋转与陀螺积分偏差 ", r.rot_gate_err_deg,
-                     "° > ", cfg_.track.gyro_rot_gate_deg, "°，保持上一可信位姿（累计 ",
-                     rot_gated_, " 帧）");
+            if (rot_gated_ == 1 || rot_gated_ % 10 == 0) {
+                LOG_WARN("Follow", "离群门拦下坏帧：帧间旋转与陀螺积分偏差 ", r.rot_gate_err_deg,
+                         "° > ", cfg_.track.gyro_rot_gate_deg, "°，保持上一可信位姿（累计 ",
+                         rot_gated_, " 帧）");
+            }
         }
 
         // 统计一帧不落，报出去的是平滑位姿 —— 与 follow_pose 完全同一条策略：静止单帧噪声
@@ -649,29 +734,16 @@ void FollowWorker::loop() {
         smoother_.push(r.T_ref_cam);
         Eigen::Isometry3d disp_T = (smoother_.size() > 1) ? smoother_.value() : r.T_ref_cam;
 
-        // P1 静止冻结：陀螺确认相机没在转 ⇒ 旋转冻在进入静止那一刻的平滑旋转上，平移照常更新。
-        // 迟进快出的迟滞在检测器里（gyro_filter.hpp）；这里只做冻/解冻与记账。
-        if (r.gyro_still && r.estimator != follow::Estimator::kNone) {
-            if (!rot_frozen_) {
-                frozen_R_ = disp_T.rotation();
-                still_since_ms_ = steady_now_ms();
-                still_frames_ = 0;
-                LOG_INFO("Follow", "陀螺确认静止：旋转通道冻结（冻在进入静止时的平滑旋转上，平移照常更新）");
-            }
-            disp_T.linear() = frozen_R_;
-            ++still_frames_;
-        } else if (rot_frozen_) {
-            LOG_INFO("Follow", "陀螺检测到运动：旋转通道解冻（本次静止冻结了 ", still_frames_,
-                     " 帧 / ", (steady_now_ms() - still_since_ms_), " ms，其间旋转抖动被整体抹掉）");
-            rot_frozen_ = false;
-            still_frames_ = 0;
-        }
+        // P1 静止冻结。estimator==kNone 的帧（hold 系列状态）没什么可冻：它本来就没动，
+        // 而把冻结点设在一个"没有测量"的位姿上会让恢复后的第一帧带着旧冻结点跳一下。
+        applyStillFreeze(r.gyro_still && r.estimator != follow::Estimator::kNone, steady_now_ms(),
+                         &disp_T);
 
         const follow::DobotPose dp = follow::to_dobot(disp_T);   // 与发臂同一套换算：mm + ZYX deg
 
         const CameraStatus cst = camera_->getStatus();
 
-        std::lock_guard<std::mutex> lock(snap_mutex_);
+        PublishOnRelease lock(snap_mutex_, broker_);   // 出作用域即发布：见 pose_broker.hpp
         snap_.enabled = true;
         snap_.connected = true;
         snap_.taught = true;
@@ -704,6 +776,17 @@ void FollowWorker::loop() {
         snap_.smooth_used = smoother_.used();
         snap_.gyro_still = r.gyro_still;   // 本帧时刻的陀螺静止结论（页面/日志排查用）
         snap_.rot_gated = rot_gated_;      // 离群门累计拦截计数
+        // 冻结策略的真实状态：gyro_still 只是判据，rot_frozen 才是"输出此刻真的被冻住"。
+        // 两者不等的情形就是要看的：时限兜底正在掐断一次误冻，或暂停期还没走完。
+        snap_.rot_frozen = rot_frozen_;
+        snap_.frozen_ms = rot_frozen_ ? (steady_now_ms() - frozen_since_ms_) : 0;
+        snap_.gyro_time_ready = camera_->gyroTimeBaseReady();
+        snap_.gyro_buf = r.gyro_buf;
+        snap_.gyro_frame_samples = r.gyro_samples;
+        snap_.gyro_dead_frames = gyro_dead_frames_;
+        snap_.gyro_bias_dps = r.gyro_bias_rad_s * kRad2Deg;
+        snap_.gyro_resid_dps = r.gyro_resid_rad_s * kRad2Deg;
+        snap_.gyro_bias_ready = r.gyro_bias_ready;
         snap_.frames = frames_;
         snap_.dropped = dropped_;
         snap_.rejected = rejected_;

@@ -32,6 +32,7 @@ from apps.follow.mirror import (
     joints_to_target, pose_ctrl_from_target, rotation_camera_to_base,
     rotation_camera_to_base_fallback,
 )
+from apps.follow.services.pose_stream import PoseStream
 from apps.follow.trajectory import JointTrajectorySmoother
 from core.config import sprayer_config
 
@@ -96,6 +97,12 @@ class FollowService:
         self._fail_upstream = False
 
         self._arm = self._read_arm_config()
+        # 数据面：实时位姿优先由相机服务**推**（pose_stream），推不动了才退回上面那条轮询线程。
+        # 流对象**延迟创建**（第一次"启动"时才 new）：导入本模块不该开出任何 socket，而没在跟随
+        # 的时候也不该占着服务端一路订阅配额（那边上限只有 4 路）。
+        self._push = None
+        self._push_enabled = self._arm["push"]
+        self._push_stale_s = self._arm["push_stale_ms"] / 1000.0
         self._smoother = JointTrajectorySmoother(math.radians(self._arm["max_joint_vel_deg_s"]))
         self._resolve_camera_to_base()
 
@@ -115,6 +122,13 @@ class FollowService:
                                    (arm.get("camera_to_base_fallback_euler_deg") or [0.0, 0.0, 0.0])][:3],
             "poll_hz": max(1, min(int(arm.get("poll_hz", 20)), 50)),
             "emit_hz": max(5, min(int(arm.get("emit_hz", 33)), 100)),
+            # 数据面优先走服务端推送；false = 只要轮询（服务端没编到 SSE 路由、或想对照两种
+            # 模式的延迟时用）。关掉它不会让跟随变差，只是退回改动前的行为。
+            "push": bool(arm.get("push", True)),
+            # 多久没收到推送就判"这条流此刻不算数"、改由轮询兜底。下限要能容下服务端 200ms
+            # 心跳 + 一帧周期（15fps≈66ms），上限不能比改动前的轮询周期(50ms)对应的危害更大 ——
+            # 取 400ms：约两个心跳周期，坏流在半秒内被接管，而正常运行永远碰不到它。
+            "push_stale_ms": max(200, min(int(arm.get("push_stale_ms", 400)), 5000)),
             "max_joint_vel_deg_s": max(1.0, float(arm.get("max_joint_vel_deg_s", 90.0))),
             "teach_save_map": bool(arm.get("teach_save_map", True)),
         }
@@ -282,6 +296,7 @@ class FollowService:
         # 旧基线下的段不属于下一次启动；队列里的旧 keyframe 一并丢掉。
         self._smoother.reset()
         self._kf_queue = queue.Queue()
+        self._stop_stream()             # 必须在锁外（见 _stop_stream）；先断进来的一条再收尾
         self._stop_poller_if_idle()
         self._emit(force=True)               # 让前端拿到"已停止"，从而把 simJoints 置回 null
         if not ok:
@@ -343,6 +358,7 @@ class FollowService:
             self._smoother.push_target(baseline)
             self._emit_q_deg = [round(float(v), 4) for v in np.degrees(baseline)]
         self._ensure_poller()
+        self._ensure_stream()      # 数据面优先走推送；轮询线程留在后面当兜底
         self._emit(force=True)
         logger.info("follow %s：基线=%s°  %s", which,
                     np.round(np.degrees(baseline), 2).tolist(), note)
@@ -395,6 +411,7 @@ class FollowService:
             # 就会在相机服务根本没起的情况下报出 reachable=true。
             snap = self._fetch_snapshot()
         with self._lock:
+            dp = self._data_plane_locked()
             payload = {
                 "active": active,
                 "arm_mode": self._arm["mode"],
@@ -409,28 +426,74 @@ class FollowService:
                 "last_error": self._last_error,
                 "arm_baseline_deg": baseline,
                 "arm_target_deg": target,
+                "data_plane": dp,
                 "follow": snap,
             }
         # joints_deg / target_pose 与 WS 广播同名：页面用一套渲染代码吃掉两条来源。
         # joints 以 33 Hz 发射流为准（平滑后的）；还没发射过才退回目标值。
         payload["joints_deg"] = self._emit_q_deg or target
         payload["target_pose"] = self._target_pose_deg()
+        # 数据面也同名：完整计数只在这条 REST 里给（WS 每 33 Hz 一次，塞进去是白付带宽），
+        # 但页面读"此刻走的是哪条路、为什么"两处用的是同一对键。
+        payload["data_plane_mode"] = dp["mode"]
+        payload["data_plane_reason"] = dp.get("reason", "")
         return payload
 
     def _state_payload(self) -> dict:
         with self._lock:
+            dp = self._data_plane_locked()
             return {
                 "active": self._active,
                 "arm_mode": self._arm["mode"],
                 "r_cb_source": self._R_cb_source,
                 "ik_failed": self._ik_failed,
                 "last_error": self._last_error,
+                # 只带 mode 和退回原因：这条载荷每 33 Hz 发一次，把推送计数器塞进来是白付带宽。
+                # 完整计数在 REST status() 里，页面按需查。
+                "data_plane_mode": dp["mode"],
+                "data_plane_reason": dp.get("reason", ""),
                 "arm_baseline_deg": (None if self._baseline_q is None
                                      else [round(float(v), 4) for v in np.degrees(self._baseline_q)]),
                 "arm_target_deg": (None if self._target_q is None
                                    else [round(float(v), 4) for v in np.degrees(self._target_q)]),
                 "follow": dict(self._snapshot),
             }
+
+    # ------------------------------------------------------- 数据面：推送订阅的生命周期
+    def _ensure_stream(self) -> None:
+        """
+        起订阅线程（幂等）。**不得持 _lock 调用**：见 _stop_stream 里关于死锁的说明。
+        流对象在这里才 new —— 导入模块不该连 socket，而"没在跟随"时也不该占服务端订阅配额。
+        """
+        with self._lock:
+            if not self._push_enabled:
+                return
+            push, first = self._push, self._push is None
+        if first:
+            # 构造放在锁外、发布放在锁里：PoseStream.__init__ 很轻，但"谁都能重复 new 一个"
+            # 这种竞态要用发布检查来收，而不是靠把整段圈进锁里。
+            push = PoseStream(CPP_BASE_URL, self._on_push_snapshot)
+            with self._lock:
+                if self._push is None:
+                    self._push = push
+                push = self._push
+        push.start()
+
+    def _stop_stream(self) -> None:
+        """
+        停订阅线程并**丢掉引用**。**只能在 _lock 之外调用**：join 要等读者线程退出，而那个线程的
+        回调 `_on_push_snapshot` 正等着同一把锁 —— 持锁来停就是自己把自己锁死到超时。
+        （_lock 是 RLock，同线程可重入，但跨线程的这一等一抢没有任何可重入能救。）
+
+        引用也一起丢：留着它，停止后的状态会照样报"数据面=push"（`last_event_age` 还是新鲜的），
+        而下一次"启动"会另建一条流 —— 那条旧引用只会把"此刻到底谁在推数据"说成一句假话。
+        """
+        with self._lock:
+            push, self._push = self._push, None
+        if push is not None:
+            # join 带超时：读者可能还卡在 socket 读上（那种情况 PoseStream 自己留日志）。
+            # 真迟到一帧也无害 —— _on_push_snapshot 先看 _active，而它已经被上面清掉了。
+            push.stop()
 
     # -------------------------------------------------------------- 轮询/解算
     def _ensure_poller(self) -> None:
@@ -470,8 +533,16 @@ class FollowService:
                 self._stop_evt.wait(period - dt)
 
     def _poll_once(self) -> None:
+        """
+        兜底轮询。推送活着的时候这里**不出网**：数据面已经是服务端推进来的，再每 50 ms 拉一次
+        只会和推送抢同一份 C++ 快照（还多出一次 HTTP 往返）。
+        留着这条线程的理由是推送会安静地坏（对端半开、中间设备丢连接、订阅配额被占满 —— 全都
+        表现为"再也不来数据，但也不报错"），而闭环最怕的就是停在旧位姿上看起来却像跟得好。
+        """
         with self._lock:
             if not self._active:
+                return
+            if self._push_live_locked():
                 return
         snap = self._fetch_snapshot()
         if "error" in snap:
@@ -479,7 +550,63 @@ class FollowService:
                 self._last_error = snap["error"]
             self._emit()      # 错误态不在 33 Hz 稳态里，得由这里主动推一次让页面看见
             return
+        self._ingest(snap)
 
+    def _on_push_snapshot(self, snap: dict) -> None:
+        """推送回调（在 pose_stream 自己的线程里被调）。只在跟随中消费，否则丢掉不污染缓存。
+        新鲜度由 PoseStream 自己按事件打点（`last_event_age`），这里不再另存一份时钟 ——
+        两份"最后一次收到数据是什么时候"迟早会互相矛盾。"""
+        with self._lock:
+            if not self._active:
+                return
+        self._ingest(snap)
+
+    def _push_live_locked(self) -> bool:
+        """
+        调用方必须已持 _lock。判据是"开关开着 + 有流对象 + 最近一帧不旧"三条。
+        故意**不**再看订阅线程是否活着：读者线程除了 `stop()` 之外不会退出，而 `stop()` 同时
+        就把 `_active` 清了 —— 那条判据落不到任何真实场景上，加上只会让人以为它在防什么。
+        """
+        if not self._push_enabled or self._push is None:
+            return False
+        age = self._push.last_event_age()
+        return age is not None and age <= self._push_stale_s
+
+    def _data_plane_locked(self) -> dict:
+        """状态里如实写明数据面此刻走的是哪条路，以及为什么。"""
+        live = self._push_live_locked()
+        out = {"mode": ("push" if live else "poll"),
+               "push_enabled": self._push_enabled,
+               "stale_after_ms": int(self._push_stale_s * 1000)}
+        if not self._push_enabled:
+            # 这条判据必须在最前面：开关关着时"线程没跑/一帧没有"都只是它的下游症状，
+            # 而运维看到"线程未运行"会去查线程 —— 查不到任何东西。
+            out["reason"] = "推送开关未开（follow.arm.push=false）"
+        elif self._push is None:
+            # 订阅还没起过（页面还没点"启动"）。reason 必须**永远在**：字段跟着调用历史出现或
+            # 消失，页面就得写两套渲染分支去猜，而猜错的那套正好是推送坏掉的时候。
+            out["reason"] = "订阅未启动（点启动后才连）"
+        else:
+            st = self._push.stats()
+            out["push"] = st
+            if not live:
+                # 退回轮询必须说清原因，否则"推送没生效"会被读成"推送一直是好的、只是臂没动"。
+                # 先说"多久没数据"再说"线程没了"：前者是这一行存在的理由（运维据此去看服务端），
+                # 后者只是它的下游事实之一，单独当结论会把人支使去查一条本来该停的线程。
+                age_s = st.get("last_event_age_s")
+                alive = bool(st.get("running"))
+                if age_s is None:
+                    out["reason"] = "推送尚无一帧" if alive else "推送尚无一帧（订阅线程未起）"
+                else:
+                    out["reason"] = (f"推送已 {age_s:.1f}s 无数据（>{out['stale_after_ms']}ms）"
+                                     "，退回轮询" + ("" if alive else "；订阅线程已退出"))
+        return out
+
+    def _ingest(self, snap: dict) -> None:
+        """
+        一条快照 → 一个臂目标。**推送和轮询共用这一条**：两条路径各自实现"拿到快照该干什么"，
+        迟早会对同一帧解出不同的结果，而那比延迟更难查。
+        """
         frames = int(snap.get("frames") or 0)
         usable = bool(snap.get("enabled")) and bool(snap.get("has_pose")) and snap.get("status") == "ok"
         with self._lock:

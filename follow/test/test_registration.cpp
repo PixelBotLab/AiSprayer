@@ -232,11 +232,15 @@ std::string describe(const TrackResult& r) {
   auto join3 = [](const double* v) {
     return "[" + std::to_string(v[0]) + ", " + std::to_string(v[1]) + ", " + std::to_string(v[2]) + "]";
   };
-  char tail[160];
-  std::snprintf(tail, sizeof(tail), " s2=%.2e aniso=%.1f/%.1f rank=%d cost_per_in=%.3f",
+  char tail[280];
+  std::snprintf(tail, sizeof(tail),
+                " s2=%.2e aniso=%.1f/%.1f rank=%d cost_per_in=%.3f"
+                " gyro_n=%d buf=%d pushed=%d gate_err=%.3f bias=%.2e resid=%.2e%s",
                 r.unc.residual_var_scale, r.unc.trans_anisotropy(), r.unc.rot_anisotropy(),
                 r.unc.rank_deficient ? 1 : 0,
-                r.gicp_inliers > 0 ? r.gicp_cost / static_cast<double>(r.gicp_inliers) : 0.0);
+                r.gicp_inliers > 0 ? r.gicp_cost / static_cast<double>(r.gicp_inliers) : 0.0,
+                r.gyro_samples, r.gyro_buf, r.gyro_pushed, r.rot_gate_err_deg, r.gyro_bias_rad_s,
+                r.gyro_resid_rad_s, r.gyro_bias_ready ? "" : " BIAS_BOOTSTRAP");
   return std::string(to_string(r.status)) + " est=" + to_string(r.estimator) +
          " pts=" + std::to_string(r.cloud_points) + " gicp_in=" + std::to_string(r.gicp_inliers) +
          " sp_in=" + std::to_string(r.sparse_inliers) + " ratio=" + std::to_string(r.inlier_ratio) +
@@ -615,6 +619,107 @@ TEST(Registration, GyroRotGateIsOffWithoutGyroOrWhenDisabled) {
     EXPECT_EQ(r2.status, Status::kOk) << describe(r2);
     EXPECT_FALSE(r2.rot_gated);
   }
+}
+
+// 级联锁死回归（P0-2）。门的两侧必须是同一段时间：候选旋转相对 T_last_good_，而 last_good
+// 在被拦帧之后会隔着若干帧不动。旧实现陀螺只积 [prev_ts, ts] 一帧 ⇒ 误差 ≈ 累计未采纳的
+// 旋转 − 单帧旋转，随被拦帧数单调变大 ⇒ 一次误拦之后每一帧都更越过门，正反馈永久锁死，
+// 相机停下来也解不开（累计旋转还在），只能重新示教。
+TEST(Registration, GyroRotGateRecoversAfterHoldingOneBadFrame) {
+  Rig rig;
+  TrackParams p = rig.p;
+  p.gyro_rot_gate_deg = 0.5;  // 必须 < 单帧真旋转 1.0°：否则旧配对下的锁死不会被本用例观察到
+
+  Tracker t(p, rig.map);
+  const int64_t dt_ns = 200'000'000;             // 200 ms/帧 ⇒ 1.0°/帧 = 5°/s
+  const double w_z = 1.0 * kPi / 180.0 / 0.2;    // 与上面的帧间角速度一致
+  int64_t gyro_next_ns = 1'000'000'000;
+  auto push_gyro_upto = [&](int64_t t_to) {      // 200 Hz，只补新样本（重复时间戳会破坏单调性）
+    for (; gyro_next_ns <= t_to; gyro_next_ns += 5'000'000) {
+      t.push_gyro(gyro_next_ns, Eigen::Vector3d(0.0, 0.0, w_z));
+    }
+  };
+  auto frame_at = [&](int deg_step) {
+    return render_depth(rig.k, make_T(0.0, 0.0, 0.0, 0.0, 0.0, static_cast<double>(deg_step)),
+                        hit_workpiece);
+  };
+
+  const TrackResult r1 = t.track(FeatureFrame{}, rig.ref_depth, 1'000'000'000);
+  ASSERT_EQ(r1.status, Status::kOk) << describe(r1);
+
+  // 坏帧：陀螺如实记到 1.0°，视觉却解出 2.0°（多出来的是假收敛）⇒ 拦。
+  // 2.0° 而不是更大：初值链上 GICP 只能从初值爬约 35 mm（≈2.2°@0.9 m），再大测的就是
+  // kLost 而不是门本身（见 GyroRotGateHoldsPoseWhenVisionDisagreesWithGyro 的注释）。
+  push_gyro_upto(1'200'000'000);
+  const TrackResult bad = t.track(FeatureFrame{}, frame_at(2), 1'200'000'000);
+  ASSERT_EQ(bad.status, Status::kRotGated) << describe(bad);
+  EXPECT_NEAR(bad.rot_gate_err_deg, 1.0, 0.3) << "门误差应≈假收敛的 1.0°：" << describe(bad);
+
+  // 之后 6 帧是真运动且陀螺如实记录：必须逐帧重新采纳，不能因为"参照还停在第 1 帧"而连坐。
+  // 注意 deg=2 这一帧与上面被拦的是**同一张深度图**，只是时间戳不同：同一内容在 1.2 s 被拒、
+  // 在 1.4 s 被收，恰恰说明门判的是"这段区间的视觉与陀螺是否一致"，而不是帧本身好不好看。
+  int64_t ts = 1'200'000'000;
+  for (int deg = 2; deg <= 7; ++deg) {
+    ts += dt_ns;
+    push_gyro_upto(ts);
+    const TrackResult r = t.track(FeatureFrame{}, frame_at(deg), ts);
+    ASSERT_EQ(r.status, Status::kOk) << "第 " << deg << " 帧没能恢复：" << describe(r);
+    EXPECT_FALSE(r.rot_gated);
+    EXPECT_GT(r.gyro_samples, 0) << "没用到陀螺样本，门与初值都是空转：" << describe(r);
+    EXPECT_LT(r.rot_gate_err_deg, 0.3) << "区间配对了不该还有度级误差：" << describe(r);
+  }
+  EXPECT_LT(rot_err_deg(t.T(), make_T(0, 0, 0, 0, 0, 7.0)), 0.3) << "恢复后位姿没跟上真值";
+}
+
+// 门判不动时要**让路**，不是**判死**：参照位姿老于陀螺缓冲跨度时，这段没有可信的互验区间。
+// 反过来说，缓冲保留跨度与门允许的最长区间是同一个数（gyro_horizon_ns），留短了这里会变成
+// 门永久静默失效 —— 所以本用例同时钉住"长区间不判"而不是"长区间乱判"。
+TEST(Registration, GyroRotGateDeclinesWhenReferenceIsOlderThanHorizon) {
+  Rig rig;
+  TrackParams p = rig.p;
+  p.gyro_rot_gate_deg = 0.5;
+  Tracker t(p, rig.map);
+  ASSERT_EQ(t.track(FeatureFrame{}, rig.ref_depth, 1'000'000'000).status, Status::kOk);
+  for (int i = 0; i <= 40; ++i) {
+    t.push_gyro(1'000'000'000 + i * 5'000'000, Eigen::Vector3d::Zero());
+  }
+  // 参照在第 1 s，本帧在第 10 s：区间远超缓冲 ⇒ 没有配对的陀螺窗口，不能拿"没数据"当"坏帧"。
+  const cv::Mat frame = render_depth(rig.k, make_T(0, 0, 0, 0, 0, 3.0), hit_workpiece);
+  const TrackResult r = t.track(FeatureFrame{}, frame, 10'000'000'000);
+  EXPECT_FALSE(r.rot_gated) << describe(r);
+  EXPECT_NE(r.status, Status::kRotGated) << describe(r);
+}
+
+// 缓冲按**时间**裁剪（push_gyro 里的 gyro_horizon_ns 分支）。只按条数上限裁是不够的：
+// 4096 条 @200Hz 是 20 s 历史，而一帧的积分窗口只有 66 ms ⇒ integrate_gyro 每帧从头走完
+// 那些永远用不到的样本，白白吃掉本该花在配准上的预算。
+// 本用例刻意把条数上限抬到不可能触发，这样"缓冲仍然很小"就**只能**由时间裁剪解释 ——
+// 否则两种机制混在一起，把时间裁剪删掉这条测试也照样绿。
+TEST(Registration, GyroBufferIsTrimmedByTimeNotOnlyByCount) {
+  Rig rig;
+  TrackParams p = rig.p;
+  p.gyro_buf_max = 1'000'000;              // 条数兜底彻底失效：只剩时间这一把尺子
+  p.gyro_horizon_ns = 1'000'000'000;       // 1 s
+  constexpr int64_t kGyroNs = 5'000'000;   // 200 Hz
+  constexpr int kSamples = 4000;           // 20 s 历史，是 horizon 的 20 倍
+
+  Tracker t(p, rig.map);
+  const int64_t base = 1'000'000'000;
+  ASSERT_EQ(t.track(FeatureFrame{}, rig.ref_depth, base).status, Status::kOk);
+  for (int i = 1; i <= kSamples; ++i) {
+    t.push_gyro(base + i * kGyroNs, Eigen::Vector3d(0.0, 0.0, 0.02));
+  }
+
+  const TrackResult r = t.track(FeatureFrame{}, rig.ref_depth, base + (kSamples + 13) * kGyroNs);
+  // 20 s × 200Hz = 4000 条喂进去，留下的只够覆盖 1 s。
+  EXPECT_LT(r.gyro_buf, 3 * kSamples / 10) << "时间裁剪没生效：缓冲仍是全量历史 " << describe(r);
+  EXPECT_LE(r.gyro_buf, static_cast<int>(p.gyro_horizon_ns / kGyroNs) + 8) << describe(r);
+  EXPECT_GT(r.gyro_buf, static_cast<int>(p.gyro_horizon_ns / kGyroNs) / 2)
+      << "裁得太狠：门的区间会被裁掉，变成永久静默失效";
+  // 裁掉历史不许伤到当前窗口 —— 这才是"按时间裁"而不是"按预算丢数据"。
+  EXPECT_GT(r.gyro_samples, 0) << describe(r);
+  // 静止检测器只看向量、不碰时间轴，所以裁剪与它无关（它得照常报静止）。
+  EXPECT_GT(r.gyro_pushed, 0) << describe(r);
 }
 
 // 换种子做蒙特卡洛。σ 声称的是"一次测量的散布"，那就直接量散布，和求解器自报的 σ 并排看。

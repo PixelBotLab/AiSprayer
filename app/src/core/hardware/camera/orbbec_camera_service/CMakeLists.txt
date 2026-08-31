@@ -74,6 +74,8 @@ set(SOURCES
     src/corner_detector.cpp
     src/async_disk_writer.cpp
     src/follow_worker.cpp
+    src/gyro_time_base.cpp
+    src/pose_broker.cpp
     src/http_server.cpp
 )
 
@@ -95,6 +97,44 @@ target_link_libraries(orbbec_camera_service
     pthread
     dl
 )
+
+# ----------------------------------------------------------------------------------
+# 本服务里**不碰设备**的那几块逻辑，因此也是唯一能在没插相机的机器上验的。
+# GyroTimeBase 做的是纯算术（两个时钟配对、取最小、冻结），错一次的现象是"陀螺静默地不参与
+# 跟踪"；PoseBroker 做的是纯同步（配额、唤醒、超时），错一次的现象是"推送安静地不来了"——
+# 丢一次唤醒不会崩，只会让客户端一直等到自己超时，从日志上和"网络不好"完全一样。
+# 两类 bug 都只能在没设备的时候用契约测试钉住，所以这些 target 不是覆盖率装饰，是回归。
+# ----------------------------------------------------------------------------------
+option(SERVICE_BUILD_TESTS "Build the device-free unit tests of this service" ON)
+if(SERVICE_BUILD_TESTS)
+    find_package(GTest QUIET)
+    if(GTest_FOUND)
+        enable_testing()
+        # 除了 GyroTimeBase 自己，还要能看见 follow 的 header-only 积分器：跨这两个模块的
+        # 接缝（"换算给出的 ns"到底能不能被"帧时间戳框到"）正是 P0-1 静默失效的现场，
+        # 而两边各测各的时这条接缝无人看管。
+        add_executable(test_gyro_time_base
+            test/test_gyro_time_base.cpp
+            src/gyro_time_base.cpp)
+        target_include_directories(test_gyro_time_base PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/include
+            "${PROJECT_ROOT}/follow/include"
+            ${OpenCV_INCLUDE_DIRS})
+        # 只要 core：types.hpp 里的 cv::Mat 是成员声明，本用例不实例化它。
+        target_link_libraries(test_gyro_time_base PRIVATE
+            GTest::gtest GTest::gtest_main pthread Eigen3::Eigen opencv_core)
+        add_test(NAME gyro_time_base COMMAND test_gyro_time_base)
+
+        add_executable(test_pose_broker
+            test/test_pose_broker.cpp
+            src/pose_broker.cpp)
+        target_include_directories(test_pose_broker PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+        target_link_libraries(test_pose_broker PRIVATE GTest::gtest GTest::gtest_main pthread)
+        add_test(NAME pose_broker COMMAND test_pose_broker)
+    else()
+        message(STATUS "GTest 没找到：跳过 orbbec_camera_service 的离线单测（服务本体不受影响）")
+    endif()
+endif()
 
 # Output directory
 set_target_properties(orbbec_camera_service PROPERTIES
