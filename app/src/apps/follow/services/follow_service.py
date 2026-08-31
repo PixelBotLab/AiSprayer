@@ -45,7 +45,7 @@ TIMEOUT_CONTROL = 20.0
 TIMEOUT_POLL = 0.5
 SWITCH_DEADLINE = 60.0        # 提交 + 轮询确认的总预算：重启取流再慢也不该超过它
 SWITCH_POLL_INTERVAL = 0.3
-SWITCH_POLL_TIMEOUT = 2.0     # 单次状态轮询的超时；连续失败几次才判服务没了，容忍偶发抖动
+SWITCH_POLL_TIMEOUT = 5.0     # 单次状态轮询的超时；连续失败几次才判服务没了，容忍偶发抖动
 
 _FOLLOW_PATHS = {
     "toggle": "/api/v1/camera/follow",
