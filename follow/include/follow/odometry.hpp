@@ -19,6 +19,7 @@
 #include <opencv2/core.hpp>
 
 #include "follow/cloud.hpp"
+#include "follow/gyro_filter.hpp"
 #include "follow/matching.hpp"
 #include "follow/reference_map.hpp"
 #include "follow/types.hpp"
@@ -96,9 +97,22 @@ struct TrackParams {
   // 15 帧 @15fps = 1 s：够穿过一次抖动/短暂遮挡，不够悄悄漂走。
   int max_sparse_streak = 15;
 
-  // 陀螺缓冲与可信窗口（P4 之前不接实机数据，接口和单测先留着）。
+  // 陀螺缓冲与可信窗口。陀螺在本库里有三个用途，优先级从高到低：
+  //  ① 帧间旋转初值的第二档降级（见 track_impl，sparse 缺席时顶上）；
+  //  ② P3 离群门：帧间旋转与陀螺积分互验，不一致的疑似坏帧不采纳（gyro_rot_gate_deg）；
+  //  ③ P1 静止检测（still_det_）：相机没在转时旋转噪声被上层冻住，见 gyro_filter.hpp。
+  // 陀螺时间戳是硬件钟、帧时间戳在服务路径是主机毫秒：integrate_gyro 的窗口对齐因此存在
+  // 毫秒级误差，静止检测索性只走样本序列不碰绝对时间（GyroStillDetector）。
   size_t gyro_buf_max = 4096;
   int64_t gyro_max_gap_ns = 100'000'000;
+
+  // P3 离群门（度）：采纳帧的帧间旋转与同窗口陀螺积分的测地线距离超过它 ⇒ kRotGated。
+  // 0 = 关闭。取 1.0°：正常帧两者差在噪声级（0.0几度），而一次真滑坡/坏帧至少是度级；
+  // 退化场景里 GICP 的弱方向旋转留在初值上不动（见 track_impl 注释），与陀螺仍一致，不会误伤。
+  double gyro_rot_gate_deg = 1.0;
+
+  // P1 静止检测（冻结旋转通道由消费方实施，这里只负责判"静没静"）。
+  GyroStillDetector::Params gyro_still;
 };
 
 struct TrackResult {
@@ -123,6 +137,9 @@ struct TrackResult {
   int iterations = 0;
   bool converged = false;
   bool gyro_used = false;      // 只在稀疏解缺席时顶上来当旋转初值，见 odometry.cpp
+  bool gyro_still = false;     // 陀螺确认相机没在转：消费方据此冻住旋转通道（P1）
+  bool rot_gated = false;      // 本帧被 P3 离群门拦下：帧间旋转与陀螺积分不一致，未采纳
+  double rot_gate_err_deg = 0.0;  // 互验的测地线距离，超门才拦；日志与调参看这个数
 };
 
 class Tracker {
@@ -130,7 +147,8 @@ class Tracker {
   // seed 固定 ⇒ RANSAC 可复现；测试里显式换种子做蒙特卡洛。
   explicit Tracker(TrackParams p, const ReferenceMap& map, uint32_t seed = 0x5EEDu);
 
-  // 336L 陀螺：与图像同一硬件时钟，rad/s，相机系。P4 之前没有调用方。
+  // 336L 陀螺：与图像同一硬件时钟，rad/s，相机系。同时喂给静止检测器（只看向量模，
+  // 不碰时间轴），所以两个消费方永远吃同一份样本。
   void push_gyro(int64_t ts_ns, const Eigen::Vector3d& omega_cam_rad_s);
 
   // curr 的 uv_px 必须是与 depth_mm 同一套内参下的全分辨率像素坐标。
@@ -156,6 +174,7 @@ class Tracker {
   Eigen::Isometry3d T_last_good_ = Eigen::Isometry3d::Identity();  // 对外报告的可信位姿
   Eigen::Isometry3d T_vel_ = Eigen::Isometry3d::Identity();        // 帧间运动（常数外推用）
   int sparse_streak_ = 0;  // 连续没有稠密确认的帧数
+  GyroStillDetector still_det_;  // 与 gyro_ 同源样本；构造参数来自 TrackParams::gyro_still
 };
 
 }  // namespace follow

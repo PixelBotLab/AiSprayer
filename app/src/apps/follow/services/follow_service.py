@@ -18,6 +18,8 @@ FollowService：把相机服务里跑的 follow（进程内）变成"页面上�
 from __future__ import annotations
 
 import logging
+import math
+import queue
 import threading
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -30,6 +32,7 @@ from apps.follow.mirror import (
     joints_to_target, pose_ctrl_from_target, rotation_camera_to_base,
     rotation_camera_to_base_fallback,
 )
+from apps.follow.trajectory import JointTrajectorySmoother
 from core.config import sprayer_config
 
 logger = logging.getLogger(__name__)
@@ -74,6 +77,15 @@ class FollowService:
         self._last_frames = -1
         self._last_emit_key = None
 
+        # 33 Hz 发射链：轮询线程解出 keyframe → 队列 → 发射线程过平滑器 → WS。
+        # 两条线程分开：轮询率决定 keyframe 产生速率（IK 负载），发射率决定页面看到的帧率，
+        # 谁也不许拖住谁。
+        self._kf_queue: "queue.Queue[np.ndarray]" = queue.Queue()
+        self._kf_pushed = 0                            # 轮询线程产生的 keyframe 数（发射日志统计用）
+        self._emit_q_deg: Optional[List[float]] = None   # 最近一次发射的 joints（REST 查询用）
+        self._last_broadcast_joints: Optional[List[float]] = None  # 发射去重：值不变就不重发/不重算 FK
+        self._emit_thread: Optional[threading.Thread] = None
+
         self._R_cb = None
         self._R_cb_source = ""
         # 路由要把"相机服务没起来"（503，页面该提示后端）和"这个请求本身不成立"（400，配置/
@@ -84,6 +96,7 @@ class FollowService:
         self._fail_upstream = False
 
         self._arm = self._read_arm_config()
+        self._smoother = JointTrajectorySmoother(math.radians(self._arm["max_joint_vel_deg_s"]))
         self._resolve_camera_to_base()
 
     # ------------------------------------------------------------------ 配置
@@ -101,6 +114,8 @@ class FollowService:
             "fallback_euler_deg": [float(v) for v in
                                    (arm.get("camera_to_base_fallback_euler_deg") or [0.0, 0.0, 0.0])][:3],
             "poll_hz": max(1, min(int(arm.get("poll_hz", 20)), 50)),
+            "emit_hz": max(5, min(int(arm.get("emit_hz", 33)), 100)),
+            "max_joint_vel_deg_s": max(1.0, float(arm.get("max_joint_vel_deg_s", 90.0))),
             "teach_save_map": bool(arm.get("teach_save_map", True)),
         }
 
@@ -160,10 +175,14 @@ class FollowService:
                 r = requests.get(url, timeout=timeout)
             else:
                 r = requests.post(url, json=payload, timeout=timeout)
+        except requests.exceptions.Timeout as e:
+            # 超时 ≠ 服务不在：它可能只是此刻很慢（曾把"其实已受理"的切换误报成"无响应"）。
+            # 不把 _upstream_down 置真，下一次请求照常尝试；真实在性由连接类异常判定。
+            return False, f"相机服务响应超时（{timeout:.0f}s，服务可能正忙，稍后重试）: {e}", {}
         except Exception as e:
             with self._lock:
                 self._upstream_down = True
-            return False, f"相机服务无响应（{url} 没起来？后端进程在跑吗）: {e}", {}
+            return False, f"相机服务连不上（{url} 没起来？后端进程在跑吗）: {e}", {}
         with self._lock:
             self._upstream_down = False      # 只要有一次真实回复，就认定后端活着
         try:
@@ -256,8 +275,13 @@ class FollowService:
             self._ik_failed = False
             self._last_frames = -1
             self._last_emit_key = None
+            self._emit_q_deg = None
+            self._last_broadcast_joints = None   # 清去重基准；发射线程若还在收尾顶多多播一次同值，无害
             if data:
                 self._snapshot = data
+        # 旧基线下的段不属于下一次启动；队列里的旧 keyframe 一并丢掉。
+        self._smoother.reset()
+        self._kf_queue = queue.Queue()
         self._stop_poller_if_idle()
         self._emit(force=True)               # 让前端拿到"已停止"，从而把 simJoints 置回 null
         if not ok:
@@ -313,6 +337,11 @@ class FollowService:
             self._ik_failed = False
             self._last_error = ""
             self._last_frames = -1
+            # 平滑器从基线起步：发射线程此时还没起（下面才 ensure），当场碰它是安全的。
+            self._smoother.reset()
+            self._kf_queue = queue.Queue()
+            self._smoother.push_target(baseline)
+            self._emit_q_deg = [round(float(v), 4) for v in np.degrees(baseline)]
         self._ensure_poller()
         self._emit(force=True)
         logger.info("follow %s：基线=%s°  %s", which,
@@ -370,6 +399,8 @@ class FollowService:
                 "active": active,
                 "arm_mode": self._arm["mode"],
                 "poll_hz": self._arm["poll_hz"],
+                "emit_hz": self._arm["emit_hz"],
+                "max_joint_vel_deg_s": self._arm["max_joint_vel_deg_s"],
                 "home_joints_deg": self._arm["home_joints_deg"],
                 "r_cb_source": self._R_cb_source,
                 "r_cb_ready": self._R_cb is not None,
@@ -381,7 +412,8 @@ class FollowService:
                 "follow": snap,
             }
         # joints_deg / target_pose 与 WS 广播同名：页面用一套渲染代码吃掉两条来源。
-        payload["joints_deg"] = target
+        # joints 以 33 Hz 发射流为准（平滑后的）；还没发射过才退回目标值。
+        payload["joints_deg"] = self._emit_q_deg or target
         payload["target_pose"] = self._target_pose_deg()
         return payload
 
@@ -403,18 +435,25 @@ class FollowService:
     # -------------------------------------------------------------- 轮询/解算
     def _ensure_poller(self) -> None:
         with self._lock:
-            if self._thread is not None and self._thread.is_alive():
+            poll_alive = self._thread is not None and self._thread.is_alive()
+            emit_alive = self._emit_thread is not None and self._emit_thread.is_alive()
+            if poll_alive and emit_alive:
                 return
             self._stop_evt.clear()
-            self._thread = threading.Thread(target=self._poll_loop, name="follow-poll", daemon=True)
-            self._thread.start()
+            if not poll_alive:
+                self._thread = threading.Thread(target=self._poll_loop, name="follow-poll", daemon=True)
+                self._thread.start()
+            if not emit_alive:
+                self._emit_thread = threading.Thread(target=self._emit_loop, name="follow-emit", daemon=True)
+                self._emit_thread.start()
 
     def _stop_poller_if_idle(self) -> None:
         with self._lock:
-            if self._active or self._thread is None:
+            if self._active or (self._thread is None and self._emit_thread is None):
                 return
             self._stop_evt.set()
             self._thread = None
+            self._emit_thread = None
 
     def _poll_loop(self) -> None:
         period = 1.0 / self._arm["poll_hz"]
@@ -438,7 +477,7 @@ class FollowService:
         if "error" in snap:
             with self._lock:
                 self._last_error = snap["error"]
-            self._emit()
+            self._emit()      # 错误态不在 33 Hz 稳态里，得由这里主动推一次让页面看见
             return
 
         frames = int(snap.get("frames") or 0)
@@ -451,8 +490,8 @@ class FollowService:
             ready = self._R_cb is not None
 
         # 同一批帧只解一次：C++ 的 frames 只在真正解算过一帧时才前进，用它当去重键最省。
+        # 稳态广播归 33 Hz 发射线程：这里不再逐轮 _emit，否则去重逻辑会把稳态节奏压掉。
         if not (new_frames and usable and baseline is not None and ready):
-            self._emit()
             return
 
         best, _T_target, reason = self._solve(snap, baseline, nearest)
@@ -462,11 +501,13 @@ class FollowService:
             self._last_error = reason
             if best is not None:
                 self._target_q = best
+                # keyframe 进发射链：平滑器会按限速从当前输出位走过去。
+                self._kf_queue.put_nowait(best.copy())
+                self._kf_pushed += 1
             elif reason:
                 # 失败**保持上一目标**：不夹位、不缩增量、不跳去 home。"增量一致"的契约
                 # 不能被一次静默的截断破坏 —— 宁可臂停住，也不要它朝一个没测到的方向走。
                 logger.warning("follow: 本帧未采用（%s），保持上一目标", reason)
-        self._emit()
 
     def _solve(self, snap: dict, baseline: np.ndarray,
                nearest: Optional[np.ndarray]) -> Tuple[Optional[np.ndarray], Any, str]:
@@ -488,6 +529,60 @@ class FollowService:
                     return None
             return self._kin
 
+    # -------------------------------------------------------------- 33 Hz 发射
+    def _emit_loop(self) -> None:
+        """
+        发射线程：每个 tick 让平滑器前进 dt，把输出的关节角原样广播。
+        页面上的仿真臂拿到的是限速 + 余弦缓动后的稠密流，不是 20 Hz 的 keyframe 台阶。
+        """
+        period = 1.0 / self._arm["emit_hz"]
+        last = time.monotonic()
+        win_start = last
+        win_ticks = 0
+        while not self._stop_evt.is_set():
+            now = time.monotonic()
+            dt = now - last
+            last = now
+            try:
+                self._emit_tick(dt)
+                win_ticks += 1
+            except Exception as e:                          # 发射线程不许因一次异常就死掉
+                logger.error("follow 发射异常: %s", e, exc_info=True)
+            # 发射率是这条线程存在的全部意义，5 s 一报，实际偏离目标一眼可见。
+            if now - win_start >= 5.0:
+                with self._lock:
+                    kf = self._kf_pushed
+                    self._kf_pushed = 0
+                logger.info("follow 发射：实际 %.1f Hz（目标 %d Hz），keyframes %d 个/窗，平滑器 %s",
+                            win_ticks / (now - win_start), self._arm["emit_hz"], kf,
+                            "插值中" if self._smoother.moving else "钉位")
+                win_start = now
+                win_ticks = 0
+            nxt = last + period - time.monotonic()
+            if nxt > 0.0:
+                self._stop_evt.wait(nxt)
+
+    def _emit_tick(self, dt: float) -> None:
+        # 抽干 keyframe 通道：积压多个时只有最新有意义（跟随是"去现在"不是"走历史"）。
+        q_kf: Optional[np.ndarray] = None
+        while True:
+            try:
+                q_kf = self._kf_queue.get_nowait()
+            except queue.Empty:
+                break
+        if q_kf is not None:
+            self._smoother.push_target(q_kf)
+        q = self._smoother.step(dt)
+        if q is None:
+            return
+        joints = [round(float(v), 4) for v in np.degrees(q)]
+        # 钉位/静止时值不变：前端本来就按值去重，这里提前跳过，省掉每拍一次带锁的 FK
+        # （它与轮询线程的 IK 共用 _kin_lock，33 Hz 空转会和 20 Hz 解算互相挤）。
+        if joints == self._last_broadcast_joints:
+            return
+        self._last_broadcast_joints = joints
+        self._broadcast(joints)
+
     # ---------------------------------------------------------------- 广播
     def register_ws_callback(self, callback: Callable) -> None:
         with self._lock:
@@ -499,22 +594,15 @@ class FollowService:
             if callback in self._ws_callbacks:
                 self._ws_callbacks.remove(callback)
 
-    def _emit(self, force: bool = False) -> None:
+    def _broadcast(self, joints_deg: Optional[List[float]]) -> None:
+        """组装载荷推给 WS。发射线程 33 Hz 走这里；控制事件（启停/错误）也直接走。"""
         payload = self._state_payload()
-        snap = payload["follow"] or {}
-        target = payload["arm_target_deg"]
-        key = (int(snap.get("frames") or 0), str(snap.get("status")), payload["active"],
-               payload["ik_failed"], None if target is None else tuple(target))
+        pose = self._pose_of(np.radians(np.asarray(joints_deg))) if joints_deg is not None else None
         with self._lock:
-            if not force and key == self._last_emit_key:
-                return
-            self._last_emit_key = key
+            self._emit_q_deg = joints_deg
             callbacks = list(self._ws_callbacks)
-            joints = target
-            pose = self._target_pose_deg() if joints is not None else None
-
         data = dict(payload)
-        data["joints_deg"] = joints
+        data["joints_deg"] = joints_deg
         data["target_pose"] = pose
         for cb in callbacks:
             try:
@@ -522,20 +610,37 @@ class FollowService:
             except Exception as e:                                # 一个坏客户端不能拖垮生产者
                 logger.error("follow WS 回调失败: %s", e)
 
-    def _target_pose_deg(self) -> Optional[List[float]]:
+    def _emit(self, force: bool = False) -> None:
+        # 只给控制事件用（启动/调零/停止/错误）。稳态节奏归 _emit_loop，不走这里的去重。
+        payload = self._state_payload()
+        snap = payload["follow"] or {}
         with self._lock:
-            q = None if self._target_q is None else self._target_q.copy()
-        if q is None:
+            joints = self._emit_q_deg or payload["arm_target_deg"]
+        key = (int(snap.get("frames") or 0), str(snap.get("status")), payload["active"],
+               payload["ik_failed"], None if joints is None else tuple(joints))
+        with self._lock:
+            if not force and key == self._last_emit_key:
+                return
+            self._last_emit_key = key
+        self._broadcast(joints)
+
+    def _pose_of(self, q_rad: Optional[np.ndarray]) -> Optional[List[float]]:
+        if q_rad is None:
             return None
         kin = self._get_kin()
         if kin is None:
             return None
         try:
             with self._kin_lock:
-                return pose_ctrl_from_target(kin, q)
+                return pose_ctrl_from_target(kin, q_rad)
         except Exception as e:
             logger.warning("目标位姿反算失败: %s", e)
             return None
+
+    def _target_pose_deg(self) -> Optional[List[float]]:
+        with self._lock:
+            q = None if self._target_q is None else self._target_q.copy()
+        return self._pose_of(q)
 
 
 follow_service = FollowService()

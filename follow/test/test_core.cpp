@@ -14,6 +14,7 @@
 
 #include "follow/cloud.hpp"
 #include "follow/frontend.hpp"
+#include "follow/gyro_filter.hpp"
 #include "follow/matching.hpp"
 #include "follow/pose_io.hpp"
 #include "follow/types.hpp"
@@ -406,6 +407,78 @@ TEST(Gyro, EmptyAndOutOfWindowBuffersAreNotSilentlyUsable) {
   const GyroDelta d = integrate_gyro(future, 0, 100'000'000);
   EXPECT_EQ(d.samples_used, 0);
   EXPECT_TRUE(d.stale);
+}
+
+// ---------------------------------------------------------------- 陀螺静止检测器（P1）
+// 契约：窗口没攒满前不表态；进入静止要连续确认（慢进）；退出只需窗口均值超 exit（快出）。
+// 退路是写死的：上电头 100 ms 报静止会把真正的初始运动冻掉。
+
+TEST(GyroStill, NoVerdictBeforeWindowIsFull) {
+  GyroStillDetector d;  // window_samples = 20
+  for (int i = 0; i < 19; ++i) {
+    d.push(Eigen::Vector3d::Zero());
+  }
+  EXPECT_FALSE(d.valid());
+  EXPECT_FALSE(d.still()) << "窗口没攒满时 still() 必须当无效";
+  d.push(Eigen::Vector3d::Zero());
+  EXPECT_TRUE(d.valid());
+}
+
+TEST(GyroStill, StillNeedsSustainedQuietAndExitsFast) {
+  GyroStillDetector d;  // enter=0.02, exit=0.05, window=20, confirm=20
+  const Eigen::Vector3d quiet(0.005, 0.0, 0.0);
+  // 攒满窗口（20 推）后还要连续确认：第 38 推时 confirm=19，差一推不许表态。
+  for (int i = 0; i < 38; ++i) {
+    d.push(quiet);
+  }
+  ASSERT_TRUE(d.valid());
+  EXPECT_FALSE(d.still()) << "确认推数不够就宣布静止 = 迟进失效";
+  d.push(quiet);
+  EXPECT_TRUE(d.still());
+  EXPECT_LT(d.recent_norm_rad_s(), 0.02);
+
+  // 迟滞：enter < 均值 < exit 的抖动不解冻（实测相机放稳时的陀螺抖动落在这条带里）。
+  for (int i = 0; i < 5; ++i) {
+    d.push(Eigen::Vector3d(0.03, 0.0, 0.0));
+  }
+  EXPECT_TRUE(d.still()) << "enter/exit 之间的抖动不该解冻";
+  // 超 exit 的运动：窗口滑动到均值超门就退，不等任何确认（快出是安全侧）。
+  for (int i = 0; i < 20; ++i) {
+    d.push(Eigen::Vector3d(0.1, 0.0, 0.0));
+  }
+  EXPECT_FALSE(d.still());
+
+  // 换档即归零：旧样本的"静止"结论不属于新档位。
+  d.reset();
+  EXPECT_FALSE(d.valid());
+  EXPECT_FALSE(d.still());
+}
+
+TEST(GyroStill, NaNSamplesAreDroppedNotAveraged) {
+  GyroStillDetector d;
+  // 先攒进静止；之后 NaN 样本必须被挡在窗口外，而不是把均值毒成 NaN。
+  for (int i = 0; i < 39; ++i) {
+    d.push(Eigen::Vector3d(0.005, 0.0, 0.0));
+  }
+  ASSERT_TRUE(d.still());
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  for (int i = 0; i < 30; ++i) {
+    d.push(Eigen::Vector3d(nan, nan, nan));
+  }
+  EXPECT_TRUE(d.still()) << "NaN 样本把静止结论毒掉了";
+  EXPECT_TRUE(std::isfinite(d.recent_norm_rad_s()));
+}
+
+TEST(GyroStill, ContradictoryParamsAreClampedAtConstruction) {
+  GyroStillDetector::Params p;
+  p.window_samples = 0;      // 非法：会除零/死循环的方向都要在构造期挡住（夹回 1）
+  p.confirm_samples = 0;
+  p.exit_rad_s = 0.0;        // < enter：迟滞方向写反，会被夹回 enter（迟滞不能消失）
+  GyroStillDetector d(p);
+  d.push(Eigen::Vector3d::Zero());
+  // window 被夹成 1：一推就攒满。若没夹住（0），这里要么除零要么永不 valid。
+  EXPECT_TRUE(d.valid());
+  EXPECT_TRUE(d.still()) << "confirm 夹成 1 后，一个安静样本就该表态";
 }
 
 // ---------------------------------------------------------------- 前端契约

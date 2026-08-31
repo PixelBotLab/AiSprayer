@@ -287,6 +287,8 @@ bool load_config(const std::string& path, FollowConfig* cfg, std::string* err) {
                   &errors);
     fetch<int>(tr, "max_sparse_streak", "整数", "follow.track.", &cfg->track.max_sparse_streak,
                &errors);
+    fetch<double>(tr, "gyro_rot_gate_deg", "小数", "follow.track.",
+                  &cfg->track.gyro_rot_gate_deg, &errors);
     fetch<double>(tr, "sparse_inlier_dist_m", "小数", "follow.track.",
                   &cfg->track.sparse.inlier_dist_m, &errors);
     fetch<int>(tr, "sparse_min_inliers", "整数", "follow.track.", &cfg->track.sparse.min_inliers,
@@ -297,6 +299,8 @@ bool load_config(const std::string& path, FollowConfig* cfg, std::string* err) {
   {
     fetch<std::string>(te, "map_path", "路径", "follow.teach.", &cfg->map_path_rel, &errors);
     fetch<int>(te, "frames", "整数", "follow.teach.", &cfg->teach_frames, &errors);
+    fetch<double>(te, "max_motion_deg_s", "小数", "follow.teach.", &cfg->teach_max_motion_deg_s,
+                  &errors);
   }
 
   const YAML::Node rt = section(f, "runtime", "follow.", &errors);
@@ -319,6 +323,9 @@ bool load_config(const std::string& path, FollowConfig* cfg, std::string* err) {
     fetch_vec(arm, "camera_to_base_fallback_euler_deg", 3, "follow.arm.",
               &cfg->arm_fallback_euler_deg, &errors);
     fetch<int>(arm, "poll_hz", "整数", "follow.arm.", &cfg->arm_poll_hz, &errors);
+    fetch<int>(arm, "emit_hz", "整数", "follow.arm.", &cfg->arm_emit_hz, &errors);
+    fetch<double>(arm, "max_joint_vel_deg_s", "小数", "follow.arm.",
+                  &cfg->arm_max_joint_vel_deg_s, &errors);
     fetch<bool>(arm, "teach_save_map", "布尔", "follow.arm.", &cfg->arm_teach_save_map, &errors);
   }
 
@@ -520,6 +527,21 @@ ConfigProblems check_config(FollowConfig* cfg, const std::string& root) {
                           " 超出 1~50：后端会夹到区间端点再用（上界是 C++ 快照接口的实测容量，"
                           "再高只是把自板的轮询开销堆在取流线程旁边）。");
   }
+  if (cfg->arm_emit_hz < 5 || cfg->arm_emit_hz > 100) {
+    add(items, false, "arm.emit_hz = " + std::to_string(cfg->arm_emit_hz) +
+                          " 超出 5~100：后端会夹到区间端点再用（关节流发射频率，仿真臂的刷新率就是它）。");
+  }
+  if (cfg->arm_max_joint_vel_deg_s <= 0.0 || cfg->arm_max_joint_vel_deg_s > 1000.0) {
+    add(items, true, "arm.max_joint_vel_deg_s = " + std::to_string(cfg->arm_max_joint_vel_deg_s) +
+                         " 不合理：轨迹平滑的关节角限速必须为正（参考 CR5 手动模式上限，典型 30~180）。");
+  }
+  if (cfg->teach_max_motion_deg_s < 0.0 || cfg->teach_max_motion_deg_s > 90.0) {
+    add(items, false, "teach.max_motion_deg_s = " + std::to_string(cfg->teach_max_motion_deg_s) +
+                          " 超出 0~90（0 = 关闭静止门）：按端点夹回再用。");
+  }
+  if (cfg->track.gyro_rot_gate_deg < 0.0) {
+    add(items, false, "track.gyro_rot_gate_deg 为负，按 0（关闭离群门）处理。");
+  }
   return out;
 }
 
@@ -540,7 +562,8 @@ std::string describe(const FollowConfig& c) {
      << c.track.max_rot_sigma_deg << "deg  aniso<" << c.track.max_group_anisotropy
      << "  inlier_ratio>=" << c.track.min_inlier_ratio
      << "  sparse_streak<=" << c.track.max_sparse_streak << "\n";
-  os << "  teach    : " << c.map_path << "  frames=" << c.teach_frames << "\n";
+  os << "  teach    : " << c.map_path << "  frames=" << c.teach_frames
+     << "  max_motion=" << c.teach_max_motion_deg_s << "deg/s\n";
   os << "  runtime  : mount=" << c.mount << "  dry_run=" << (c.dry_run ? "是" : "否")
      << "  servo_p=" << (c.enable_servo_p ? "开" : "关") << "  health=:" << c.health_port
      << "  max_cycles=" << c.max_cycles << "\n";
@@ -548,7 +571,9 @@ std::string describe(const FollowConfig& c) {
   for (size_t i = 0; i < c.arm_home_joints_deg.size(); ++i) {
     os << (i ? "," : "") << c.arm_home_joints_deg[i];
   }
-  os << "]deg  poll=" << c.arm_poll_hz << "Hz  teach_save_map="
+  os << "]deg  poll=" << c.arm_poll_hz << "Hz  emit=" << c.arm_emit_hz
+     << "Hz  max_joint_vel=" << c.arm_max_joint_vel_deg_s
+     << "deg/s  teach_save_map="
      << (c.arm_teach_save_map ? "是" : "否") << "  fallback_euler=[";
   for (size_t i = 0; i < c.arm_fallback_euler_deg.size(); ++i) {
     os << (i ? "," : "") << c.arm_fallback_euler_deg[i];

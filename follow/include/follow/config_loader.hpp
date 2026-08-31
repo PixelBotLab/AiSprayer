@@ -57,6 +57,9 @@ struct FollowConfig {
   std::string map_path_rel = "follow/out/reference.frmap";
   std::string map_path;          // 解析后
   int teach_frames = 1;
+  // P2 示教静止门（度/秒）：收帧窗口内陀螺平均角速度超过它 ⇒ 拒绝示教（基准不能建在运动上）。
+  // 0 = 关闭（无 IMU 的设备自动走这条路）。由相机服务的 FollowWorker 消费。
+  double teach_max_motion_deg_s = 2.0;
 
   // --- 标定与安装方式 ---
   std::string mount = "eye-to-hand";
@@ -79,6 +82,9 @@ struct FollowConfig {
   std::vector<double> arm_home_joints_deg{0.0, 0.0, -90.0, -90.0, -90.0, 0.0};
   std::vector<double> arm_fallback_euler_deg{0.0, 0.0, 0.0};
   int arm_poll_hz = 20;
+  // 关节流发射频率与轨迹平滑限速（消费方是 Python 后端的轨迹平滑器，这里只做自洽校验）。
+  int arm_emit_hz = 33;
+  double arm_max_joint_vel_deg_s = 90.0;
   bool arm_teach_save_map = true;
 
   std::string source;            // 实际读到的文件；空 = 全用内置默认

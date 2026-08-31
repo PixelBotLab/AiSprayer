@@ -526,6 +526,97 @@ TEST(Registration, ReversedTimestampIsStaleInput) {
   EXPECT_EQ(next.status, Status::kOk) << describe(next);
 }
 
+// ------------------------------------------------ P3 离群门：帧间旋转必须与同窗口陀螺积分互验。
+// 关键设计：门在"采纳之前"比对，不更新 T_last_good_ —— 坏帧不许污染后续初值。
+// 构造方式：深度帧按真值渲染（解析场景无估计误差），陀螺流另行构造 —— "相机看到的"
+// 与"陀螺感受到的"可以故意不一致，这正是坏帧的定义。
+
+TEST(Registration, GyroRotGateHoldsPoseWhenVisionDisagreesWithGyro) {
+  Rig rig;
+  TrackParams p = rig.p;
+  p.gyro_rot_gate_deg = 1.0;
+
+  // 坏帧：1.5° yaw。不用 3°+：初值链上没有稀疏解时初值=陀螺积分（这里≈0），
+  // GICP 只能从初值爬对应点距离内的路（≈35 mm），1.5°@0.9 m ≈24 mm 在射程内，
+  // 3°@0.9 m ≈47 mm 会爬到不收敛 —— 那时测的是 kLost 不是门本身。
+  const Eigen::Isometry3d bad_truth = make_T(0.0, 0.0, 0.0, 0.0, 0.0, 1.5);
+  const cv::Mat bad_frame = render_depth(rig.k, bad_truth, hit_workpiece);
+
+  Tracker t(p, rig.map);
+  const TrackResult r1 = t.track(FeatureFrame{}, rig.ref_depth, 1'000'000'000);
+  ASSERT_EQ(r1.status, Status::kOk) << describe(r1);
+
+  // 帧 1→2 之间：陀螺说"没在转"（200 Hz 零角速度，覆盖 1 s→2 s 窗口）。
+  for (int i = 0; i <= 200; ++i) {
+    t.push_gyro(1'000'000'000 + i * 5'000'000, Eigen::Vector3d::Zero());
+  }
+
+  const TrackResult r2 = t.track(FeatureFrame{}, bad_frame, 2'000'000'000);
+  EXPECT_EQ(r2.status, Status::kRotGated) << describe(r2);
+  EXPECT_TRUE(r2.rot_gated);
+  EXPECT_GT(r2.rot_gate_err_deg, 1.0) << "门限误差应接近真实旋转 1.5°：" << r2.rot_gate_err_deg;
+  EXPECT_LT(r2.rot_gate_err_deg, 2.5) << describe(r2);
+  // 位姿保持上一可信值，且 Tracker 内部目标也不许动。
+  EXPECT_TRUE(r2.T_ref_cam.matrix().isApprox(r1.T_ref_cam.matrix(), 1e-15))
+      << "坏帧把位姿动了：" << pose_msg("hold", r2.T_ref_cam, r1.T_ref_cam);
+  EXPECT_TRUE(t.T().matrix().isApprox(r1.T_ref_cam.matrix(), 1e-15));
+
+  // 恢复：下一帧回到真实位置，从保持住的位姿继续，不该带出坏帧的任何残留。
+  const TrackResult r3 = t.track(FeatureFrame{}, rig.ref_depth, 3'000'000'000);
+  EXPECT_EQ(r3.status, Status::kOk) << describe(r3);
+  EXPECT_LT(trans_err_mm(r3.T_ref_cam, r1.T_ref_cam), 0.5) << describe(r3);
+}
+
+TEST(Registration, GyroRotGateLetsMotionThroughWhenGyroAgrees) {
+  Rig rig;
+  TrackParams p = rig.p;
+  p.gyro_rot_gate_deg = 1.0;
+
+  const Eigen::Isometry3d truth = make_T(0.0, 0.0, 0.0, 0.0, 0.0, 1.5);
+  const cv::Mat frame = render_depth(rig.k, truth, hit_workpiece);
+
+  Tracker t(p, rig.map);
+  ASSERT_EQ(t.track(FeatureFrame{}, rig.ref_depth, 1'000'000'000).status, Status::kOk);
+  // 对照组：同样的帧，但陀螺如实记录了这 1 s 里 1.5°/s 的绕 Z 转动。
+  const double w = 1.5 * kPi / 180.0;
+  for (int i = 0; i <= 200; ++i) {
+    t.push_gyro(1'000'000'000 + i * 5'000'000, Eigen::Vector3d(0.0, 0.0, w));
+  }
+  const TrackResult r2 = t.track(FeatureFrame{}, frame, 2'000'000'000);
+  EXPECT_EQ(r2.status, Status::kOk) << describe(r2);
+  EXPECT_FALSE(r2.rot_gated);
+  EXPECT_LT(r2.rot_gate_err_deg, 0.5) << describe(r2);
+  EXPECT_LT(rot_err_deg(r2.T_ref_cam, truth), 0.2) << pose_msg("gated-but-real", r2.T_ref_cam, truth);
+}
+
+TEST(Registration, GyroRotGateIsOffWithoutGyroOrWhenDisabled) {
+  Rig rig;
+  const Eigen::Isometry3d truth = make_T(0.0, 0.0, 0.0, 0.0, 0.0, 1.5);
+  const cv::Mat frame = render_depth(rig.k, truth, hit_workpiece);
+
+  // 情形一：没喂过陀螺（或 IMU 停更 ⇒ 积分无效）：门必须静默关闭，不能把没陀螺的机器卡死。
+  {
+    Tracker t(rig.p, rig.map);
+    ASSERT_EQ(t.track(FeatureFrame{}, rig.ref_depth, 1'000'000'000).status, Status::kOk);
+    const TrackResult r2 = t.track(FeatureFrame{}, frame, 2'000'000'000);
+    EXPECT_EQ(r2.status, Status::kOk) << describe(r2);
+    EXPECT_FALSE(r2.rot_gated);
+  }
+  // 情形二：显式关门（0 = 关）：同样的"不一致"被放行，证明拦它的是门而不是别的什么。
+  {
+    TrackParams p = rig.p;
+    p.gyro_rot_gate_deg = 0.0;
+    Tracker t(p, rig.map);
+    ASSERT_EQ(t.track(FeatureFrame{}, rig.ref_depth, 1'000'000'000).status, Status::kOk);
+    for (int i = 0; i <= 200; ++i) {
+      t.push_gyro(1'000'000'000 + i * 5'000'000, Eigen::Vector3d::Zero());
+    }
+    const TrackResult r2 = t.track(FeatureFrame{}, frame, 2'000'000'000);
+    EXPECT_EQ(r2.status, Status::kOk) << describe(r2);
+    EXPECT_FALSE(r2.rot_gated);
+  }
+}
+
 // 换种子做蒙特卡洛。σ 声称的是"一次测量的散布"，那就直接量散布，和求解器自报的 σ 并排看。
 // 三个用途，每一个都是单次跑给不出来的：
 // (a) 证明噪声真的进了管线 —— sd 严格为 0 就说明"噪声"退化成了共模偏置（本文件真踩过，

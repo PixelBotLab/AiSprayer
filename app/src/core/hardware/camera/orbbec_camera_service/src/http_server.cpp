@@ -103,6 +103,8 @@ json HttpServer::followSnapshotJson(const FollowSnapshot& fs) {
     j["dropped"] = fs.dropped;
     j["rejected"] = fs.rejected;
     j["smooth_used"] = fs.smooth_used;
+    j["gyro_still"] = fs.gyro_still;   // 陀螺静止结论（P1：true 时旋转通道被冻结）
+    j["rot_gated"] = fs.rot_gated;     // 离群门累计拦截计数（P3）
 
     j["map_hash"] = fs.map_hash;
     j["map_voxels"] = fs.map_voxels;

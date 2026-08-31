@@ -97,10 +97,18 @@ Uncertainty no_uncertainty() {
   return u;
 }
 
+// 两个旋转的测地线距离（度）。P3 离群门用它比较"视觉测出的帧间旋转"与"陀螺积分出的帧间旋转"。
+// trace 必须夹进 [-1,1]：浮点噪声让它偶尔越界，而 acos 在界外吐 NaN —— NaN 能穿过一切比较。
+double rot_geodesic_deg(const Eigen::Matrix3d& Ra, const Eigen::Matrix3d& Rb) {
+  const Eigen::Matrix3d dR = Ra.transpose() * Rb;
+  const double c = std::max(-1.0, std::min(1.0, (dR.trace() - 1.0) / 2.0));
+  return std::acos(c) * 180.0 / M_PI;
+}
+
 }  // namespace
 
 Tracker::Tracker(TrackParams p, const ReferenceMap& map, uint32_t seed)
-    : p_(std::move(p)), map_(map), rng_(seed) {
+    : p_(std::move(p)), map_(map), rng_(seed), still_det_(p_.gyro_still) {
   // 稠密路径读 p_.zmin_m/zmax_m，稀疏路径读 p_.sparse.zmin_m/zmax_m —— 两套数各走各的时，
   // 同一条深度管线会对"哪些像素有效"给出两种答案，且两边都不报错。构造期强制单一来源。
   p_.sparse.zmin_m = p_.zmin_m;
@@ -115,6 +123,8 @@ void Tracker::push_gyro(int64_t ts_ns, const Eigen::Vector3d& omega_cam_rad_s) {
   while (gyro_.size() > p_.gyro_buf_max) {
     gyro_.pop_front();
   }
+  // 同源样本喂静止检测器：它只看向量模、不碰时间轴，与积分路径不会各算各的。
+  still_det_.push(omega_cam_rad_s);
 }
 
 TrackResult Tracker::track(const FeatureFrame& curr, const cv::Mat& depth_mm, int64_t ts_ns) {
@@ -194,14 +204,35 @@ TrackResult Tracker::track_impl(const FeatureFrame& curr, const cv::Mat& depth_m
   if (have_frame_) {
     gyro = integrate_gyro(gyro_, prev_ts_ns_, ts_ns, p_.gyro_max_gap_ns);
   }
+  // P1 静止判定随帧报出：只在陀螺数据新鲜（本窗口积分有效）时才表态，
+  // IMU 停更时宁可信"不知道"，也不能拿旧样本冒充"静止"。
+  r.gyro_still = gyro.valid() && still_det_.still();
+
+  // P3 离群门：候选解的帧间旋转必须与同窗口陀螺积分一致（测地线距离 ≤ 门限）。
+  // 陀螺是唯一能在"结果被采纳之前"独立验证旋转的信息源：一次坏帧（滑坡/遮挡后的假收敛）
+  // 的帧间旋转会和陀螺差出度级角度，而正常帧两者差在噪声级（0.0几度）。
+  // 退化场景不误伤：弱方向上 GICP 的旋转留在初值上不动（见下面 adopt 的注释），
+  // 帧间旋转≈初值链上的运动，与陀螺仍一致。
+  const auto rot_gate = [&](const Eigen::Isometry3d& T_cand) {
+    if (p_.gyro_rot_gate_deg <= 0.0 || !gyro.valid()) {
+      return false;
+    }
+    const Eigen::Matrix3d R_delta = T_last_good_.rotation().transpose() * T_cand.rotation();
+    r.rot_gate_err_deg = rot_geodesic_deg(gyro.R, R_delta);
+    return r.rot_gate_err_deg > p_.gyro_rot_gate_deg;
+  };
 
   // 三档，从"有实测"往"只有惯性/只有历史"退：
   Eigen::Isometry3d dT = Eigen::Isometry3d::Identity();
   if (sp) {
     dT = sp->T_prev_from_curr;  // 1) 特征 3D-3D：六自由度都有深度支撑
   } else if (gyro.valid()) {
-    // 2) 陀螺只补旋转。平移留 0 —— 没有深度依据的外推平移比不外推更危险。
+    // 2) 旋转信陀螺，平移信上一帧实测运动的常速外推。
+    // 只给旋转、平移留 0 曾在相机持续平移时坑过稠密配准：初值整体偏掉，
+    // GICP 不收敛直接掉到 lost。T_vel_ 的平移是实测（不是凭空外推），静止时它≈0，
+    // 退化为原来的纯陀螺旋转档，不引入新风险。
     dT.linear() = gyro.R;
+    dT.translation() = T_vel_.translation();
     r.gyro_used = true;
   } else {
     // 3) 沿用上一帧刚测到的帧间运动（相机固定时它≈单位阵，等价于"假设没动"）。
@@ -229,6 +260,12 @@ TrackResult Tracker::track_impl(const FeatureFrame& curr, const cv::Mat& depth_m
   }
 
   if (overlapped && g.converged && g.inliers >= static_cast<size_t>(min_inliers)) {
+    if (rot_gate(g.T)) {
+      // 疑似坏帧：不采纳、位姿保持上一可信值。不更新 T_last_good_ 也就不会污染后续初值；
+      // 本帧仍可当下一帧的稀疏参照（track() 里 prev 的更新条件不含 kRotGated）。
+      r.rot_gated = true;
+      return hold(Status::kRotGated);
+    }
     // s² = 2·cost/(3·N)：每条对应点 3 个自由度，GICP 自估的残差协方差正确时 E[ρ]=3 ⇒ s²≈1。
     // 实测工位场景 s² ~ 1e-4，即 GICP 假设的残差比真实残差大方差 100 倍（体素几何展宽 vs
     // 深度噪声）；σ 不乘 sqrt(s²) 就会把 0.1 mm 的精度报成 15 mm —— 见 uncertainty.hpp。
@@ -245,7 +282,12 @@ TrackResult Tracker::track_impl(const FeatureFrame& curr, const cv::Mat& depth_m
 
   // ---- 几何可用但求解失败：特征递推当替补，受连击上限约束 ----
   if (overlapped && sp && sparse_streak_ < std::max(1, p_.max_sparse_streak)) {
-    return adopt(Status::kOk, Estimator::kSparse, T_last_good_ * sp->T_prev_from_curr);
+    const Eigen::Isometry3d T_sp = T_last_good_ * sp->T_prev_from_curr;
+    if (rot_gate(T_sp)) {
+      r.rot_gated = true;
+      return hold(Status::kRotGated);
+    }
+    return adopt(Status::kOk, Estimator::kSparse, T_sp);
   }
 
   return hold(Status::kLost);

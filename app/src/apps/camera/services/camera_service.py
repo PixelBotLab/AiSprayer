@@ -8,6 +8,7 @@ import atexit
 import logging
 import subprocess
 import threading
+import collections
 from typing import Optional, Generator, Callable, List, Dict, Any, Tuple
 import numpy as np
 import cv2
@@ -55,8 +56,17 @@ class CameraService:
         self._status_callbacks: List[Callable] = []
         self._monitor_thread: Optional[threading.Thread] = None
         self._log_thread: Optional[threading.Thread] = None
+        self._log_emit_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._last_status: Dict[str, Any] = {}
+
+        # C++ 日志消费拆成两段：读线程只抽管道（永不阻塞），发射线程才做 logging（可能慢/卡）。
+        # 中间隔一个有界 deque（满了丢最旧）：就算 logging 停摆，管道也不会写满 ——
+        # 管道一满，C++ 侧所有打日志的线程（含 HTTP）会被阻塞式 write 冻住，
+        # 实测曾把 POST /follow 的响应卡 90+ 秒，页面报"后端服务无响应"（日志背压）。
+        self._log_buf: collections.deque = collections.deque(maxlen=8192)
+        self._log_cond = threading.Condition()
+        self._log_dropped = 0
 
         # Resolve Project Paths
         cur_dir = os.path.dirname(os.path.abspath(__file__))
@@ -148,6 +158,13 @@ class CameraService:
                     name="CppCameraLogReader"
                 )
                 self._log_thread.start()
+                # 发射线程随每次起进程重起；旧发射线程已在 stop_stream 里被 _stop_event 唤退。
+                self._log_emit_thread = threading.Thread(
+                    target=self._emit_cpp_logs,
+                    daemon=True,
+                    name="CppCameraLogEmitter"
+                )
+                self._log_emit_thread.start()
             except Exception as e:
                 logger.error(f"Failed to spawn C++ camera service: {e}")
                 return False
@@ -176,6 +193,8 @@ class CameraService:
         """
         self._is_streaming = False
         self._stop_event.set()
+        with self._log_cond:
+            self._log_cond.notify_all()   # 唤醒发射线程，让它看见 _stop_event 后退出
 
         with self._process_lock:
             proc = self._process
@@ -252,7 +271,8 @@ class CameraService:
 
     def _stream_cpp_logs(self, proc: subprocess.Popen):
         """
-        后台逐行消费 C++ 子进程控制台输出，统一通过 python logging 进行输出与广播。
+        只干一件事：尽快把 C++ 子进程的 stdout 抽进有界缓冲。这条线程里绝不做 logging ——
+        它一旦被 logging 卡住，管道就会写满，反压会把 C++ 服务里所有打日志的线程冻住。
         """
         try:
             if proc.stdout is None:
@@ -260,9 +280,11 @@ class CameraService:
             for raw_line in iter(proc.stdout.readline, ''):
                 if not raw_line:
                     break
-                level, msg = self._parse_cpp_log_line(raw_line)
-                if msg:
-                    cpp_logger.log(level, msg)
+                with self._log_cond:
+                    if len(self._log_buf) >= self._log_buf.maxlen:
+                        self._log_dropped += 1   # deque 会自动丢最旧，这里只计数
+                    self._log_buf.append(raw_line)
+                    self._log_cond.notify()
         except Exception:
             pass
         finally:
@@ -271,6 +293,26 @@ class CameraService:
                     proc.stdout.close()
             except Exception:
                 pass
+
+    def _emit_cpp_logs(self):
+        """从缓冲取行、解析、走 python logging。慢、卡都只影响这里，不波及管道抽排。"""
+        while not self._stop_event.is_set():
+            raw_line = None
+            dropped = 0
+            with self._log_cond:
+                while not self._log_buf and not self._stop_event.is_set():
+                    self._log_cond.wait(timeout=1.0)
+                if self._log_buf:
+                    raw_line = self._log_buf.popleft()
+                    dropped = self._log_dropped
+                    self._log_dropped = 0
+            if dropped:
+                logger.warning("C++ 相机日志丢行 %d 条（消费端跟不上，宁可丢日志也不反压冻住服务）", dropped)
+            if raw_line is None:
+                continue
+            level, msg = self._parse_cpp_log_line(raw_line)
+            if msg:
+                cpp_logger.log(level, msg)
 
     def _kill_stale_processes(self):
         """Clean up any orphan orbbec_camera_service processes."""

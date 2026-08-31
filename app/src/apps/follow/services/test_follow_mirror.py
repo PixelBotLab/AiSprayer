@@ -32,6 +32,7 @@ from apps.follow.mirror import (  # noqa: E402
     rotation_camera_to_base_fallback, tcp_pose_ctrl_from_joints,
 )
 from apps.follow.services import follow_service as fs_mod  # noqa: E402
+from apps.follow.trajectory import JointTrajectorySmoother  # noqa: E402
 from apps.calib.services.hand_eye.geometry import matrix_to_pose, pose_to_matrix  # noqa: E402
 from core.hardware.robot.cr5_kinematics import CR5Kinematics  # noqa: E402
 
@@ -241,6 +242,112 @@ class TestJointsToTarget(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(pose)))
 
 
+class TestTrajectorySmoother(unittest.TestCase):
+    """33 Hz 发射链的平滑器：限速、速度连续、掉头、钉位 —— 每条都对应一种页面上看得见的抖动。
+
+    实现是追踪式（一阶收敛 + 限速钳制），不是分段式：分段余弦缓动在 20 Hz 稠密
+    keyframe 下每个段边界速度归零，臂会变成 20 Hz 的"加-减-加-减"脉动，实测比不平滑还顿。
+    这里的用例就是钉住这个教训的。
+    """
+
+    def _sm(self, vel_deg=90.0):
+        return JointTrajectorySmoother(math.radians(vel_deg))
+
+    def test_no_output_before_first_keyframe(self):
+        sm = self._sm()
+        self.assertIsNone(sm.step(0.03))      # 没有"现在在哪儿"时不许发零向量冒充输出
+        self.assertFalse(sm.push_target(np.zeros(5)))            # 维数不对拒收
+        self.assertFalse(sm.push_target(np.full(6, np.nan)))     # 非有限拒收
+        self.assertIsNone(sm.step(0.03))
+
+    def test_rate_limit_holds_on_dense_stream(self):
+        """这是 33 Hz 契约的全部意义：相邻发射点的关节角变化率不许超限。
+        追踪式里速度逐拍被钳在 ±max_vel，所以这里用硬上限判，不给余量。"""
+        sm = self._sm(vel_deg=90.0)
+        sm.push_target(np.zeros(6))
+        target = np.zeros(6); target[1] = math.radians(20.0)
+        sm.push_target(target)
+        dt = 1.0 / 33.0
+        prev = sm.step(dt)
+        vmax = math.radians(90.0)
+        while sm.moving:
+            cur = sm.step(dt)
+            step_rate = float(np.max(np.abs(cur - prev))) / dt
+            self.assertLessEqual(step_rate, vmax * 1.001,
+                                 f"相邻发射点超速：{math.degrees(step_rate):.1f}°/s")
+            prev = cur
+        # 刹停后精确落位，之后钉住不动（静止时发射流 = 常数）。
+        self.assertTrue(np.allclose(prev, target, atol=1e-12))
+        again = sm.step(dt)
+        self.assertTrue(np.array_equal(again, prev))
+
+    def test_dense_keyframes_do_not_pulse_velocity(self):
+        """回归用例（旧分段余弦版的死刑判决）：目标以 20 Hz 匀速运动时，33 Hz 发射流的
+        逐拍速度在追稳后必须一直"在动"，不许在每个 keyframe 边界塌回零附近。
+        旧实现在这条用例下：每 50 ms 速度归零一次，脉动幅度 ≈ 全部速度。"""
+        sm = self._sm(vel_deg=90.0)
+        dt = 1.0 / 33.0
+        target_vel = math.radians(10.0)                        # 目标沿关节0匀速 10°/s（限速之内）
+        q = np.zeros(6)
+        sm.push_target(q.copy())
+        speeds = []
+        prev = None
+        t = 0.0
+        kf_next = 0.0
+        for _ in range(660):                                   # 20 s：足够走过收敛段
+            if t >= kf_next:                                   # 20 Hz keyframe：目标继续往前走
+                q = q.copy(); q[0] += target_vel * 0.05
+                sm.push_target(q)
+                kf_next += 0.05
+            cur = sm.step(dt)
+            if prev is not None:
+                speeds.append(abs(cur[0] - prev[0]) / dt)
+            prev = cur
+            t += dt
+        steady = speeds[100:]                                  # 丢掉前 3 s 的起步段
+        self.assertGreater(min(steady), target_vel * 0.35,
+                           f"追稳后速度仍塌到 {math.degrees(min(steady)):.2f}°/s —— 脉动复活")
+        # 也不许冲过头太多：拖尾上限 ≈ v_target/k + 一拍积分，给到 1° 封顶。
+        lag = q[0] - prev[0]
+        self.assertGreaterEqual(lag, -1e-3)
+        self.assertLess(lag, math.radians(1.0))
+
+    def test_retarget_reverses_from_current_output_without_jump(self):
+        """中途掉头：带着当前速度直接转向 —— 输出位连续（不跳变），方向可以反。
+        旧接口查 q_from/重规划；追踪式里没有段，判据换成输出序列的连续性。"""
+        sm = self._sm(vel_deg=90.0)
+        sm.push_target(np.zeros(6))
+        fwd = np.zeros(6); fwd[2] = math.radians(30.0)
+        sm.push_target(fwd)
+        mid = None
+        for _ in range(5):                                     # 走几步，让它带上正向速度
+            mid = sm.step(0.05)
+        self.assertGreater(mid[2], 0.0)
+        sm.push_target(np.zeros(6))                            # 掉头
+        prev = mid
+        crossed = False
+        for _ in range(2000):
+            cur = sm.step(0.03)
+            self.assertLessEqual(float(np.max(np.abs(cur - prev))),
+                                 math.radians(90.0) * 0.03 * 1.001)   # 每一步都限速，无跳变
+            if not crossed and cur[2] < 0.0:
+                crossed = True                                 # 允许过冲，不许回头绕大圈
+            if not sm.moving:
+                break
+            prev = cur
+        self.assertTrue(np.allclose(sm.step(0.03), np.zeros(6), atol=1e-9))
+
+    def test_reset_starts_fresh(self):
+        sm = self._sm()
+        sm.push_target(np.zeros(6))
+        tgt = np.zeros(6); tgt[3] = 0.5
+        sm.push_target(tgt)
+        sm.step(0.05)
+        sm.reset()
+        self.assertIsNone(sm.step(0.03))        # 旧基线下的速度与目标不属于下一次启动
+        self.assertFalse(sm.moving)
+
+
 class TestFollowServiceGuards(unittest.TestCase):
     """服务层的四条不变量：拒绝真实臂、保持上一目标、停止清空、后端失联可被看见。"""
 
@@ -362,10 +469,30 @@ class TestFollowServiceGuards(unittest.TestCase):
         self.svc._snapshot = {"status": "ok", "frames": 1}
         st = self.svc.status()
         for key in ("joints_deg", "target_pose", "arm_baseline_deg", "arm_target_deg",
-                    "ik_failed", "r_cb_source", "camera_service_reachable"):
+                    "ik_failed", "r_cb_source", "camera_service_reachable",
+                    "emit_hz", "max_joint_vel_deg_s"):
             self.assertIn(key, st)
         self.assertEqual(len(st["joints_deg"]), 6)
         self.assertEqual(len(st["target_pose"]), 6)
+        self.assertGreaterEqual(st["emit_hz"], 5)
+
+    def test_keyframe_flows_into_33hz_emit_chain(self):
+        """轮询解出的目标必须进发射链：抽干队列后发射一步，广播的 joints 在动。"""
+        self.svc._active = True
+        self.svc._baseline_q = np.radians(np.asarray(HOME_DEG))
+        self.svc._smoother.reset()
+        self.svc._smoother.push_target(self.svc._baseline_q)
+        self.svc._target_q = self.svc._baseline_q.copy()
+        self.svc._fetch_snapshot = lambda: self._snap(1, [0.030, 0.0, 0.0])
+        got = []
+        self.svc.register_ws_callback(lambda m: got.append(m))
+        self.svc._poll_once()                    # 解算 → keyframe 进队列
+        self.assertEqual(self.svc._kf_queue.qsize(), 1)
+        self.svc._emit_tick(1.0 / 33.0)          # 发射线程的一个 tick：抽队列 + 平滑器 + 广播
+        self.assertEqual(self.svc._kf_queue.qsize(), 0)
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["type"], "follow_state")
+        self.assertEqual(len(got[0]["data"]["joints_deg"]), 6)
 
 
 if __name__ == "__main__":

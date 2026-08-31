@@ -6,17 +6,23 @@
 //
 // 级别过滤在 LogLine 构造前做（宏里的 if），所以被过滤掉的行连时间戳都不取 ——
 // 每帧一条 debug 行在 15 fps 下不值 30 微秒的浪费。
-// 线程安全：flush 在一把全局锁里， localtime_r 而非 localtime（后者返回静态缓冲区，
+// 线程安全：flush 在一把全局锁里，localtime_r 而非 localtime（后者返回静态缓冲区，
 // 取流线程和健康服务器线程同时打日志就会互相踩）。
+// 非阻塞写出：stdout 是管道/终端时消费端可能停摆（管道写满），阻塞式 write 会把
+// 打日志的线程整个冻住（实测曾把 HTTP 线程冻 90+ 秒，页面报"后端服务无响应"）。
+// 所以置 O_NONBLOCK，写不进就丢行计数 —— 日志可以丢，业务线程不能冻。
 #pragma once
 
+#include <cerrno>
 #include <chrono>
 #include <cstdio>
 #include <ctime>
+#include <fcntl.h>
 #include <iostream>
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <unistd.h>
 
 namespace follow {
 
@@ -53,7 +59,9 @@ class LogLine {
   }
   ~LogLine() {
     std::lock_guard<std::mutex> lock(mutex());
-    std::cout << s_.str() << std::endl;
+    std::string out = s_.str();
+    out.push_back('\n');
+    writeNonBlocking(out);
   }
   LogLine(const LogLine&) = delete;
   LogLine& operator=(const LogLine&) = delete;
@@ -63,6 +71,27 @@ class LogLine {
   static std::mutex& mutex() {
     static std::mutex m;
     return m;
+  }
+
+  // EAGAIN 丢行保线程；普通文件（重定向）上 O_NONBLOCK 无效果，永远写成功。
+  static void writeNonBlocking(const std::string& line) {
+    static bool nb_init = [] {
+      const int fl = ::fcntl(STDOUT_FILENO, F_GETFL);
+      if (fl >= 0) ::fcntl(STDOUT_FILENO, F_SETFL, fl | O_NONBLOCK);
+      return true;
+    }();
+    (void)nb_init;
+    const char* p = line.data();
+    size_t left = line.size();
+    while (left > 0) {
+      const ssize_t n = ::write(STDOUT_FILENO, p, left);
+      if (n < 0) {
+        if (errno == EINTR) continue;
+        return;   // 丢这一行：消费端跟不上，不能反过来冻住业务线程
+      }
+      p += n;
+      left -= static_cast<size_t>(n);
+    }
   }
 
  private:

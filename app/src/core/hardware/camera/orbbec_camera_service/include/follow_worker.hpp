@@ -7,7 +7,8 @@
 //   * 拿不到厂商 SDK 的设备时间戳。FrameData 上是主机毫秒时钟，粒度比 15 fps 的帧周期粗，
 //     于是"同一毫秒内的两帧"无法区分 —— 处理成丢帧（见 loop()），不造假 +1ns 时间。
 //   * 板载 IMU 陀螺仪由 CameraDriver 以 ~200Hz 独立流启动并读取硬件外参 T_cam_gyro，
-//     每帧配准前由 drainGyroSamples 注入跟踪器，提供高频旋转初值与抗抖支持。
+//     每帧配准前由 drainGyroSamples 注入跟踪器：①帧间旋转初值 ②离群帧互验门（P3）
+//     ③静止检测（P1：静止时旋转通道冻结）。示教期另做静止门（P2）。
 //
 // 线程模型：一条自己的工作线程 + 一份 latest 快照（HTTP 侧只读快照，绝不在请求线程里算 GICP）。
 // 帧从 CameraDriver::getLatestFrame 取，**不能用 waitForNextFrame**：那个接口会推进驱动里的
@@ -82,6 +83,8 @@ struct FollowSnapshot {
     uint64_t frames = 0;              // 真正解算过的帧数
     uint64_t dropped = 0;             // 有新帧但没赶上（算不过来 / 时间戳同毫秒）
     uint64_t rejected = 0;            // 帧被守卫挡下（无深度、尺寸不符、对齐未开……）
+    uint64_t rot_gated = 0;           // 被陀螺离群门拦下的帧数（P3：帧间旋转与陀螺积分不一致）
+    bool gyro_still = false;          // 陀螺确认相机静止：旋转通道已冻在冻结点上（P1）
     int smooth_used = 0;              // 平均窗口里现在有几帧
 
     uint64_t map_hash = 0;            // 换工件、换体素都会变；重启后能确认还是那份基准
@@ -187,6 +190,14 @@ private:
     uint64_t frames_ = 0;        // 真正解算过的帧
     uint64_t dropped_ = 0;       // 有新帧但没赶上 / 同毫秒不可区分
     uint64_t rejected_ = 0;      // 被 frameUsable 挡下
+    uint64_t rot_gated_ = 0;     // 被陀螺离群门拦下（P3）
+    uint64_t still_frames_ = 0;  // 静止冻结生效的帧数（P1，退出静止时随摘要一起打）
+    // P1 静止冻结：陀螺确认相机没在转时，旋转输出冻在冻结点上（平移照常更新）。
+    // 冻住的是"进入静止那一刻的平滑旋转"，不是单帧值 —— 否则冻结本身会引入一次跳变。
+    bool rot_frozen_ = false;
+    Eigen::Matrix3d frozen_R_ = Eigen::Matrix3d::Identity();
+    int64_t still_since_ms_ = 0;
+    double last_log_norm_rad_s_ = 0.0;
     double fps_ = 0.0;
     int64_t fps_window_ms_ = 0;
     uint64_t fps_window_frames_ = 0;

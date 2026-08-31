@@ -49,6 +49,22 @@ lsof -t -i :5173 | xargs -r kill -9 2>/dev/null
 # Give OS a moment to reap processes
 sleep 1
 
+# 关掉 Orbbec 相机的 USB 自动休眠（power/control=auto 时内核会主动把设备挂起）。
+# 实测 Gemini 336L 工作电流 896mA（USB3 上限 900mA 边缘）+ auto 策略，运行中会间歇性
+# 从总线掉线（dmesg: USB disconnect）—— 表现为取流突然停滞、看门狗反复重连。
+# 设备每次重新枚举后节点路径不变但实例会重建，所以每次启动都要重新设一遍。
+echo "[Prep] Disabling USB autosuspend for Orbbec cameras..."
+for vid in /sys/bus/usb/devices/*/idVendor; do
+    if grep -q "^2bc5$" "$vid" 2>/dev/null; then
+        dev_dir="$(dirname "$vid")"
+        if echo on > "$dev_dir/power/control" 2>/dev/null; then
+            echo "  - $dev_dir: autosuspend -> on"
+        else
+            echo "  - $dev_dir: 无权设置（需要 sudo 运行本脚本才能生效）"
+        fi
+    fi
+done
+
 echo "[1/2] Starting FastAPI Backend..."
 # Use .venv python if available, fallback to system python3
 if [ -f "$APP_DIR/.venv/bin/python3" ]; then
@@ -60,7 +76,11 @@ else
 fi
 
 cd "$APP_DIR/src" || exit 1
-PYTHONUNBUFFERED=1 PYTHONPATH="$PROJECT_ROOT/src:$APP_DIR/src:$PYTHONPATH" "$PYTHON_BIN" main.py &
+# stdout/stderr 必须落到文件，不能接终端：后端日志的 console handler 写 stdout，
+# 一旦终端那头停止消费（SSH 掉线/终端挂起），write() 会阻塞住 logging，进而把
+# C++ 相机服务的日志管道抽排也卡死 —— 整个服务（含 HTTP）被日志背压冻住，
+# 页面上就是"使能 follow 失败，后端服务无响应"。落文件后这条故障链不存在。
+PYTHONUNBUFFERED=1 PYTHONPATH="$PROJECT_ROOT/src:$APP_DIR/src:$PYTHONPATH" "$PYTHON_BIN" main.py >> "$LOG_DIR/backend.console.log" 2>&1 &
 BACKEND_PID=$!
 echo "Backend started with PID: $BACKEND_PID"
 

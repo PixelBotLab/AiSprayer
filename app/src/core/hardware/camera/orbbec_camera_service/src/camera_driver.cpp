@@ -89,7 +89,6 @@ void CameraDriver::resetHardwareConnection() {
     }
     device_.reset();
     ctx_.reset();
-
     // 设备句柄一放掉就交还独占锁：下一次 tryConnectDevice 会重新排队取锁，而这段空档正是
     // follow_pose / follow_node 能合法接手相机的时机。锁由内核持有，所以进程被杀也不会留残锁。
     if (dev_lock_.held()) {
@@ -99,6 +98,7 @@ void CameraDriver::resetHardwareConnection() {
 
     connected_ = false;
     consecutive_timeouts_ = 0;
+    soft_restart_attempts_ = 0;        // 硬重连后账本重开
     {
         std::lock_guard<std::mutex> f_lock(status_mutex_);
         status_.online = false;
@@ -112,6 +112,29 @@ void CameraDriver::resetHardwareConnection() {
         status_.depth_align_mode = "disabled";
         status_.depth_align_enabled = false;
     }
+}
+
+bool CameraDriver::trySoftPipelineRestart() {
+    // 前提：调用方（captureLoop）此刻没持 pipe_mutex_。这里自己拿，与硬重连/档位切换同级别互斥。
+    std::lock_guard<std::mutex> lock(pipe_mutex_);
+    if (!running_ || !device_) {
+        return false;
+    }
+    try {
+        stopPipelineAndSensors();
+        pipe_.reset();
+        pipe_ = std::make_unique<ob::Pipeline>(device_);   // 设备不动，只重建取流通道
+        if (!configureAndStartPipeline()) {
+            return false;
+        }
+    } catch (const ob::Error& e) {
+        LOG_WARN("Camera", "软重启 pipeline 失败（", e.getMessage(), "），升级到硬重连");
+        return false;
+    } catch (const std::exception& e) {
+        LOG_WARN("Camera", "软重启 pipeline 异常（", e.what(), "），升级到硬重连");
+        return false;
+    }
+    return true;
 }
 
 bool CameraDriver::tryConnectDevice() {
@@ -185,6 +208,7 @@ bool CameraDriver::tryConnectDevice() {
         }
 
         consecutive_timeouts_ = 0;
+        soft_restart_attempts_ = 0;    // 新连接成功，账本重开
         connected_ = true;
         {
             std::lock_guard<std::mutex> lock(status_mutex_);
@@ -578,15 +602,43 @@ void CameraDriver::captureLoop() {
 
         if (!frameset) {
             consecutive_timeouts_++;
-            LOG_WARN("Camera", "waitForFrameset timeout (", consecutive_timeouts_, "/3). Checking connection...");
+            const uint64_t silent_ms = last_frameset_ms_ > 0 ?
+                ((uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count() - last_frameset_ms_) : 0;
+            LOG_WARN("Camera", "waitForFrameset timeout (", consecutive_timeouts_, "/3)，帧流已停滞 ",
+                     silent_ms, "ms. Checking connection...");
             if (consecutive_timeouts_ >= 3) {
-                LOG_ERROR("Camera", "3 consecutive frame timeouts. Camera hardware disconnected or USB bus reset. Initiating automatic re-connection...");
+                consecutive_timeouts_ = 0;
+                // 分级恢复：先软重启（不动设备/不重新枚举），失败两次才升级硬重连。
+                // 实测硬重连后帧率经常掉到 3~4 fps，还会触发内核级重新枚举，把一次短暂停滞
+                // 放大成十几秒的故障循环 —— 所以设备没真死之前不动它。
+                if (soft_restart_attempts_ < 2) {
+                    soft_restart_attempts_++;
+                    frames_since_recovery_ = 0;
+                    LOG_WARN("Camera", "连续 3 次无帧：先软重启 pipeline（第 ", soft_restart_attempts_,
+                             "/2 次，不碰 USB）");
+                    if (trySoftPipelineRestart()) {
+                        LOG_INFO("Camera", "软重启成功：取流通道已重建，设备与 USB 未动");
+                        continue;
+                    }
+                    LOG_ERROR("Camera", "软重启失败，升级硬重连（设备将重新枚举）");
+                } else {
+                    LOG_ERROR("Camera", "软重启连续失败两次，相机可能真的断了。Initiating automatic re-connection...");
+                }
                 resetHardwareConnection();
             }
             continue;
         }
 
         consecutive_timeouts_ = 0;
+        last_frameset_ms_ = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        if (soft_restart_attempts_ > 0 && ++frames_since_recovery_ >= 150) {
+            // 恢复后连续 150 帧（~10 s @15fps）正常才算稳住：清账本，下一次停滞再从软重启开始。
+            LOG_INFO("Camera", "帧流已稳定 10 s，恢复账本清零");
+            soft_restart_attempts_ = 0;
+            frames_since_recovery_ = 0;
+        }
 
         try {
             auto color_frame = frameset->colorFrame();

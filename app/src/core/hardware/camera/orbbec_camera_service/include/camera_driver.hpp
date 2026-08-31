@@ -77,6 +77,10 @@ private:
     // 于是分辨率换了、内参没换，这是会产出"自洽但全错"点云的那种 bug。
     bool refreshIntrinsics();
     void resetHardwareConnection();
+    // 出流停滞时的第一档自救：只重启 pipeline，不拆设备、不重新枚举 USB。
+    // 硬重连会把设备从总线上拽下来重新枚举，重枚举后帧率经常掉到 3~4 fps，
+    // 反而把一次短暂停滞放大成长时间故障 —— 所以先试软的，失败才升级。
+    bool trySoftPipelineRestart();
     void updateFpsStats();
 
 private:
@@ -85,6 +89,10 @@ private:
     std::atomic<bool> connected_{false};
     std::atomic<bool> calib_mode_{false};
     int consecutive_timeouts_ = 0;
+    // 分级恢复账本：软重启连续失败几次后才升级到硬重连；以及恢复后连续正常帧数（够多才算稳住，清零账本）。
+    int soft_restart_attempts_ = 0;
+    int frames_since_recovery_ = 0;
+    uint64_t last_frameset_ms_ = 0;   // 上一次拿到 frameset 的时刻（诊断用：停滞了多久）
 
     // follow 取流档位（follow_mode_ 是原子，其余三个只在持 pipe_mutex_ 时读写）
     std::atomic<bool> follow_mode_{false};

@@ -36,6 +36,7 @@ enum class Status {
   kDegenerate,      // 解算器"成功"但自由度不可观 —— 绝不能当 kOk 用
   kOutOfEnvelope,   // 与参考地图重叠不足：需要重新示教，不是跟丢
   kLost,            // 两个解算器都失败
+  kRotGated,        // 帧间旋转与陀螺积分互验失败：疑似坏帧，位姿保持上一可信值（P3 离群门）
   kNoDepth,         // 有效深度点不足
   kStaleInput,      // 帧过旧 / 时间戳倒退
   kConfigInvalid,   // 内参或参数不可用
@@ -48,6 +49,7 @@ inline const char* to_string(Status s) {
     case Status::kDegenerate: return "degenerate";
     case Status::kOutOfEnvelope: return "out_of_envelope";
     case Status::kLost: return "lost";
+    case Status::kRotGated: return "rot_gated";
     case Status::kNoDepth: return "no_depth";
     case Status::kStaleInput: return "stale_input";
     case Status::kConfigInvalid: return "config_invalid";

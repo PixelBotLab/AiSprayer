@@ -254,6 +254,11 @@ bool FollowWorker::doEnable(std::string* err) {
     LOG_INFO("Follow", "已使能：取流 ", cfg_.capture.width, "x", cfg_.capture.height, "@",
              cfg_.capture.fps, "fps（640x480 是硬件 D2C 的上限档），示教帧数=", cfg_.teach_frames,
              "。下一步 POST /api/v1/camera/follow/teach。");
+    // 陀螺能力一次性讲清楚，出问题时日志里能对上号：三个用途，各自可关。
+    LOG_INFO("Follow", "陀螺能力：①静止冻结（陀螺确认静止时旋转通道冻住、平移照常更新）②离群门 ",
+             cfg_.track.gyro_rot_gate_deg, "°（帧间旋转 vs 陀螺积分互验，0=关）③示教静止门 ",
+             cfg_.teach_max_motion_deg_s, "°/s",
+             camera_->hasImu() ? "（0=关）" : "（本机无 IMU，自动跳过）");
     return true;
 }
 
@@ -324,6 +329,13 @@ bool FollowWorker::teach(bool save_map, std::string* err) {
     int64_t last_ts_ns = 0;
     int cap_w = 0, cap_h = 0;
 
+    // P2 示教静止门：示教窗口内顺路统计陀螺角速度。与工作线程共用同一个样本队列，这里拿到的是
+    // 其中一部分 —— 判断"动没动"只需样本代表性，不需要独占。各用各的量，不混时间戳。
+    const bool motion_gate_on = cfg_.teach_max_motion_deg_s > 0.0 && camera_->hasImu();
+    double motion_sum_rad_s = 0.0;
+    double motion_max_rad_s = 0.0;
+    uint64_t motion_samples = 0;
+
     while (static_cast<int>(depths.size()) < need) {
         if (!running_) {
             if (err) *err = "服务正在退出，示教中止。";
@@ -339,6 +351,19 @@ bool FollowWorker::teach(bool save_map, std::string* err) {
             LOG_ERROR("Follow", msg);
             if (err) *err = msg;
             return false;
+        }
+
+        if (motion_gate_on) {
+            std::vector<follow::GyroSample> gy;
+            if (camera_->drainGyroSamples(&gy)) {
+                for (const auto& g : gy) {
+                    const double n = g.omega_cam_rad_s.norm();
+                    if (!std::isfinite(n)) continue;
+                    motion_sum_rad_s += n;
+                    motion_max_rad_s = std::max(motion_max_rad_s, n);
+                    ++motion_samples;
+                }
+            }
         }
 
         FrameData fd;
@@ -364,6 +389,30 @@ bool FollowWorker::teach(bool save_map, std::string* err) {
         last_ts_ns = static_cast<int64_t>(fd.timestamp_ms) * 1000000;
         cap_w = fd.depth.cols;
         cap_h = fd.depth.rows;
+    }
+
+    if (motion_gate_on) {
+        // 样本太少（刚使能、IMU 还没出流）时不表态：宁可不拦，也不拿三五个样本定生死。
+        if (motion_samples >= 20) {
+            const double avg_deg_s =
+                motion_sum_rad_s / static_cast<double>(motion_samples) * kRad2Deg;
+            const double max_deg_s = motion_max_rad_s * kRad2Deg;
+            if (avg_deg_s > cfg_.teach_max_motion_deg_s) {
+                char msg[256];
+                std::snprintf(msg, sizeof(msg),
+                              "示教被静止门拒绝：收帧窗口内相机在动（平均 %.2f°/s、峰值 %.2f°/s > "
+                              "门限 %.2f°/s）。停稳相机再示教，否则基准里会烙进运动畸变。",
+                              avg_deg_s, max_deg_s, cfg_.teach_max_motion_deg_s);
+                LOG_ERROR("Follow", msg);
+                if (err) *err = msg;
+                return false;
+            }
+            LOG_INFO("Follow", "示教静止门通过：收帧窗口内角速度 平均 ", avg_deg_s,
+                     "°/s、峰值 ", max_deg_s, "°/s（门限 ", cfg_.teach_max_motion_deg_s,
+                     "°/s，样本 ", motion_samples, "）");
+        } else {
+            LOG_WARN("Follow", "示教静止门：陀螺样本不足（", motion_samples, " 个），本次不拦");
+        }
     }
 
     const follow::TrackParams tp = trackParamsForCurrentStream();
@@ -441,6 +490,8 @@ void FollowWorker::loop() {
             quiet_log_frames_ = 0;
             quiet_max_dt_ = 0.0;
             quiet_max_dr_ = 0.0;
+            rot_frozen_ = false;   // Tracker 重建 ⇒ 静止检测器也归零，旧冻结点不属于新档位/新图
+            still_frames_ = 0;
             if (map && !map->empty() && frontend_) {
                 tracker_ = std::make_unique<follow::Tracker>(trackParamsForCurrentStream(), *map,
                                                              kTrackerSeed);
@@ -578,10 +629,38 @@ void FollowWorker::loop() {
         const double ms = static_cast<double>(steady_now_ms() - t0);
         ++frames_;
 
+        // P3 离群门：帧间旋转与同窗口陀螺积分偏差超门限 ⇒ 这帧不采纳（Tracker 已 hold 上一可信值）。
+        // 坏帧通常成串出现（遮挡抖动、反光闪烁），每一帧都记一笔，事后按累计数看严重程度。
+        if (r.rot_gated) {
+            ++rot_gated_;
+            LOG_WARN("Follow", "离群门拦下坏帧：帧间旋转与陀螺积分偏差 ", r.rot_gate_err_deg,
+                     "° > ", cfg_.track.gyro_rot_gate_deg, "°，保持上一可信位姿（累计 ",
+                     rot_gated_, " 帧）");
+        }
+
         // 统计一帧不落，报出去的是平滑位姿 —— 与 follow_pose 完全同一条策略：静止单帧噪声
         // 1~2 mm 比读数名还大，N 帧平均压到 sd/√N 才有意义（见 pose_smoother.hpp）。
         smoother_.push(r.T_ref_cam);
-        const Eigen::Isometry3d disp_T = (smoother_.size() > 1) ? smoother_.value() : r.T_ref_cam;
+        Eigen::Isometry3d disp_T = (smoother_.size() > 1) ? smoother_.value() : r.T_ref_cam;
+
+        // P1 静止冻结：陀螺确认相机没在转 ⇒ 旋转冻在进入静止那一刻的平滑旋转上，平移照常更新。
+        // 迟进快出的迟滞在检测器里（gyro_filter.hpp）；这里只做冻/解冻与记账。
+        if (r.gyro_still && r.estimator != follow::Estimator::kNone) {
+            if (!rot_frozen_) {
+                frozen_R_ = disp_T.rotation();
+                still_since_ms_ = steady_now_ms();
+                still_frames_ = 0;
+                LOG_INFO("Follow", "陀螺确认静止：旋转通道冻结（冻在进入静止时的平滑旋转上，平移照常更新）");
+            }
+            disp_T.linear() = frozen_R_;
+            ++still_frames_;
+        } else if (rot_frozen_) {
+            LOG_INFO("Follow", "陀螺检测到运动：旋转通道解冻（本次静止冻结了 ", still_frames_,
+                     " 帧 / ", (steady_now_ms() - still_since_ms_), " ms，其间旋转抖动被整体抹掉）");
+            rot_frozen_ = false;
+            still_frames_ = 0;
+        }
+
         const follow::DobotPose dp = follow::to_dobot(disp_T);   // 与发臂同一套换算：mm + ZYX deg
 
         const CameraStatus cst = camera_->getStatus();
@@ -617,6 +696,8 @@ void FollowWorker::loop() {
         snap_.cloud_points = r.cloud_points;
         snap_.compute_ms = ms;
         snap_.smooth_used = smoother_.used();
+        snap_.gyro_still = r.gyro_still;   // 本帧时刻的陀螺静止结论（页面/日志排查用）
+        snap_.rot_gated = rot_gated_;      // 离群门累计拦截计数
         snap_.frames = frames_;
         snap_.dropped = dropped_;
         snap_.rejected = rejected_;
@@ -639,6 +720,8 @@ void FollowWorker::loop() {
                 snap_.reason = "与参考几何重叠不足：要重新示教，不是跟丢";
             } else if (r.status == follow::Status::kLost) {
                 snap_.reason = "两个解算器都失败：位姿保持上一可信值";
+            } else if (r.status == follow::Status::kRotGated) {
+                snap_.reason = "帧间旋转与陀螺积分互验失败（疑似坏帧）：位姿保持上一可信值";
             } else {
                 snap_.reason = std::string("状态 ") + snap_.status + "：位姿保持上一可信值";
             }
@@ -696,6 +779,11 @@ void FollowWorker::loop() {
             }
             if (snap_.holding_last_pose && len < (int)sizeof(log_buf) - 32) {
                 len += std::snprintf(log_buf + len, sizeof(log_buf) - len, "  <保持上一位姿>");
+            }
+            if (rot_frozen_ && len < (int)sizeof(log_buf) - 48) {
+                len += std::snprintf(log_buf + len, sizeof(log_buf) - len,
+                                     "  〔静止·旋转冻结 %lld 帧〕",
+                                     static_cast<long long>(still_frames_));
             }
 
             LOG_INFO("Follow", log_buf);
