@@ -157,6 +157,13 @@ json HttpServer::followSnapshotJson(const FollowSnapshot& fs) {
     j["cloud_points"] = fs.cloud_points;
 
     j["compute_ms"] = fs.compute_ms;
+    // 分阶段耗时：compute_ms 是聚合数，任何性能改动在它上面都无法归因（第一轮就把收益算在了
+    // 单路径成本上，而实测收益来自"掉进稀疏回退的帧占比"）。四段之和 < compute 是正常的
+    // （中间还有守卫、平滑与快照拷贝）。sparse 只在该帧真跑了特征互验时非零。
+    j["stage"] = {{"extract_ms", fs.extract_ms},   // 特征前端（ORB/SIFT 提取）
+                  {"cloud_ms", fs.cloud_ms},       // 深度→点云（随点数走）
+                  {"sparse_ms", fs.sparse_ms},     // 帧间特征互验（六自由度实测运动）
+                  {"dense_ms", fs.dense_ms}};      // GICP 稠密配准（配合 iterations 看迭代成本）
     j["fps"] = fs.fps;
     j["frames"] = fs.frames;
     j["dropped"] = fs.dropped;
@@ -166,13 +173,34 @@ json HttpServer::followSnapshotJson(const FollowSnapshot& fs) {
     j["rot_frozen"] = fs.rot_frozen;     // 旋转通道此刻真的被冻住（时限兜底或暂停期会让它 ≠ 上一条）
     j["frozen_ms"] = fs.frozen_ms;       // 本次冻结已持续多久
     j["rot_gated"] = fs.rot_gated;       // 离群门累计拦截计数（P3）
+    j["rot_gate_err_deg"] = fs.rot_gate_err_deg;  // 本帧"视觉旋转 vs 陀螺旋转"的测地线偏差：调门限看它
+    j["rot_gate_limit_deg"] = fs.rot_gate_limit_deg;  // 本帧实际生效的动态门限；门随转角走，err 单独看无意义
     // 陀螺链路自检，单独一组：这几个字段是给"功能没生效"和"生效了但场景不对"分诊用的，
     // 页面正常路径不读它们（gyro_still=false 到底是"相机在动"还是"根本没样本"，就看这里）。
     j["gyro"] = {{"time_ready", fs.gyro_time_ready},   // 设备→主机时间基是否已定标
                  {"extrinsics_loaded", fs.gyro_extrinsics_loaded},  // T_cam_gyro 是否读到合法非 Identity 旋转
                  {"buf", fs.gyro_buf},                 // 跟踪器缓冲长度
                  {"samples", fs.gyro_frame_samples},   // 本帧积分窗口真正用到的样本数
+                 {"pushed", fs.gyro_frame_pushed},     // 本帧交付到达的样本数（与时间戳无关）
+                 // 覆盖率 S/P：实测结构值 ~0.58（IMU 交付比帧交付慢半帧，尾部样本解算时还没到货），
+                 // 所以它低于 1 不是故障，明显低于 0.58 才是真在丢样本。后两个是指认数：三条时间轴
+                 // 各比主机快多少，真机 1.0005 / 0.9992 ⇒ 戳都在该在的轴上。
+                 {"coverage", fs.gyro_cov},
+                 {"frame_dev_ratio", fs.gyro_frame_dev_ratio},
+                 {"gyro_stamp_ratio", fs.gyro_stamp_ratio},
+                 // 覆盖账：span_ms 含常值补积 ⇒ ≈帧周期才说明旋转没少算；extrap_ms 是其中"预测"
+                 // 而非"测量"的时长；gap_end_ms 只剩没补上的残缺口（IMU 真停更才非零）。
+                 {"span_ms", fs.gyro_span_ms},
+                 {"extrap_ms", fs.gyro_extrap_ms},
+                 {"gap_end_ms", fs.gyro_gap_end_ms},
                  {"dead_frames", fs.gyro_dead_frames}, // 连续"有缓冲却积不到样本"的帧数
+                 // 断供与域错配是两件事，必须各有一个字段：alive=false 持续 ⇒ 静止冻结/离群门/
+                 // 帧间初值三条一起失效（现象只是"放下相机后旋转还在晃"），而 dead_frames 只抓
+                 // 得到"缓冲里有样本却框不到"那一种。
+                 {"alive", fs.gyro_alive},             // 本帧是否真有陀螺样本到货
+                 {"starved_frames", fs.gyro_starved_frames},  // 连续零样本交付的帧数（≥30 已报 ERROR）
+                 {"callbacks", fs.gyro_callbacks},  // 回调累计数：两次快照的差/时间差≈200/s 才说明
+                                                    // 传感器在出帧；不涨=设备侧死，在涨而 pushed=0=时间基丢的
                  {"bias_dps", fs.gyro_bias_dps},       // 零偏估计（度/秒）
                  {"resid_dps", fs.gyro_resid_dps},     // 残差模均值（度/秒），静止门限比的是它
                  {"bias_ready", fs.gyro_bias_ready}};  // false ⇒ 静止结论还不可信

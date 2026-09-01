@@ -93,11 +93,14 @@ struct GyroSample {
 struct GyroDelta {
   Eigen::Matrix3d R = Eigen::Matrix3d::Identity();  // R_{t0<-t1}，右乘 body 速率积分
   int samples_used = 0;
-  int64_t span_ns = 0;   // 实际积分覆盖的时间跨度
-  int64_t gap_end_ns = 0;  // 最后一样本到 t1 的缺口（IMU 停更的量度）
-  bool stale = false;    // 覆盖不足或无样本：不要拿它当 R_init
+  int64_t span_ns = 0;   // 真实样本覆盖的时间跨度（不含外推段）
+  int64_t gap_end_ns = 0;  // 最后一条真实样本到 t1 的缺口（IMU 停更的量度）
+  int64_t extrap_ns = 0;   // gap_end 里用末样本角速度常值补积掉的时长，见 integrate_gyro
+  bool stale = false;      // 无可信覆盖：不要拿它当 R_init
 
-  bool valid() const { return samples_used > 0 && !stale; }
+  // 真实样本与补积段都不足以覆盖这个区间才算无效 —— "窗口内一条都没到货"是常态
+  // （交付延迟 ≥ 一个帧周期时），此时末样本常值外推仍是比"假设没动"好得多的初值。
+  bool valid() const { return !stale; }
 };
 
 // 把 [t0,t1] 之间的陀螺样本积成旋转（body 右乘）。样本须已旋到相机系，且按时间升序。
@@ -114,6 +117,7 @@ inline GyroDelta integrate_gyro(const SampleBuf& buf, int64_t t0_ns, int64_t t1_
   }
 
   const GyroSample* prev = nullptr;
+  const GyroSample* last = nullptr;
   int64_t first_used = 0;
   int64_t last_ts = 0;
   for (const auto& s : buf) {
@@ -131,6 +135,7 @@ inline GyroDelta integrate_gyro(const SampleBuf& buf, int64_t t0_ns, int64_t t1_
       continue;
     }
     last_ts = s.ts_ns;
+    last = &s;
     if (out.samples_used == 0) {
       first_used = ta;
     }
@@ -144,9 +149,28 @@ inline GyroDelta integrate_gyro(const SampleBuf& buf, int64_t t0_ns, int64_t t1_
 
   out.span_ns = out.samples_used > 0 ? last_ts - first_used : 0;
   out.gap_end_ns = out.samples_used > 0 ? t1_ns - last_ts : t1_ns - t0_ns;
-  // 积分覆盖不足请求区间的一半，或末样本到图像时刻还有明显缺口 → 认为不可信。
-  out.stale = out.samples_used == 0 || out.gap_end_ns > max_gap_ns ||
-              out.span_ns + max_gap_ns < (t1_ns - t0_ns);
+
+  // 末段补积：IMU 交付比帧交付晚约半个帧周期（真机 66ms 窗口尾部固定缺 25~34ms），
+  // 所以"窗口尾部没有样本"是结构，不是故障。不补的话 R_init 和离群门用的 ΔR 只覆盖
+  // 一半时间，转速越高少转越多（15 fps 下 10 dps 就少算 0.33°，而 P3 门的标定目标是 2°、
+  // 现场配到 10°）—— 门限一收紧就会在好帧上误触发，且触发后不更新参照，是正反馈。
+  // 判据只用**最后一条到货样本**的角速度
+  // 常值外推（33ms 尺度上足够准），窗口内一条都没到货时退回 t0 前最后一条。
+  // 缺口大过 max_gap_ns 时不补：那是 IMU 停更，拿半秒前的速率外推等于凭空造旋转。
+  const GyroSample* tail = last ? last : prev;
+  if (tail != nullptr) {
+    const int64_t miss = t1_ns - tail->ts_ns;
+    if (miss > 0 && miss <= max_gap_ns) {
+      const double dt = static_cast<double>(miss) * 1e-9;
+      const double th = tail->omega_cam_rad_s.norm();
+      if (th > 1e-12) {
+        out.R = out.R * Eigen::AngleAxisd(th * dt, tail->omega_cam_rad_s / th).toRotationMatrix();
+      }
+      out.extrap_ns = miss;
+    }
+  }
+  // 既没有真实样本、也没补出东西来 ⇒ 这个区间完全没被测量；缺口超上限 ⇒ IMU 停更。
+  out.stale = (out.samples_used == 0 && out.extrap_ns == 0) || out.gap_end_ns > max_gap_ns;
   return out;
 }
 

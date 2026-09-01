@@ -465,11 +465,58 @@ TEST(Gyro, ClockDomainMismatchIsSilentButLeavesExactlyTheTripwireFingerprint) {
   EXPECT_GT(fixed.samples_used, 0) << "平移后仍积不到样本：修的就不是域问题了";
   EXPECT_TRUE(fixed.valid());
   EXPECT_LT(fixed.gap_end_ns, kGyroNs) << "IMU 其实很新，不该报大缺口";
-  // 角度与已覆盖时长严格成比例 ⇒ 设备 dt 没被换算吃掉。
-  const Eigen::Matrix3d expect =
-      Eigen::AngleAxisd(kW * static_cast<double>(fixed.span_ns) * 1e-9, Eigen::Vector3d::UnitZ())
-          .toRotationMatrix();
+  // 角度与"真实覆盖 + 末段补积"时长严格成比例 ⇒ 设备 dt 没被换算吃掉。
+  const Eigen::Matrix3d expect = Eigen::AngleAxisd(
+      kW * static_cast<double>(fixed.span_ns + fixed.extrap_ns) * 1e-9, Eigen::Vector3d::UnitZ())
+                                      .toRotationMatrix();
   EXPECT_LT((fixed.R - expect).norm(), 1e-9);
+}
+
+// 真机指纹（RK3588 + 336L）：IMU 交付比帧交付晚约半个帧周期，积分窗口尾部固定缺 33 ms。
+// 这段缺席既不是丢样本也不是时间域错位，但会让 R_init 与离群门用的 ΔR 系统性少转半帧
+// （10 dps 时就少算 0.33°，与 P3 门标定的 2° 同量级）⇒ 必须按末样本角速度补积，且补积量要能读出来。
+TEST(Gyro, ExtrapolatesStructuralTailGapWithoutFakingCoverage) {
+  constexpr int64_t kFrameNs = 66'000'000;
+  constexpr int64_t kGyroNs = 5'000'000;      // 200 Hz
+  constexpr int64_t kTailMiss = 33'000'000;   // 实测交付滞后
+  constexpr double kW = 0.35;                 // rad/s ≈ 20 dps
+
+  auto make_buf = [&](int64_t t1, int64_t lag_ns) {
+    std::vector<GyroSample> buf;
+    for (int64_t ts = t1 - kFrameNs * 4; ts <= t1 - lag_ns; ts += kGyroNs) {
+      buf.push_back(GyroSample{ts, Eigen::Vector3d(0, 0, kW)});
+    }
+    return buf;
+  };
+  const int64_t t0 = 1'000'000'000'000LL;
+  const int64_t t1 = t0 + kFrameNs;
+
+  // (a) 15 fps：窗口内只到一半样本 ⇒ 补积后总角度必须等于整个帧周期的解析解。
+  const auto buf = make_buf(t1, kTailMiss);
+  const GyroDelta d = integrate_gyro(buf, t0, t1);
+  ASSERT_TRUE(d.valid());
+  EXPECT_GT(d.samples_used, 4);
+  EXPECT_NEAR(d.gap_end_ns, kTailMiss, kGyroNs) << "缺口不是交付滞后量级";
+  EXPECT_EQ(d.gap_end_ns, d.extrap_ns) << "缺口没被全部补积";
+  EXPECT_NEAR(d.span_ns + d.extrap_ns, kFrameNs, kGyroNs) << "补积后仍没覆盖到 t1";
+  const Eigen::Matrix3d full =
+      Eigen::AngleAxisd(kW * kFrameNs * 1e-9, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+  EXPECT_LT((d.R.transpose() * full - Eigen::Matrix3d::Identity()).norm(), 1e-3)
+      << "少转半帧：门会在好帧上误触发";
+
+  // (b) 30 fps：交付滞后 ≥ 一个帧周期，窗口内一条都没到货 —— 曾经在这里整条陀螺通道
+  //     静默停摆（samples_used==0 ⇒ valid()==false），现在靠 t0 前末样本补积仍然可用。
+  const auto tight = make_buf(t1, kTailMiss * 2);
+  const GyroDelta t = integrate_gyro(tight, t1 - 33'000'000, t1);
+  EXPECT_EQ(t.samples_used, 0) << "用例前提已变：这条窗口里其实有样本";
+  ASSERT_TRUE(t.valid()) << "纯补积被判无效 ⇒ 高帧率档陀螺白给";
+  EXPECT_GT(t.extrap_ns, 0);
+
+  // (c) 真停更：末样本比 t1 老 300 ms，绝不能拿半秒前的速率外推出一个"看起来在用"的旋转。
+  const GyroDelta dead = integrate_gyro(make_buf(t1, 300'000'000), t0, t1);
+  EXPECT_TRUE(dead.stale);
+  EXPECT_FALSE(dead.valid());
+  EXPECT_EQ(dead.extrap_ns, 0);
 }
 
 // ---------------------------------------------------------------- 陀螺静止检测器（P1）

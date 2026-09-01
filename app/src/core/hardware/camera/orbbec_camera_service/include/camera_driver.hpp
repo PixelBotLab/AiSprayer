@@ -75,6 +75,11 @@ public:
     int64_t gyroTimeOffsetNs() const { return gyro_time_base_.offset_ns(); }
     int64_t gyroTimeSpreadNs() const { return gyro_time_base_.spread_ns(); }
     uint64_t gyroDroppedBeforeReady() const { return gyro_time_base_.dropped_before_ready(); }
+    // IMU 回调**进入次数**（在时间基换算之前计数）。有它才能把两种断供分开：
+    //   计数不动 ⇒ 传感器/SDK 侧一帧都没交付 —— start() 没抛异常不等于在出数，实测发生过一整轮 0 帧；
+    //   计数在涨而队列空 ⇒ 帧到了但全被 toHostNs()==0 丢弃（时间基未就绪或又被 reset 了）。
+    // 两种在 /follow/status 上长得一模一样（pushed=0），处置却完全相反。
+    uint64_t gyroCallbacksTotal() const { return gyro_cb_count_.load(std::memory_order_relaxed); }
 
 private:
     void captureLoop();
@@ -116,6 +121,11 @@ private:
     Eigen::Matrix3d R_cam_gyro_ = Eigen::Matrix3d::Identity();
     Eigen::Vector3d t_cam_gyro_ = Eigen::Vector3d::Zero();
     bool has_imu_ = false;
+    // IMU 回调进入次数：只在回调里自增，读侧是诊断线程 ⇒ relaxed 足够（要的是"有没有在涨"，
+    // 不是与队列内容的一致快照）。停流时**不清零**：跨停流单调递增才能看出"这一轮比上一轮少"。
+    std::atomic<uint64_t> gyro_cb_count_{0};
+    // 本次 start() 之时的回调总数：定标窗口内的增量拿它当底（见 captureLoop 里那条 ERROR）。
+    std::atomic<uint64_t> gyro_cb_baseline_{0};
     // 陀螺样本进队列前一律经 GyroTimeBase 换到与 FrameData::track_ts_ns 同一域。
     // 忘了这一步的后果不是崩溃而是静默：follow 的积分窗口框不到任何样本。
     GyroTimeBase gyro_time_base_;

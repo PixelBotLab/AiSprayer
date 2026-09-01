@@ -3,8 +3,11 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <pthread.h>
 #include <thread>
 #include <vector>
+
+#include <opencv2/core.hpp>
 
 #include "follow/pose_io.hpp"
 #include "follow/teach_core.hpp"
@@ -17,6 +20,13 @@ namespace {
 
 int64_t steady_now_ms() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+// 分阶段计时必须到 µs：extract / 建云 都是几毫秒量级，ms 粒度会把它们量成 0 或 1。
+int64_t steady_now_us() {
+    return std::chrono::duration_cast<std::chrono::microseconds>(
                std::chrono::steady_clock::now().time_since_epoch())
         .count();
 }
@@ -258,8 +268,9 @@ bool FollowWorker::doEnable(std::string* err) {
              "。下一步 POST /api/v1/camera/follow/teach。");
     // 陀螺能力一次性讲清楚，出问题时日志里能对上号：三个用途，各自可关。
     LOG_INFO("Follow", "陀螺能力：enable_imu=", (cfg_.capture.enable_imu ? "true" : "false"),
-             " ①静止冻结（陀螺确认静止时旋转通道冻住、平移照常更新）②离群门 ",
-             cfg_.track.gyro_rot_gate_deg, "°（帧间旋转 vs 陀螺积分互验，0=关）③示教静止门 ",
+             " ①静止冻结（陀螺确认静止时旋转通道冻住、平移照常更新）②离群门（动态）下限 ",
+             cfg_.track.gyro_rot_gate_deg, "° + 斜率 ", cfg_.track.gyro_rot_gate_relax,
+             "°/° 陀螺转角（帧间旋转 vs 陀螺积分互验，下限 0=关）③示教静止门 ",
              cfg_.teach_max_motion_deg_s, "°/s",
              !cfg_.capture.enable_imu ? "（配置关闭）"
                                       : (camera_->hasImu() ? "（0=关）" : "（本机无 IMU，自动跳过）"));
@@ -357,18 +368,52 @@ void FollowWorker::applyStillFreeze(bool gyro_still, int64_t now_ms, Eigen::Isom
 }
 
 void FollowWorker::checkGyroChannel(const follow::TrackResult& r) {
-    constexpr uint64_t kDeadFramesAlarm = 30;  // ≈2 s @15fps：够跨过一帧抖动，又不至于拖太久
+    // ≈2 s @15fps：够跨过一帧抖动与定标窗口（8 帧 ≈ 0.5 s），又不至于拖太久
+    constexpr uint64_t kAlarmFrames = 30;
 
-    // 指纹只有一条：缓冲里有样本（push_gyro 在收）而积分窗口一个都没框到（两个时钟不在同一
-    // 个域，或窗口长度超过了缓冲跨度）。这两种情况的处置完全不同 —— 后者是 gyro_horizon_ms
-    // 设小了，前者是 gyro_time_base_ 没定标 —— 所以报错文本里把定标状态一起打出来。
-    if (r.gyro_buf <= 0 || r.gyro_samples > 0) {
+    // ---- ① 断供：本帧一个陀螺样本都没到货 ----
+    // 旧实现在 gyro_buf<=0 时直接 return（把它当成"链路活着"），于是 10:18 那一轮 806 帧
+    // 全程 0 样本一声不响，只剩"相机放桌上陀螺没静止、臂还在微晃"这种要人来猜的现象。
+    // 断供恰恰是**最**该喊的一种：它不是"精度差一点"，而是三条用途一起没命 ——
+    // 静止冻结（P1）、离群门（P3）、帧间旋转初值。
+    const uint64_t cb = camera_->gyroCallbacksTotal();
+    if (r.gyro_pushed > 0) {
+        gyro_starved_frames_ = 0;
+        gyro_starved_reported_ = false;   // 链路恢复：下一次故障还得喊
+    } else {
+        if (gyro_starved_frames_ == 0) gyro_starved_cb_base_ = cb;   // 起点基准只在这一帧取
+        ++gyro_starved_frames_;
+        if (gyro_starved_frames_ >= kAlarmFrames && !gyro_starved_reported_) {
+            gyro_starved_reported_ = true;
+            // 回调计数把两种成因分开指名：它们在 /follow/status 上长得一模一样（pushed=0），
+            // 处置却相反 —— 一种要动设备/USB，另一种要查时间基。
+            const uint64_t cb_delta = cb - gyro_starved_cb_base_;
+            const std::string cause = cb_delta == 0
+                ? std::string("传感器侧：这 ") + std::to_string(gyro_starved_frames_) +
+                  " 帧里 IMU 回调一次都没进（gyro_sensor_->start() 成功 ≠ 在出数，流是死的）"
+                : std::string("时间基侧：IMU 回调到了 ") + std::to_string(cb_delta) +
+                  " 次却一条都没入队 ⇒ 样本全被 toHostNs()==0 丢弃";
+            LOG_ERROR("Follow", "陀螺断供：连续 ", gyro_starved_frames_,
+                      " 帧零样本交付（缓冲 ", r.gyro_buf, " 条）。成因 — ", cause,
+                      "。当前时间基定标 ", (camera_->gyroTimeBaseReady() ? "已完成" : "未完成"),
+                      "（offset=", camera_->gyroTimeOffsetNs() / 1000000,
+                      " ms，定标前累计丢弃 ", camera_->gyroDroppedBeforeReady(),
+                      " 条）。后果不是崩溃而是三条用途一起静默失效：静止冻结不进（旋转输出跟着"
+                      "视觉噪声抖，表现为放下相机臂还晃）、离群门不参与、帧间旋转没有初值。");
+        }
+    }
+
+    // ---- ② 时间域错配：缓冲里有样本（push_gyro 在收），而积分窗口既框不到任何样本、连末样本
+    // 补积都没有可用的底 ⇒ 两域差了数量级（时间基没定标/没换算）。
+    // 刻意不把"窗口内 samples==0"单独当故障：交付滞后 ≥ 一个帧周期时它是正常工况（高帧率档
+    // 必然如此），那时 extrap_ns>0 恰好证明陀螺与帧同轴，把它报警就是把常态喊成失效。
+    if (r.gyro_buf <= 0 || r.gyro_samples > 0 || r.gyro_extrap_ns > 0) {
         gyro_dead_frames_ = 0;
         gyro_dead_reported_ = false;  // 链路活着时重新武装：下一次故障还得喊
         return;
     }
     ++gyro_dead_frames_;
-    if (gyro_dead_frames_ < kDeadFramesAlarm || gyro_dead_reported_) {
+    if (gyro_dead_frames_ < kAlarmFrames || gyro_dead_reported_) {
         return;
     }
     gyro_dead_reported_ = true;
@@ -377,7 +422,68 @@ void FollowWorker::checkGyroChannel(const follow::TrackResult& r) {
               "（时间基定标 ", (camera_->gyroTimeBaseReady() ? "已完成" : "未完成"),
               "，offset=", camera_->gyroTimeOffsetNs() / 1000000, " ms，定标前丢弃 ",
               camera_->gyroDroppedBeforeReady(), " 条）。后果不是崩溃而是静默降级：帧间旋转初值"
-              "与离群门都不起作用，只有静止检测还在工作（它不看时间轴）。");
+              "与离群门都不起作用，静止检测还能用（它不看时间轴）但样本可能整批是旧域的。");
+}
+
+void FollowWorker::updateTimeScale(const FrameData& fd, int64_t host_now_ms,
+                                   int64_t burst_last_ns, const follow::TrackResult& r) {
+    // 分母只认一个：主机到达间隔（稳态就是帧周期，也是 P 那个计数覆盖的时间长度）。
+    // 拿它当尺子去量另外两条时间轴推进得有多快，三个数里必然两个≈1，剩下的那个就是错的戳。
+    const double host_ms = static_cast<double>(host_now_ms - ts_last_host_ms_);
+    if (ts_last_host_ms_ > 0 && host_ms > 0.0 && host_ms < 5000.0) {
+        if (ts_last_dev_us_ > 0 && fd.device_ts_us > ts_last_dev_us_) {
+            const double dev_ms = static_cast<double>(fd.device_ts_us - ts_last_dev_us_) * 1e-3;
+            const double inst = dev_ms / host_ms;
+            gyro_frame_dev_ema_ = gyro_frame_dev_ema_ <= 0.0
+                                      ? inst : gyro_frame_dev_ema_ + 0.02 * (inst - gyro_frame_dev_ema_);
+        }
+        if (ts_last_gyro_ns_ > 0 && burst_last_ns > ts_last_gyro_ns_) {
+            const double inst = static_cast<double>(burst_last_ns - ts_last_gyro_ns_) * 1e-6 / host_ms;
+            gyro_stamp_ema_ = gyro_stamp_ema_ <= 0.0
+                                  ? inst : gyro_stamp_ema_ + 0.02 * (inst - gyro_stamp_ema_);
+        }
+    }
+    ts_last_host_ms_ = host_now_ms;
+    ts_last_dev_us_ = fd.device_ts_us;
+    if (burst_last_ns > 0) ts_last_gyro_ns_ = burst_last_ns;
+
+    // 覆盖率：P 按主机交付计、S 按设备域窗口计。真机测出的 S/P≈0.58 是**结构**（交付比帧慢
+    // 半帧 ⇒ 尾部那半帧的样本解算时还没到货），integrate_gyro 已按末样本把它补积回去，
+    // 所以这里低于 1 不该报警。只有明显低于结构值才说明样本在回调与 drain 之间真掉了。
+    // 抓"时间域不同"靠的是上面两个比率：帧设备戳、陀螺戳各自相对主机到达轴走多快。
+    if (r.gyro_pushed > 0) {
+        double inst = static_cast<double>(r.gyro_samples) / static_cast<double>(r.gyro_pushed);
+        if (inst > 3.0) inst = 3.0;  // 单帧窗口对齐本身允许 ±1 帧的样本错位，别让它染坏 EMA
+        gyro_cov_ema_ = gyro_cov_ema_ <= 0.0 ? inst : gyro_cov_ema_ + 0.05 * (inst - gyro_cov_ema_);
+    }
+
+    constexpr double kCovFloor = 0.30;   // 结构值 ~0.58 的一半：低于它才是真在丢样本
+    constexpr double kStampTol = 0.05;   // 钟差/ppm 级误差远小于此，偏离 5% 只可能是戳的语义错
+    if (frames_ > 120) {
+        const bool stamp_bad =
+            (gyro_frame_dev_ema_ > 0.0 && std::abs(gyro_frame_dev_ema_ - 1.0) > kStampTol) ||
+            (gyro_stamp_ema_ > 0.0 && std::abs(gyro_stamp_ema_ - 1.0) > kStampTol);
+        const bool cov_bad = gyro_cov_ema_ > 0.0 && gyro_cov_ema_ < kCovFloor;
+        if (!stamp_bad && !cov_bad) {
+            gyro_cov_bad_frames_ = 0;
+            gyro_cov_reported_ = false;   // 恢复后重新武装
+            return;
+        }
+        ++gyro_cov_bad_frames_;
+        if (gyro_cov_reported_ || gyro_cov_bad_frames_ < 60) return;
+        gyro_cov_reported_ = true;
+        const auto r2 = [](double v) { return std::round(v * 100.0) / 100.0; };
+        LOG_ERROR("Follow", "陀螺时间轴自述异常（",
+                  stamp_bad ? "帧戳或陀螺戳与主机到达轴不成比例" : "覆盖率跌破结构值", "）：",
+                  "滚动 S/P ", r2(gyro_cov_ema_), "（结构值 ~0.58，低于 ", kCovFloor,
+                  " 才是真丢样本），帧设备戳 ", r2(gyro_frame_dev_ema_),
+                  "，陀螺戳 ", r2(gyro_stamp_ema_),
+                  "，主机=1.00；本帧真实覆盖 ", r.gyro_span_ns / 1000000, "ms + 缺口 ",
+                  r.gyro_gap_end_ns / 1000000, "ms = 帧周期（缺口里已常值补积 ",
+                  r.gyro_extrap_ns / 1000000, "ms，span+extrap≈帧周期才算旋转没少算）。"
+                  "比率明显小于 1 的那一路打的是"
+                  "'语义戳'而非'时刻戳'，后果不是崩溃而是帧间旋转初值与离群门静默停摆。");
+    }
 }
 
 bool FollowWorker::teach(bool save_map, std::string* err) {
@@ -542,6 +648,26 @@ void FollowWorker::loop() {
     constexpr int kWaitFrameSleepMs = 4;
     constexpr int64_t kFpsWindowMs = 2000;
 
+    // 本线程承载 follow 的全部单帧预算，所以它落在哪个核就是 p50/p95 本身。配置里
+    // `track.threads` 的注释一直写着"绑 A76"，但从来没有任何一处真的设过亲和性 —— 实测进程
+    // 76 条线程里 71 条的允许集是 0-7，落核全凭 EAS；A55@1.8G 上同样的数学慢约 5 倍，而那
+    // 只会表现成"偶尔慢一帧"，从输出上看不出任何原因。命名是为了事后能从 /proc 认出它。
+    pthread_setname_np(pthread_self(), "follow_worker");
+    cpu_set_t big_cores;
+    CPU_ZERO(&big_cores);
+    for (const int cpu : {4, 5, 6, 7}) {   // RK3588 的 4×A76，与 corner_detector 同一约定
+        CPU_SET(cpu, &big_cores);
+    }
+    if (pthread_setaffinity_np(pthread_self(), sizeof(big_cores), &big_cores) != 0) {
+        LOG_WARN("Follow", "跟随线程绑大核失败：落核交给调度器，单帧成本可能出现数倍抖动且无从归因");
+    }
+    // OpenCV 并行度此前只由 corner_detector 里那次**进程级** setNumThreads(2) 决定（谁先初始化
+    // 谁说了算），而实测前端 extract 28ms = 单帧成本的 53%，正是被这两条线程卡住的。
+    const int cv_threads = std::max(1, cfg_.track.threads);
+    cv::setNumThreads(cv_threads);
+    LOG_INFO("Follow", "跟随线程就绪：绑 A76(4-7)，OpenCV 并行度 ", cv_threads,
+             "（生效 ", cv::getNumThreads(), "）");
+
     fps_window_ms_ = steady_now_ms();
 
     while (running_) {
@@ -574,6 +700,16 @@ void FollowWorker::loop() {
             freeze_holdoff_until_ms_ = 0;   // 暂停期属于旧检测器那一轮，别把它带过来
             gyro_dead_frames_ = 0;
             gyro_dead_reported_ = false;
+            // 时间尺度累加器同样归零：换档/换图后设备可能重启过（时间戳原点变了），
+            // 跨这两次取差值会算出一个毫无意义的比率。
+            ts_last_dev_us_ = 0;
+            ts_last_host_ms_ = 0;
+            ts_last_gyro_ns_ = 0;
+            gyro_cov_ema_ = 0.0;
+            gyro_frame_dev_ema_ = 0.0;
+            gyro_stamp_ema_ = 0.0;
+            gyro_cov_bad_frames_ = 0;
+            gyro_cov_reported_ = false;
             if (map && !map->empty() && frontend_) {
                 tracker_ = std::make_unique<follow::Tracker>(trackParamsForCurrentStream(), *map,
                                                              kTrackerSeed);
@@ -716,28 +852,38 @@ void FollowWorker::loop() {
 
         // 注入积累的板载 IMU 陀螺仪样本（~200Hz 高频旋转初值）
         std::vector<follow::GyroSample> gyros;
+        int64_t burst_last_ns = 0;
         if (camera_->drainGyroSamples(&gyros)) {
             for (const auto& gs : gyros) {
                 tracker_->push_gyro(gs.ts_ns, gs.omega_cam_rad_s);
             }
+            if (!gyros.empty()) burst_last_ns = gyros.back().ts_ns;
         }
 
+        const int64_t t_extract_us = steady_now_us();
         follow::FeatureFrame ff = frontend_->extract(fd.color, ts_ns);
+        const double extract_ms = static_cast<double>(steady_now_us() - t_extract_us) * 1e-3;
         follow::TrackResult r = tracker_->track(ff, fd.depth, ts_ns);
         const double ms = static_cast<double>(steady_now_ms() - t0);
         ++frames_;
 
         // 陀螺通道自检：时间域错配没有任何输出上的症状，只能主动查（见 checkGyroChannel）。
         checkGyroChannel(r);
+        // 同一批样本的"交付数 vs 窗口内数"，以及三条时间轴谁在打语义戳（见 updateTimeScale）。
+        updateTimeScale(fd, t0, burst_last_ns, r);
 
         // P3 离群门：帧间旋转与同区间陀螺积分偏差超门限 ⇒ 这帧不采纳（Tracker 已 hold 上一可信值）。
+        // 门限是本区间动态算出的（下限 + 斜率 × 陀螺实际转角），所以必须打印生效值 r.rot_gate_limit_deg
+        // 而不是配置项 —— 只印常数会让人按固定的 2° 去理解一条 5.8° 的拦截。
         // 计数逐帧准确，日志节流：坏帧通常成串出现（遮挡抖动、反光闪烁），每帧一条 WARN 会把
         // 真正要看的遥测行冲掉，而日志落在板上还抢 IO。第一条必打，之后每 10 条打一条。
         if (r.rot_gated) {
             ++rot_gated_;
             if (rot_gated_ == 1 || rot_gated_ % 10 == 0) {
                 LOG_WARN("Follow", "离群门拦下坏帧：帧间旋转与陀螺积分偏差 ", r.rot_gate_err_deg,
-                         "° > ", cfg_.track.gyro_rot_gate_deg, "°，保持上一可信位姿（累计 ",
+                         "° > 本帧动态门限 ", r.rot_gate_limit_deg,
+                         "°（下限 ", cfg_.track.gyro_rot_gate_deg, "° + 斜率 ",
+                         cfg_.track.gyro_rot_gate_relax, "×转角），保持上一可信位姿（累计 ",
                          rot_gated_, " 帧）");
             }
         }
@@ -786,9 +932,16 @@ void FollowWorker::loop() {
         snap_.gicp_cost = r.gicp_cost;
         snap_.cloud_points = r.cloud_points;
         snap_.compute_ms = ms;
+        snap_.extract_ms = extract_ms;
+        snap_.cloud_ms = r.cloud_ms;
+        snap_.sparse_ms = r.sparse_ms;
+        snap_.dense_ms = r.dense_ms;
         snap_.smooth_used = smoother_.used();
         snap_.gyro_still = r.gyro_still;   // 本帧时刻的陀螺静止结论（页面/日志排查用）
         snap_.rot_gated = rot_gated_;      // 离群门累计拦截计数
+        snap_.rot_gate_err_deg = r.rot_gate_err_deg;  // 本帧余量：门限调参看的是它的分布
+        // 门限随转角动态变化，误差单独看没有意义 —— 必须与当帧门限成对读才知道是紧还是宽。
+        snap_.rot_gate_limit_deg = r.rot_gate_limit_deg;
         // 冻结策略的真实状态：gyro_still 只是判据，rot_frozen 才是"输出此刻真的被冻住"。
         // 两者不等的情形就是要看的：时限兜底正在掐断一次误冻，或暂停期还没走完。
         snap_.rot_frozen = rot_frozen_;
@@ -797,7 +950,20 @@ void FollowWorker::loop() {
         snap_.gyro_extrinsics_loaded = cst.gyro_extrinsics_loaded;
         snap_.gyro_buf = r.gyro_buf;
         snap_.gyro_frame_samples = r.gyro_samples;
+        snap_.gyro_frame_pushed = r.gyro_pushed;
+        snap_.gyro_cov = gyro_cov_ema_;
+        snap_.gyro_frame_dev_ratio = gyro_frame_dev_ema_;
+        snap_.gyro_stamp_ratio = gyro_stamp_ema_;
+        // 报"有效覆盖"而不是原始字段：补积段与真实样本对旋转的贡献等价，所以 span_ms 含
+        // 补积、gap_end_ms 只报没补上的残缺口 ⇒ span+gap≈帧周期，且 gap 明显非零才是真故障。
+        snap_.gyro_span_ms = static_cast<double>(r.gyro_span_ns + r.gyro_extrap_ns) * 1e-6;
+        snap_.gyro_extrap_ms = static_cast<double>(r.gyro_extrap_ns) * 1e-6;
+        snap_.gyro_gap_end_ms = static_cast<double>(r.gyro_gap_end_ns - r.gyro_extrap_ns) * 1e-6;
         snap_.gyro_dead_frames = gyro_dead_frames_;
+        // checkGyroChannel 的账本原样搬出来：页面不用解析日志就能看出"陀螺到底还有没有数"。
+        snap_.gyro_alive = r.gyro_pushed > 0;
+        snap_.gyro_starved_frames = gyro_starved_frames_;
+        snap_.gyro_callbacks = camera_->gyroCallbacksTotal();
         snap_.gyro_bias_dps = r.gyro_bias_rad_s * kRad2Deg;
         snap_.gyro_resid_dps = r.gyro_resid_rad_s * kRad2Deg;
         snap_.gyro_bias_ready = r.gyro_bias_ready;
@@ -870,10 +1036,11 @@ void FollowWorker::loop() {
 
             int len = std::snprintf(
                 log_buf, sizeof(log_buf),
-                "#%6lld  X=%+8.2f Y=%+8.2f Z=%+8.2f mm  rx=%+7.2f ry=%+7.2f rz=%+7.2f deg  |t|=%7.2f |r|=%6.2f  %-8s/%-6s inl=%5d(%4.2f) sT=%5.2f sR=%5.3f %5.1fms",
+                "#%6lld  X=%+8.2f Y=%+8.2f Z=%+8.2f mm  rx=%+7.2f ry=%+7.2f rz=%+7.2f deg  |t|=%7.2f |r|=%6.2f  %-8s/%-6s inl=%5d(%4.2f) sT=%5.2f sR=%5.3f %5.1fms  it=%2d [ex %.1f cl %.1f sp %.1f dn %.1f]",
                 static_cast<long long>(frames_), dp.x_mm, dp.y_mm, dp.z_mm, dp.rx_deg, dp.ry_deg, dp.rz_deg,
                 snap_.norm_t_mm, snap_.norm_r_deg, follow::to_string(r.status), follow::to_string(r.estimator),
-                r.gicp_inliers, r.inlier_ratio, sT_max, sR_max, ms);
+                r.gicp_inliers, r.inlier_ratio, sT_max, sR_max, ms, r.iterations, extract_ms, r.cloud_ms,
+                r.sparse_ms, r.dense_ms);
 
             if (quiet_log_frames_ > 0 && len < (int)sizeof(log_buf) - 64) {
                 len += std::snprintf(log_buf + len, sizeof(log_buf) - len,
@@ -890,9 +1057,12 @@ void FollowWorker::loop() {
             }
             if (len < (int)sizeof(log_buf) - 80) {
                 len += std::snprintf(log_buf + len, sizeof(log_buf) - len,
-                                     "  gyro=%d/%d still=%s resid=%.2f dps",
-                                     r.gyro_pushed, r.gyro_samples,
-                                     r.gyro_still ? "YES" : "NO", r.gyro_resid_rad_s * kRad2Deg);
+                                     "  gyro=%d/%d cov=%.2f sd=%.2f sg=%.2f still=%s resid=%.2f dps"
+                                     " gate=%.2f/%.2f",
+                                     r.gyro_pushed, r.gyro_samples, gyro_cov_ema_,
+                                     gyro_frame_dev_ema_, gyro_stamp_ema_,
+                                     r.gyro_still ? "YES" : "NO", r.gyro_resid_rad_s * kRad2Deg,
+                                     r.rot_gate_err_deg, r.rot_gate_limit_deg);
             }
 
             LOG_INFO("Follow", log_buf);

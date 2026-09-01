@@ -1,6 +1,7 @@
 #include "follow/odometry.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <limits>
 #include <utility>
@@ -22,6 +23,16 @@ constexpr int kMinDensePoints = 12;
 // 所以"没收敛"真的意味着没收敛，而不是被阈值掐断。
 constexpr double kTranslationEpsM = 1e-3;
 constexpr double kRotationEpsRad = 0.1 * M_PI / 180.0;
+
+// 分阶段耗时。上层只有一个聚合的 compute_ms，而"这一帧慢"至少有三条完全不同的成因
+// （点云变稠密 / 掉到稀疏回退 / GICP 迭代变多），三者的处置也各不相同 —— 没有这一层
+// 就只能猜，而 §6 里第一轮正是靠猜把收益算错的。
+inline int64_t now_us() {
+  return std::chrono::duration_cast<std::chrono::microseconds>(
+             std::chrono::steady_clock::now().time_since_epoch())
+      .count();
+}
+inline double us2ms(int64_t us) { return static_cast<double>(us) * 1e-3; }
 
 struct DenseSolution {
   bool ran = false;  // 求解器真的跑完了（不等于结果可信）
@@ -191,8 +202,10 @@ TrackResult Tracker::track_impl(const FeatureFrame& curr, const cv::Mat& depth_m
 
   Status cloud_status = Status::kOk;
   CloudStats stats;
+  const int64_t t_cloud = now_us();
   const std::vector<Eigen::Vector3f> cloud = depth_to_cloud(depth_mm, p_.k, p_.zmin_m, p_.zmax_m,
                                                              p_.depth_stride, &stats, &cloud_status);
+  r.cloud_ms = us2ms(now_us() - t_cloud);
   if (cloud_status != Status::kOk) {
     r.status = cloud_status;
     r.estimator = Estimator::kNone;
@@ -216,15 +229,21 @@ TrackResult Tracker::track_impl(const FeatureFrame& curr, const cv::Mat& depth_m
   // ---- 帧间初值：稠密配准对初值极敏感，这一步决定它是收敛还是爬到隔壁的体素上 ----
   std::optional<SparseDelta> sp;
   if (have_frame_ && !curr.empty() && !prev_sp_.empty() && !prev_depth_.empty()) {
+    const int64_t t_sparse = now_us();
     sp = sparse_delta(prev_sp_, curr, prev_depth_, depth_mm, p_.k, p_.sparse, rng_);
+    r.sparse_ms = us2ms(now_us() - t_sparse);
   }
   r.sparse_inliers = sp ? sp->inliers : 0;
 
   GyroDelta gyro;
+  gyro.stale = true;  // 首帧没有区间可积：valid() 现在等价于 !stale，不能靠默认值兜底
   if (have_frame_) {
     gyro = integrate_gyro(gyro_, prev_ts_ns_, ts_ns, p_.gyro_max_gap_ns);
   }
   r.gyro_samples = gyro.samples_used;
+  r.gyro_span_ns = gyro.span_ns;
+  r.gyro_gap_end_ns = gyro.gap_end_ns;
+  r.gyro_extrap_ns = gyro.extrap_ns;
   r.gyro_buf = static_cast<int>(gyro_.size());
   r.gyro_pushed = gyro_this_frame_;
   r.gyro_resid_rad_s = still_det_.recent_resid_rad_s();
@@ -267,7 +286,13 @@ TrackResult Tracker::track_impl(const FeatureFrame& curr, const cv::Mat& depth_m
     }
     r.rot_gate_err_deg =
         rot_geodesic_deg(g.R, T_ref.rotation().transpose() * T_cand.rotation());
-    return r.rot_gate_err_deg > p_.gyro_rot_gate_deg;
+    // 动态门限：下限 + 斜率 × 本区间陀螺实际转角。转角项自动吸收了帧间隔与被 hold 的帧数
+    // （区间越长、转得越多 ⇒ 门越宽），所以低速误伤与高速惰性不再是需要折中的同一件事。
+    const double gyro_angle_deg =
+        Eigen::AngleAxisd(g.R).angle() * 180.0 / M_PI;
+    r.rot_gate_limit_deg =
+        p_.gyro_rot_gate_deg + std::max(0.0, p_.gyro_rot_gate_relax) * gyro_angle_deg;
+    return r.rot_gate_err_deg > r.rot_gate_limit_deg;
   };
 
   // 三档，从"有实测"往"只有惯性/只有历史"退：
@@ -289,7 +314,9 @@ TrackResult Tracker::track_impl(const FeatureFrame& curr, const cv::Mat& depth_m
   const Eigen::Isometry3d T_init = T_last_good_ * dT;
 
   // ---- 稠密配准到冻结参考地图 ----
+  const int64_t t_dense = now_us();
   const DenseSolution g = align_dense(map_, cloud, T_init, p_);
+  r.dense_ms = us2ms(now_us() - t_dense);
   r.cloud_points = g.used > 0 ? g.used : cloud.size();
   r.gicp_inliers = static_cast<int>(g.inliers);
   r.gicp_cost = g.cost;

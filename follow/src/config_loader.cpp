@@ -289,6 +289,8 @@ bool load_config(const std::string& path, FollowConfig* cfg, std::string* err) {
                &errors);
     fetch<double>(tr, "gyro_rot_gate_deg", "小数", "follow.track.",
                   &cfg->track.gyro_rot_gate_deg, &errors);
+    fetch<double>(tr, "gyro_rot_gate_relax", "小数", "follow.track.",
+                  &cfg->track.gyro_rot_gate_relax, &errors);
     // 静止检测的门限按 **deg/s** 暴露（人只在度/秒的量级上判断"算不算在动"），跨界换弧度。
     constexpr double kDeg2Rad = 0.017453292519943295;
     double still_enter_dps = 0.0;
@@ -394,6 +396,7 @@ ConfigProblems check_config(FollowConfig* cfg, const std::string& root) {
   require_finite(cfg->track.min_residual_var_scale, "track.min_residual_var_scale");
   require_finite(cfg->track.min_inlier_ratio, "track.min_inlier_ratio");
   require_finite(cfg->track.gyro_rot_gate_deg, "track.gyro_rot_gate_deg");
+  require_finite(cfg->track.gyro_rot_gate_relax, "track.gyro_rot_gate_relax");
   require_finite(cfg->track.gyro_still.enter_rad_s, "track.gyro_still_enter_dps");
   require_finite(cfg->track.gyro_still.exit_rad_s, "track.gyro_still_exit_dps");
   require_finite(cfg->track.gyro_still.bias_alpha, "track.gyro_bias_alpha");
@@ -597,6 +600,16 @@ ConfigProblems check_config(FollowConfig* cfg, const std::string& root) {
   if (cfg->track.gyro_rot_gate_deg < 0.0) {
     add(items, false, "track.gyro_rot_gate_deg 为负，按 0（关闭离群门）处理。");
   }
+  // 负斜率会让门限随转角**收缩**：转得越快门越紧，且区间够长时门限变成负数 —— 而互验误差恒
+  // 非负，于是每一帧都被拦下，等价于把跟随永久锁死，比"门关着"糟得多。运行期按 0 夹住。
+  if (cfg->track.gyro_rot_gate_relax < 0.0) {
+    add(items, false, "track.gyro_rot_gate_relax 为负 ⇒ 门限随转角收缩，按 0（退回固定门限）处理。");
+  }
+  if (cfg->track.gyro_rot_gate_relax >= 1.0) {
+    add(items, false, "track.gyro_rot_gate_relax = " + std::to_string(cfg->track.gyro_rot_gate_relax) +
+                          " ≥ 1：门限放宽得比实际转角还快，快速转动时任何视觉解都能过门 —— "
+                          "等于回到旧绝对门限的惰性状态（真机 115°/s 全程 0 次触发）。建议 0.3~0.6。");
+  }
   // 迟滞方向反了不会报错、只会让"快出"变成永远出不来（检测器构造期会把它夹成 enter）。
   if (cfg->track.gyro_still.exit_rad_s < cfg->track.gyro_still.enter_rad_s) {
     add(items, false, "track.gyro_still_exit_dps 必须大于 gyro_still_enter_dps，否则退出静止的门"
@@ -635,7 +648,8 @@ std::string describe(const FollowConfig& c) {
      << "  max_motion=" << c.teach_max_motion_deg_s << "deg/s\n";
   // 陀螺的三种用途都必须在这里露出来：它们任一失效都是静默的（不影响任何已解出的结果），
   // 只有"启动时打印的生效值 + 快照里的诊断计数"两处能把它们变成可见。
-  os << "  gyro     : 离群门=" << c.track.gyro_rot_gate_deg << "deg  静止门 "
+  os << "  gyro     : 离群门下限=" << c.track.gyro_rot_gate_deg
+     << "deg 斜率=" << c.track.gyro_rot_gate_relax << "deg/deg  静止门 "
      << c.track.gyro_still.enter_rad_s * 57.295779513082322 << "~"
      << c.track.gyro_still.exit_rad_s * 57.295779513082322
      << "deg/s(残差) 窗口=" << c.track.gyro_still.window_samples

@@ -83,11 +83,20 @@ struct FollowSnapshot {
     bool holding_last_pose = false;   // status != ok 时 pose_* 是上一个可信值，不是本帧读数
 
     double compute_ms = 0.0;
+    // 分阶段耗时（ms，µs 粒度）。compute_ms 是一个聚合数，任何"这帧慢/这次优化有效"的判断
+    // 在它上面都无法归因 —— 而 extract、建云、稀疏回退、GICP 四段的处置完全不同。
+    double extract_ms = 0.0;
+    double cloud_ms = 0.0;
+    double sparse_ms = 0.0;
+    double dense_ms = 0.0;
     double fps = 0.0;
     uint64_t frames = 0;              // 真正解算过的帧数
     uint64_t dropped = 0;             // 有新帧但没赶上（算不过来 / 时间戳同毫秒）
     uint64_t rejected = 0;            // 帧被守卫挡下（无深度、尺寸不符、对齐未开……）
     uint64_t rot_gated = 0;           // 被陀螺离群门拦下的帧数（P3：帧间旋转与陀螺积分不一致）
+    double rot_gate_err_deg = 0.0;    // 本帧互验的测地线偏差：门限该按这个量的分布调，而不是拍度数
+    double rot_gate_limit_deg = 0.0;  // 本帧**实际生效**的门限 = 下限 + 斜率 × 陀螺转角（0=没走到判据）。
+                                      // 与上一行必须成对读：err 3° 在静止帧是离群、在 115°/s 帧是噪声
     bool gyro_still = false;          // 陀螺确认相机静止（P1 的判据本身，不代表真的冻住了）
     bool rot_frozen = false;          // 旋转通道此刻**确实**冻在冻结点上：gyro_still 说"该冻"，
                                       // 这条说"在冻"。两者分开才看得出冻结策略被时限掐断
@@ -98,7 +107,25 @@ struct FollowSnapshot {
     bool gyro_extrinsics_loaded = false;  // T_cam_gyro 是否从设备读到合法非 Identity 旋转
     int gyro_buf = 0;                 // 跟踪器陀螺缓冲当前长度
     int gyro_frame_samples = 0;       // 本帧积分窗口内真正用到的样本数
+    int gyro_frame_pushed = 0;        // 本帧交付到达的样本数（与时间戳无关的存活计数）
+    // 时间尺度三数 + 覆盖三数。真机实测结论：两个比率都≈1（1.0005 / 0.9992）⇒ 帧戳与陀螺戳
+    // 都在各自该在的时间轴上；而 S/P≈0.58 恒定，成因是 IMU 交付比帧交付慢约半个帧周期，
+    // 于是积分窗口尾部固定缺 33 ms 的样本还没到货（不是丢样本，也不是戳错域）。
+    // integrate_gyro 因此按末样本角速度常值补积这段，下面 span 含补积、gap 只报没补上的残值。
+    double gyro_cov = 0.0;            // 滚动 S/P：结构值 ~0.58，明显更低才是真在丢样本
+    double gyro_frame_dev_ratio = 0.0;  // 帧设备戳推进 / 主机到达推进：偏离 1 ⇒ 帧戳不是该帧的真实时刻
+    double gyro_stamp_ratio = 0.0;      // 陀螺戳推进 / 主机到达推进：偏离 1 ⇒ 陀螺按标称率打戳而实际交付更慢
+    double gyro_span_ms = 0.0;          // 有效覆盖（真实样本 + 常值补积）：≈帧周期才说明旋转没少算
+    double gyro_extrap_ms = 0.0;        // 其中靠外推补出来的时长：这是"预测"不是"测量"，必须能单独读
+    double gyro_gap_end_ms = 0.0;       // 没补上的残缺口（IMU 真停更时才非零）
     uint64_t gyro_dead_frames = 0;    // 连续"缓冲非空却积不到样本"的帧数 = 时间域不同的指纹
+    // 陀螺链路此刻到底有没有数：false 持续 = 三条用途（静止冻结/离群门/帧间初值）全都不起作用，
+    // 而输出上只看得到"旋转抖一点"。页面据此把"在跟"与"陀螺已死仍在跟"分开显示。
+    bool gyro_alive = false;
+    uint64_t gyro_starved_frames = 0; // 连续零样本交付的帧数（0 = 本帧到货；≥30 已报过 ERROR）
+    uint64_t gyro_callbacks = 0;      // 驱动侧 IMU 回调累计次数：涨速≈200/s 才是传感器活着。
+                                      // pushed=0 时看它才能分成"没出帧"（它也不涨）与
+                                      // "出帧但全被时间基丢弃"（它在涨）两种，处置完全相反。
     double gyro_bias_dps = 0.0;       // 静止检测器的零偏估计（度/秒）
     double gyro_resid_dps = 0.0;      // 最近窗口残差模均值（度/秒），与 enter/exit 门限直接可比
     bool gyro_bias_ready = false;     // 零偏仍在 bootstrap 阶段 ⇒ 静止结论还不可信
@@ -169,6 +196,20 @@ private:
     // 陀螺通道每帧自检。存在的理由只有一条：时间域错配的症状不是崩溃也不是丢帧，而是
     // "陀螺看起来一直在动"，从输出上完全分辨不出来 ⇒ 必须主动把它变成一条有名有姓的 ERROR。
     void checkGyroChannel(const follow::TrackResult& r);
+    // 时间尺度自检：把"两条时间轴各比主机快多少"测出来。checkGyroChannel 只能抓"一个样本都框不到"，
+    // 抓不到"框到了但只覆盖 61%"——后者才是现在的实际故障，所以单独测、单独报警。
+    void updateTimeScale(const FrameData& fd, int64_t host_now_ms, int64_t burst_last_ns,
+                         const follow::TrackResult& r);
+
+    // updateTimeScale 的累加器（只在工作线程读写，不加锁）。_ns 都是设备域。
+    uint64_t ts_last_dev_us_ = 0;
+    int64_t ts_last_host_ms_ = 0;
+    int64_t ts_last_gyro_ns_ = 0;
+    double gyro_cov_ema_ = 0.0;       // 单帧 P 在 4~13 之间抖，必须平滑后才当报警判据
+    double gyro_frame_dev_ema_ = 0.0;
+    double gyro_stamp_ema_ = 0.0;
+    bool gyro_cov_reported_ = false;
+    uint64_t gyro_cov_bad_frames_ = 0;
 
     std::shared_ptr<CameraDriver> camera_;
     follow::FollowConfig cfg_;
@@ -240,6 +281,9 @@ private:
     // 陀螺通道自检账本（见 checkGyroChannel）
     uint64_t gyro_dead_frames_ = 0;        // 连续"缓冲非空却积不到样本"的帧数
     bool gyro_dead_reported_ = false;      // 同一次故障只喊一遍，链路恢复后重新武装
+    uint64_t gyro_starved_frames_ = 0;     // 连续"零样本交付"的帧数 = 断供（比域错配更彻底）
+    bool gyro_starved_reported_ = false;
+    uint64_t gyro_starved_cb_base_ = 0;    // streak 起点时的 IMU 回调计数：增量决定成因指谁
     double last_log_norm_rad_s_ = 0.0;
     double fps_ = 0.0;
     int64_t fps_window_ms_ = 0;

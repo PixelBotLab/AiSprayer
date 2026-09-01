@@ -235,11 +235,12 @@ std::string describe(const TrackResult& r) {
   char tail[280];
   std::snprintf(tail, sizeof(tail),
                 " s2=%.2e aniso=%.1f/%.1f rank=%d cost_per_in=%.3f"
-                " gyro_n=%d buf=%d pushed=%d gate_err=%.3f bias=%.2e resid=%.2e%s",
+                " gyro_n=%d buf=%d pushed=%d gate_err=%.3f/%.3f bias=%.2e resid=%.2e%s",
                 r.unc.residual_var_scale, r.unc.trans_anisotropy(), r.unc.rot_anisotropy(),
                 r.unc.rank_deficient ? 1 : 0,
                 r.gicp_inliers > 0 ? r.gicp_cost / static_cast<double>(r.gicp_inliers) : 0.0,
-                r.gyro_samples, r.gyro_buf, r.gyro_pushed, r.rot_gate_err_deg, r.gyro_bias_rad_s,
+                r.gyro_samples, r.gyro_buf, r.gyro_pushed, r.rot_gate_err_deg,
+                r.rot_gate_limit_deg, r.gyro_bias_rad_s,
                 r.gyro_resid_rad_s, r.gyro_bias_ready ? "" : " BIAS_BOOTSTRAP");
   return std::string(to_string(r.status)) + " est=" + to_string(r.estimator) +
          " pts=" + std::to_string(r.cloud_points) + " gicp_in=" + std::to_string(r.gicp_inliers) +
@@ -593,6 +594,51 @@ TEST(Registration, GyroRotGateLetsMotionThroughWhenGyroAgrees) {
   EXPECT_LT(rot_err_deg(r2.T_ref_cam, truth), 0.2) << pose_msg("gated-but-real", r2.T_ref_cam, truth);
 }
 
+// 动态门限（真机结论驱动的改动）：门 = 下限 + 斜率 × 本区间陀螺实际转角。绝对门限与帧间转角
+// 不同阶 —— 15 fps 下单帧 66 ms，旧配的 10° 要 150 °/s 才可能触发，实测手持旋转到 115 °/s
+// 全程 0 次拦截（评审报告 §13.3）。本用例钉公式本身；拦/放的端到端行为由前后几个用例覆盖。
+TEST(Registration, GyroRotGateLimitScalesWithGyroAngle) {
+  Rig rig;
+  TrackParams p = rig.p;
+  p.gyro_rot_gate_deg = 1.0;
+  p.gyro_rot_gate_relax = 0.5;
+
+  const Eigen::Isometry3d truth = make_T(0.0, 0.0, 0.0, 0.0, 0.0, 1.5);
+  const cv::Mat frame = render_depth(rig.k, truth, hit_workpiece);
+  const double w = 1.5 * kPi / 180.0;  // 1 s 区间里转 1.5°，视觉与陀螺一致 ⇒ 只读门限不读拦截
+
+  Tracker t(p, rig.map);
+  ASSERT_EQ(t.track(FeatureFrame{}, rig.ref_depth, 1'000'000'000).status, Status::kOk);
+  for (int i = 0; i <= 200; ++i) {
+    t.push_gyro(1'000'000'000 + i * 5'000'000, Eigen::Vector3d(0.0, 0.0, w));
+  }
+  const TrackResult r = t.track(FeatureFrame{}, frame, 2'000'000'000);
+  ASSERT_EQ(r.status, Status::kOk) << describe(r);
+  EXPECT_NEAR(r.rot_gate_limit_deg, 1.0 + 0.5 * 1.5, 0.1)
+      << "门限应精确等于 下限 + 斜率×转角：" << describe(r);
+  EXPECT_GT(r.rot_gate_limit_deg, p.gyro_rot_gate_deg) << "转了 1.5° 门却不放宽 ⇒ 动态项没接上";
+
+  // 斜率 0 = 退回旧的绝对门限：同一批数据上门限必须钉死在下限，误差在浮点量级。
+  TrackParams q = p;
+  q.gyro_rot_gate_relax = 0.0;
+  Tracker t_fixed(q, rig.map);
+  ASSERT_EQ(t_fixed.track(FeatureFrame{}, rig.ref_depth, 1'000'000'000).status, Status::kOk);
+  for (int i = 0; i <= 200; ++i) {
+    t_fixed.push_gyro(1'000'000'000 + i * 5'000'000, Eigen::Vector3d(0.0, 0.0, w));
+  }
+  const TrackResult r_fixed = t_fixed.track(FeatureFrame{}, frame, 2'000'000'000);
+  ASSERT_EQ(r_fixed.status, Status::kOk) << describe(r_fixed);
+  EXPECT_NEAR(r_fixed.rot_gate_limit_deg, 1.0, 1e-9) << describe(r_fixed);
+
+  // 没有陀螺样本 ⇒ 判据根本没走到 ⇒ 门限必须报 0。留一个"看起来像很宽"的数会把
+  // "门失效"和"门很松"混成同一种读数，而这两种的处置完全不同。
+  Tracker t_none(p, rig.map);
+  ASSERT_EQ(t_none.track(FeatureFrame{}, rig.ref_depth, 1'000'000'000).status, Status::kOk);
+  const TrackResult r_none = t_none.track(FeatureFrame{}, frame, 2'000'000'000);
+  EXPECT_FALSE(r_none.rot_gated) << describe(r_none);
+  EXPECT_DOUBLE_EQ(r_none.rot_gate_limit_deg, 0.0) << describe(r_none);
+}
+
 TEST(Registration, GyroRotGateIsOffWithoutGyroOrWhenDisabled) {
   Rig rig;
   const Eigen::Isometry3d truth = make_T(0.0, 0.0, 0.0, 0.0, 0.0, 1.5);
@@ -629,6 +675,9 @@ TEST(Registration, GyroRotGateRecoversAfterHoldingOneBadFrame) {
   Rig rig;
   TrackParams p = rig.p;
   p.gyro_rot_gate_deg = 0.5;  // 必须 < 单帧真旋转 1.0°：否则旧配对下的锁死不会被本用例观察到
+  // 本用例钉的是"区间配对"，门限必须是常数才能看到正反馈锁死；动态门限另由
+  // GyroRotGateLimitScalesWithGyroAngle 单独钉（混在一起两条性质就都证不明了）。
+  p.gyro_rot_gate_relax = 0.0;
 
   Tracker t(p, rig.map);
   const int64_t dt_ns = 200'000'000;             // 200 ms/帧 ⇒ 1.0°/帧 = 5°/s

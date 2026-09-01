@@ -425,7 +425,14 @@ bool CameraDriver::configureAndStartPipeline() {
                     if (gyro_profiles && gyro_profiles->count() > 0) {
                         auto gprof = gyro_profiles->getProfile(0);
                         gyro_sensor_ = gyro_sensor;
+                        // 基准必须在 start() **之前**取：否则启动瞬间就到达的那批回调会被排除在
+                        // 定标窗口之外，而"窗口内一条都没到"正是这条诊断唯一要抓的事实。
+                        gyro_cb_baseline_.store(gyro_cb_count_.load(std::memory_order_relaxed),
+                                                std::memory_order_relaxed);
                         gyro_sensor_->start(gprof, [this](std::shared_ptr<ob::Frame> frame) {
+                            // 第一件事就是计数：这条只回答"传感器有没有出帧"，必须与后面所有
+                            // 丢弃路径（空帧、时间基未就绪）无关，否则断供报警分不了这两种成因。
+                            gyro_cb_count_.fetch_add(1, std::memory_order_relaxed);
                             if (!frame) return;
                             auto gf = frame->as<ob::GyroFrame>();
                             if (!gf) return;
@@ -716,11 +723,34 @@ void CameraDriver::captureLoop() {
             // 已经按最小延迟换算过的陀螺样本，现象就是"缓冲有样本、积分恒为 0"。
             if (gyro_time_base_.offerPair(cur_frame.device_ts_us,
                                           static_cast<int64_t>(cur_frame.timestamp_ms) * 1000000)) {
-                LOG_INFO("Camera", "陀螺时间基已定标: offset=",
-                         gyro_time_base_.offset_ns() / 1000000, "ms, 配对=",
-                         GyroTimeBase::kProbePairs, "帧, 延迟抖动=",
-                         gyro_time_base_.spread_ns() / 1000000, "ms, 定标前丢弃样本=",
-                         gyro_time_base_.dropped_before_ready());
+                // 定标窗口 = 8 帧 ≈ 0.5 s。IMU 若在出数，按 200 Hz 这里必然有几十次回调
+                //（实测健康轮 51~52 条全被丢弃，因为那时时间基还没就绪 ⇒ "丢弃样本"非零是**好**兆头）。
+                // 判"沉默"的前提是确实 start() 过：硬件模式/enable_imu=false 下时间基照样定标，
+                // 而回调数天然为 0，那不是故障。
+                const uint64_t cb_delta =
+                    gyro_cb_count_.load(std::memory_order_relaxed) -
+                    gyro_cb_baseline_.load(std::memory_order_relaxed);
+                const bool imu_stream_silent = has_imu_ && cb_delta == 0;
+                if (imu_stream_silent) {
+                    LOG_ERROR("Camera", "陀螺时间基已定标: offset=",
+                              gyro_time_base_.offset_ns() / 1000000, "ms, 配对=",
+                              GyroTimeBase::kProbePairs, "帧, 延迟抖动=",
+                              gyro_time_base_.spread_ns() / 1000000,
+                              "ms, 定标前丢弃样本=0, 定标窗口内 IMU 回调=0",
+                              " ⇒ 陀螺流 start() 成功但传感器一个字节都没交付（设备/SDK/USB 侧）。",
+                              "后果：静止冻结、离群门、帧间旋转初值三条全部静默失效，",
+                              "旋转输出会跟着视觉噪声抖（表现为放下相机后臂还在微晃）。");
+                } else {
+                    // 未启动陀螺流时"回调=0"与故障轮长得一模一样，会把人误导去查一个本来就没
+                    // 开着的流 —— 那种情况要直接说"没启动"。
+                    const char* cb_field = has_imu_ ? ", 定标窗口内 IMU 回调=" : ", IMU 流=";
+                    LOG_INFO("Camera", "陀螺时间基已定标: offset=",
+                             gyro_time_base_.offset_ns() / 1000000, "ms, 配对=",
+                             GyroTimeBase::kProbePairs, "帧, 延迟抖动=",
+                             gyro_time_base_.spread_ns() / 1000000, "ms, 定标前丢弃样本=",
+                             gyro_time_base_.dropped_before_ready(), cb_field,
+                             has_imu_ ? std::to_string(cb_delta) : std::string("本档未启动"));
+                }
             }
             if (gyro_time_base_.ready() && cur_frame.device_ts_us > 0) {
                 cur_frame.track_ts_ns = gyro_time_base_.toHostNs(cur_frame.device_ts_us);

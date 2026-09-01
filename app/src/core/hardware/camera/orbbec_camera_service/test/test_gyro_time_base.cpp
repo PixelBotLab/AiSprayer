@@ -192,8 +192,10 @@ TEST(GyroTimeBaseSeam, CalibratedOutputIsUsableByFollowIntegrator) {
     // 自己的延迟，两者之差）。要卡的是"远小于 max_gap 门"，不是"等于零"：常量偏移不改区间长度，
     // 因而本来就不该被当成失效。
     EXPECT_LT(ok.gap_end_ns, 10 * kMs) << "缺口已接近 max_gap 门，valid() 随时会翻成 stale";
+    // 补积段与真实样本对旋转的贡献等价 ⇒ 角度正比于"真实覆盖 + 补积"，不是只看真实覆盖。
     const Eigen::Matrix3d expect =
-        Eigen::AngleAxisd(kW * static_cast<double>(ok.span_ns) * 1e-9, Eigen::Vector3d::UnitZ())
+        Eigen::AngleAxisd(kW * static_cast<double>(ok.span_ns + ok.extrap_ns) * 1e-9,
+                          Eigen::Vector3d::UnitZ())
             .toRotationMatrix();
     EXPECT_LT((ok.R - expect).norm(), 1e-9) << "换算后的角度与时长不成比例：dt 被动过了";
 }
