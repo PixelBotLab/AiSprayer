@@ -64,7 +64,7 @@
   </link>
 
   <joint name="Link6_to_my_tools_black" type="fixed">
-    <origin xyz="0 0 0" rpy="0 0 1.5708" />
+    <origin xyz="0 0 0" rpy="0 0 -1.5708" />
     <parent link="Link6" />
     <child link="my_tools_black" />
   </joint>
@@ -89,7 +89,7 @@
   </link>
 
   <joint name="Link6_to_my_tools_silver" type="fixed">
-    <origin xyz="0 0 0" rpy="0 0 1.5708" />
+    <origin xyz="0 0 0" rpy="0 0 -1.5708" />
     <parent link="Link6" />
     <child link="my_tools_silver" />
   </joint>
@@ -114,7 +114,7 @@
   </link>
 
   <joint name="Link6_to_my_tools_fingers" type="fixed">
-    <origin xyz="0 0 0" rpy="0 0 1.5708" />
+    <origin xyz="0 0 0" rpy="0 0 -1.5708" />
     <parent link="Link6" />
     <child link="my_tools_fingers" />
   </joint>
@@ -139,7 +139,7 @@
   </link>
 
   <joint name="Link6_to_my_tools_nozzle" type="fixed">
-    <origin xyz="0 0 0" rpy="0 0 1.5708" />
+    <origin xyz="0 0 0" rpy="0 0 -1.5708" />
     <parent link="Link6" />
     <child link="my_tools_nozzle" />
   </joint>
@@ -148,7 +148,7 @@
   <link name="spray_nozzle_link" />
 
   <joint name="Link6_to_spray_nozzle_link" type="fixed">
-    <origin xyz="0.002022 -0.0353263 0.3122347" rpy="0.0329936 -0.0038327 -2.3392176" />
+    <origin xyz="-0.002022 0.0353263 0.3122347" rpy="0.0329936 -0.0038327 0.8023751" />
     <parent link="Link6" />
     <child link="spray_nozzle_link" />
   </joint>
