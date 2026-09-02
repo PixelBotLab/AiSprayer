@@ -106,7 +106,7 @@ def load_tcp_from_urdf(urdf_path: str = None, target_tcp_name: str = None) -> di
                         score = 0
                         if target_tcp_name and (child_name.lower() == target_tcp_name.lower() or target_tcp_name.lower() in child_name.lower()):
                             score = 1000
-                        elif any(k in child_name.lower() for k in ['nozzle', 'tcp']):
+                        elif any(k in child_name.lower() for k in ['laser', 'nozzle', 'tcp']):
                             score = 100
                         elif 'tip' in child_name.lower():
                             score = 80

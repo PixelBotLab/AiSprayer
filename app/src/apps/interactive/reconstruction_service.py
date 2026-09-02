@@ -1,7 +1,13 @@
 import os
 import sys
 import time
+import queue
 import logging
+import threading
+import traceback
+import multiprocessing as mp
+from logging.handlers import QueueHandler
+
 import cv2
 import numpy as np
 import yaml
@@ -18,6 +24,144 @@ from core.vision.reconstruction import (
 from core.config import SprayerConfig
 
 logger = logging.getLogger(__name__)
+
+# open3d 0.19 (aarch64) 内置 PoissonRecon 的等值面提取是竞态的: 同一份输入连跑会得到不同面数
+# (71222/71223/71224), 偶发打印 "Failed to close loop" 并进一步升级为挂死或段错误,
+# 会把整个后端进程(含相机/机械臂/SAM 服务)一起带走。
+# 因此把重建整体放进 spawn 子进程执行: 崩溃只死子进程, 父进程按退出码识别后自动重试。
+RECON_MAX_ATTEMPTS = 3
+# 单次超时: 正常一次约 4s(含子进程启动+import open3d 约 6s), 60s = 10 倍余量,
+# 也容得下将来把 poisson_depth 从 8 提到 9 (约 4~8 倍耗时)。
+# 超时即判定为挂死并杀掉重试; 前端是裸 fetch 无超时, 最坏 3×60s 仍在浏览器容忍范围内。
+RECON_SUBPROCESS_TIMEOUT_S = 60.0
+
+
+def _reconstruction_worker(log_queue: mp.Queue, res_conn, template_path: str, template_name: str):
+    """Subprocess worker: runs the whole Poisson reconstruction in an isolated process."""
+    try:
+        root_logger = logging.getLogger()
+        root_logger.setLevel(logging.INFO)
+        root_logger.handlers = [QueueHandler(log_queue)]
+
+        result = InteractiveReconstructionService()._reconstruct_surface_impl(template_path, template_name)
+        res_conn.send({"success": True, "result": result})
+    except Exception as e:
+        res_conn.send({
+            "success": False,
+            "error": str(e),
+            "exc_type": type(e).__name__,
+            "traceback": traceback.format_exc(),
+        })
+    finally:
+        log_queue.put(None)
+
+
+def _drain_log_queue(log_queue: mp.Queue, proc: mp.Process):
+    """Forwards the worker's log records into this process's handlers (same as the POI optimizer worker)."""
+    while True:
+        try:
+            record = log_queue.get(timeout=0.1)
+            if record is None:
+                break
+            logging.getLogger(record.name).handle(record)
+        except queue.Empty:
+            if not proc.is_alive():
+                while True:
+                    try:
+                        record = log_queue.get_nowait()
+                        if record is None:
+                            break
+                        logging.getLogger(record.name).handle(record)
+                    except queue.Empty:
+                        break
+                break
+
+
+def _reraise_worker_error(res: dict):
+    """Re-raises the worker's exception with its original type so api.py keeps mapping HTTP status codes."""
+    err = res.get("error", "Unknown error")
+    tb = res.get("traceback", "")
+    exc_type = res.get("exc_type") or ""
+    logger.error(f"Reconstruction worker failed ({exc_type}): {err}\n{tb}")
+    if exc_type == "FileNotFoundError":
+        raise FileNotFoundError(err)
+    if exc_type == "ValueError":
+        raise ValueError(err)
+    raise RuntimeError(f"Reconstruction worker error: {err}")
+
+
+def run_reconstruction_subprocess(
+    template_path: str,
+    template_name: str,
+    max_attempts: int = RECON_MAX_ATTEMPTS,
+    timeout_s: float = RECON_SUBPROCESS_TIMEOUT_S,
+) -> dict:
+    """
+    Spawns an isolated worker process for Poisson reconstruction, retrying on crash/hang.
+
+    竞态是偶发的, 重跑一次通常就过; 确定性错误(缺文件/掩码为空)则原样抛出, 不浪费重试。
+    """
+    last_reason = "unknown"
+    for attempt in range(1, max_attempts + 1):
+        ctx = mp.get_context("spawn")
+        log_queue = ctx.Queue()
+        parent_conn, child_conn = ctx.Pipe(duplex=False)
+
+        proc = ctx.Process(
+            target=_reconstruction_worker,
+            args=(log_queue, child_conn, template_path, template_name),
+        )
+        t0 = time.time()
+        proc.start()
+        # 必须关掉父进程手里的写端: 否则子进程崩溃时管道仍有写入者,
+        # parent_conn.poll() 永远等不到 EOF, 只能白白挂满整个超时才发现
+        child_conn.close()
+        log_thread = threading.Thread(target=_drain_log_queue, args=(log_queue, proc), daemon=True)
+        log_thread.start()
+
+        res = None
+        timed_out = False
+        try:
+            if parent_conn.poll(timeout_s):
+                try:
+                    res = parent_conn.recv()
+                except (EOFError, OSError):
+                    pass            # 管道已关: 子进程死了但没留下结果
+            else:
+                timed_out = True    # 等满超时 = Poisson 挂死
+        except (EOFError, OSError, ValueError):
+            timed_out = True
+
+        if timed_out and proc.is_alive():
+            proc.terminate()        # 已判定挂死, 立刻杀, 不再白等下面的 join
+
+        log_thread.join(timeout=3.0)
+        proc.join(timeout=5.0)
+        if proc.is_alive():
+            proc.kill()             # SIGTERM 杀不掉(卡在 C++ 里)时兜底
+            proc.join()
+        parent_conn.close()
+
+        elapsed = time.time() - t0
+
+        if res is not None:
+            if not res.get("success"):
+                _reraise_worker_error(res)
+            return res["result"]
+
+        # 没拿到结果 = 被信号打死(段错误)或超时挂死, 两者都是竞态的表现, 重试
+        last_reason = (f"hung and was killed after {elapsed:.0f}s" if timed_out
+                       else f"died without returning a result (exit code {proc.exitcode})")
+        logger.error(
+            f"⚠️ [Reconstruction] 第 {attempt}/{max_attempts} 次尝试{last_reason}"
+            f"{'' if attempt >= max_attempts else ', 自动重试...'}"
+        )
+
+    raise RuntimeError(
+        f"Surface reconstruction failed {max_attempts} times for template '{template_name}' "
+        f"(last attempt: {last_reason}). open3d Poisson 在多线程下偶发崩溃/挂死, 请重试。"
+    )
+
 
 class InteractiveReconstructionService:
     def __init__(self):
@@ -119,7 +263,17 @@ class InteractiveReconstructionService:
 
     def reconstruct_surface(self, template_path: str, template_name: str) -> dict:
         """
-        Executes Poisson surface reconstruction using depth data, masks, and calibration
+        Public entry: runs Poisson surface reconstruction inside an isolated subprocess.
+
+        真实工作在 _reconstruct_surface_impl 里, 由 run_reconstruction_subprocess 派生的子进程执行,
+        以免 open3d Poisson 偶发的段错误/挂死拖垮整个后端。
+        """
+        return run_reconstruction_subprocess(template_path, template_name)
+
+    def _reconstruct_surface_impl(self, template_path: str, template_name: str) -> dict:
+        """
+        Executes Poisson surface reconstruction using depth data, masks, and calibration.
+        Runs inside the spawned worker process — do not call it directly from the API layer.
         """
         logger.info(f"==================================================")
         logger.info(f"🚀 Starting Surface Reconstruction for template: '{template_name}'")

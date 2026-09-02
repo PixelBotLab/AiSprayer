@@ -533,6 +533,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     const newMask: MaskData = {
       id: committedMasks.length + 1,
       points: [...currentPoints],
+      labels: currentPoints.map((p) => p.label),
       polygons: currentPolygons,
     };
     setCommittedMasks([...committedMasks, newMask]);
@@ -543,19 +544,53 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const handleSaveAllSegMasks = async () => {
     if (!activeTemplate) return;
     try {
+      const masksToSave: MaskData[] = [...committedMasks];
+      if (currentPolygons.length > 0 && currentPoints.length > 0) {
+        masksToSave.push({
+          id: masksToSave.length + 1,
+          points: [...currentPoints],
+          labels: currentPoints.map((p) => p.label),
+          polygons: currentPolygons,
+        });
+      }
+
+      if (masksToSave.length === 0) {
+        setModalConfig({
+          isOpen: true,
+          title: 'Warning',
+          message: 'No segment masks to save.',
+          type: 'alert',
+        });
+        return;
+      }
+
       const res = await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/sam/save`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ committed_masks: committedMasks }),
+        body: JSON.stringify({ committed_masks: masksToSave }),
       });
       if (!res.ok) throw new Error('Failed to save masks');
-      setSavedMasks(committedMasks);
+      setCommittedMasks(masksToSave);
+      setCurrentPoints([]);
+      setCurrentPolygons([]);
+      setSavedMasks(masksToSave);
       setSegMode(false);
       await fetchTemplateFiles(activeTemplate);
+
+      try {
+        const sumRes = await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/summary`);
+        if (sumRes.ok) {
+          const sumData = await sumRes.json();
+          if (sumData.masks) setSavedMasks(sumData.masks);
+        }
+      } catch (e) {
+        console.warn('Failed to refresh template summary after save masks:', e);
+      }
+
       setModalConfig({
         isOpen: true,
         title: 'Success',
-        message: `Saved ${committedMasks.length} segment masks successfully.`,
+        message: `Saved ${masksToSave.length} segment mask(s) successfully.`,
         type: 'alert',
       });
     } catch (err: any) {

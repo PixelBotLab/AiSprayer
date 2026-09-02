@@ -250,17 +250,24 @@ class PoissonReconstructor:
         vertices_homo = np.hstack((vertices_cam, ones))
         vertices_base = (self.T_camera_to_base @ vertices_homo.T).T[:, 0:3]
 
-        jeans_trimesh = trimesh.Trimesh(vertices=vertices_base, faces=faces)
+        jeans_trimesh = trimesh.Trimesh(vertices=vertices_base, faces=faces, process=False)
 
-        # 清除小碎片，只保留最大的连通分量
-        components = jeans_trimesh.split(only_watertight=False)
-        if len(components) > 1:
-            jeans_trimesh = max(components, key=lambda m: len(m.vertices))
+        # 清除小碎片，只保留最大的连通分量 (避免 Python 3.12 下 trimesh.split 内部 networkx 依赖异常)
+        try:
+            edges = jeans_trimesh.face_adjacency
+            if len(edges) > 0:
+                from trimesh.graph import connected_components
+                comps = connected_components(edges, min_len=1)
+                if len(comps) > 1:
+                    largest_faces = max(comps, key=len)
+                    jeans_trimesh = jeans_trimesh.submesh([largest_faces], append=True, repair=False)
+        except Exception as e:
+            print(f"⚠️ [PoissonReconstructor] 过滤连通分量跳过: {e}")
 
         # =========================================================
         # 5. 返回结果
         # =========================================================
-        print(f"📊 网格水密性检查 (是否完全封闭): {jeans_trimesh.is_watertight}")
+        print(f"📊 网格生成完成 (顶点数: {len(jeans_trimesh.vertices)}, 面数: {len(jeans_trimesh.faces)})")
         return jeans_trimesh
 
     @staticmethod

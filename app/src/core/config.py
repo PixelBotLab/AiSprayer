@@ -173,9 +173,37 @@ class SprayerConfig:
         return self.config_data.get("hardware", {}).get("robot", {}).get("port", 6001)
 
     @property
-    def robot_tcp(self):
-        """机器人末端工具 TCP 节点名称 (例如 spray_nozzle_link)"""
-        return self.config_data.get("hardware", {}).get("robot", {}).get("robot_tcp", "spray_nozzle_link")
+    def robot_tcp_id(self) -> int:
+        """
+        机械臂末端工具坐标系 ID (0: 默认法兰/工具0, 1: gripper_tip_link, 2: laser_head_link)。
+        """
+        robot_cfg = self.config_data.get("hardware", {}).get("robot", {})
+        if "robot_tcp_id" in robot_cfg:
+            try:
+                return int(robot_cfg.get("robot_tcp_id", 0))
+            except (ValueError, TypeError):
+                return 0
+        # 若未显式配置 robot_tcp_id，则根据 robot_tcp 名称自动推导
+        tcp_name = str(robot_cfg.get("robot_tcp", "")).lower()
+        if any(k in tcp_name for k in ["grip", "finger", "tip"]):
+            return 1
+        elif any(k in tcp_name for k in ["laser", "nozzle", "spray", "gun"]):
+            return 2
+        return 0
+
+    @property
+    def robot_tcp(self) -> str:
+        """机器人末端工具 TCP 节点名称 (例如 laser_head_link, gripper_tip_link)"""
+        robot_cfg = self.config_data.get("hardware", {}).get("robot", {})
+        if "robot_tcp" in robot_cfg and robot_cfg["robot_tcp"]:
+            return str(robot_cfg["robot_tcp"]).strip()
+        # 若未显式指定名称，则根据 robot_tcp_id 映射
+        tcp_id = self.robot_tcp_id
+        if tcp_id == 1:
+            return "gripper_tip_link"
+        elif tcp_id == 2:
+            return "laser_head_link"
+        return "laser_head_link"
 
     @property
     def calib_board_cols(self) -> int:
@@ -271,6 +299,24 @@ class SprayerConfig:
         return [float(v) for v in tol]
 
     @property
+    def poi_anchor_source(self) -> str:
+        """POI 锚点(容差包络中心)来源: 'config' | 'home' | 'raw'"""
+        spraying_cfg = self.config_data.get("spraying", {})
+        opt_cfg = self.config_data.get("optimization", {})
+        src = str(spraying_cfg.get("poi_anchor_source") or opt_cfg.get("poi_anchor_source") or "config").strip().lower()
+        return src if src in {"config", "home", "raw"} else "config"
+
+    @property
+    def poi_ref_rpy_deg(self) -> list[float] | None:
+        """POI 锚点参考姿态 [Rx, Ry, Rz] (度, Euler 'xyz'); 未配置则返回 None"""
+        spraying_cfg = self.config_data.get("spraying", {})
+        opt_cfg = self.config_data.get("optimization", {})
+        ref = spraying_cfg.get("poi_ref_rpy_deg") or opt_cfg.get("poi_ref_rpy_deg")
+        if not ref or len(ref) != 3:
+            return None
+        return [float(v) for v in ref]
+
+    @property
     def grid_tol_x_deg(self) -> tuple[float, float, float]:
         """轨迹优化器 X 轴搜索网格 (min, max, step) (度)"""
         spraying_cfg = self.config_data.get("spraying", {})
@@ -297,6 +343,8 @@ class SprayerConfig:
     def get_optimization_config(self) -> dict:
         """获取轨迹优化与 POI 容差字典"""
         return {
+            "poi_anchor_source": self.poi_anchor_source,
+            "poi_ref_rpy_deg": self.poi_ref_rpy_deg,
             "poi_tolerance_rpy_deg": self.poi_tolerance_rpy_deg,
             "grid_tol_x_deg": self.grid_tol_x_deg,
             "grid_tol_y_deg": self.grid_tol_y_deg,

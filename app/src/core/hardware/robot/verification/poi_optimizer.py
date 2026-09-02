@@ -101,7 +101,10 @@ def _format_comparison_report(
     lines.append(f"\n📍 3. 锚点配置 (Anchor Pose via Forward Kinematics):")
     lines.append(f"   Home 关节角度: {home_deg} deg")
     lines.append(f"   解算锚点位置: XYZ = [{anchor_xyz[0]:.2f}, {anchor_xyz[1]:.2f}, {anchor_xyz[2]:.2f}] mm")
-    lines.append(f"   解算锚点姿态: RPY = [{anchor_rpy[0]:.2f}, {anchor_rpy[1]:.2f}, {anchor_rpy[2]:.2f}] deg (Euler 'xyz')")
+    if anchor_rpy is not None:
+        lines.append(f"   解算锚点姿态: RPY = [{anchor_rpy[0]:.2f}, {anchor_rpy[1]:.2f}, {anchor_rpy[2]:.2f}] deg (Euler 'xyz')")
+    else:
+        lines.append(f"   解算锚点姿态: 逐点自适应名义法向姿态 (Adaptive Per-waypoint Surface Normal Envelope)")
 
     lines.append(f"\n⚙️  4. 优化参数设置:")
     lines.append(f"   搜索网格: Tol_X={optimizer.tol_x_deg}, Tol_Y={optimizer.tol_y_deg}, Tol_Z={optimizer.tol_z_deg}")
@@ -114,8 +117,10 @@ def _format_comparison_report(
     lines.append(f"\n🔄 5. 正在执行 Viterbi DP 全局连续性优化 (Waypoints 数量: {len(raw_points)})...")
     lines.append(f"   优化完成! 耗时: {elapsed_ms:.2f} ms | 姿态已修改: {was_modified}")
 
-    r_anchor = R_scipy.from_euler("xyz", anchor_rpy, degrees=True)
-    z_anchor = r_anchor.as_matrix()[:, 2]
+    # anchor_rpy 为 None = 逐点锚点(raw 模式): 每个航点以自身名义法向姿态作包络中心
+    per_point_anchor = anchor_rpy is None
+    r_anchor_fix = None if per_point_anchor else R_scipy.from_euler("xyz", anchor_rpy, degrees=True)
+    z_anchor_fix = None if per_point_anchor else r_anchor_fix.as_matrix()[:, 2]
 
     curr_q_raw = home_rad
     raw_joints_list = []
@@ -136,6 +141,8 @@ def _format_comparison_report(
         raw_p = raw_points[i].get("tcp_pose_base", raw_points[i])
         r_raw = R_scipy.from_euler("xyz", [raw_p["rx"], raw_p["ry"], raw_p["rz"]], degrees=True)
         z_raw = r_raw.as_matrix()[:, 2]
+        r_anchor = r_raw if per_point_anchor else r_anchor_fix
+        z_anchor = z_raw if per_point_anchor else z_anchor_fix
 
         rel_raw = (r_anchor.inv() * r_raw).as_euler("xyz", degrees=True)
         rel_raw = (rel_raw + 180.0) % 360.0 - 180.0
@@ -160,6 +167,11 @@ def _format_comparison_report(
         opt_p = opt_points[i].get("tcp_pose_base", opt_points[i])
         r_opt = R_scipy.from_euler("xyz", [opt_p["rx"], opt_p["ry"], opt_p["rz"]], degrees=True)
         z_opt = r_opt.as_matrix()[:, 2]
+        if per_point_anchor:
+            r_raw = R_scipy.from_euler("xyz", [raw_p["rx"], raw_p["ry"], raw_p["rz"]], degrees=True)
+            r_anchor, z_anchor = r_raw, r_raw.as_matrix()[:, 2]
+        else:
+            r_anchor, z_anchor = r_anchor_fix, z_anchor_fix
 
         rel_opt = (r_anchor.inv() * r_opt).as_euler("xyz", degrees=True)
         rel_opt = (rel_opt + 180.0) % 360.0 - 180.0
@@ -186,6 +198,7 @@ def _format_comparison_report(
         r_opt = R_scipy.from_euler("xyz", [opt_p["rx"], opt_p["ry"], opt_p["rz"]], degrees=True)
         z_raw = r_raw.as_matrix()[:, 2]
         z_opt = r_opt.as_matrix()[:, 2]
+        r_anchor = r_raw if per_point_anchor else r_anchor_fix
 
         pointing_diff = float(np.degrees(np.arccos(np.clip(np.dot(z_raw, z_opt), -1.0, 1.0))))
 
@@ -208,8 +221,12 @@ def _format_comparison_report(
     lines.append("\n" + _format_table(h3, w3, r3, "6.3 优化前后综合指标对比总表 (Raw vs Opt)"))
 
     lines.append("\n💡 注解说明:")
-    lines.append(f"   1. [相对锚点偏角]: 表示当前姿态相对 Home 锚点 [{anchor_rpy[0]:.0f}, {anchor_rpy[1]:.0f}, {anchor_rpy[2]:.0f}] 的旋转量，严格受控在容差包络 (Rx:±{anchor_tol[0]:.1f}°, Ry:±{anchor_tol[1]:.1f}°, Rz:±{anchor_tol[2]:.1f}°) 之内。")
-    lines.append("   2. [相对锚点指向角]: 表示喷枪中心法向与 Home 锚点喷枪法向在 3D 空间中的夹角。")
+    anchor_desc = (
+        "逐点名义法向锚点 (Adaptive Per-waypoint Normal)" if per_point_anchor
+        else f"锚点 [{anchor_rpy[0]:.0f}, {anchor_rpy[1]:.0f}, {anchor_rpy[2]:.0f}]"
+    )
+    lines.append(f"   1. [相对锚点偏角]: 表示当前姿态相对{anchor_desc}的旋转量，严格受控在容差包络 (Rx:±{anchor_tol[0]:.1f}°, Ry:±{anchor_tol[1]:.1f}°, Rz:±{anchor_tol[2]:.1f}°) 之内。")
+    lines.append(f"   2. [相对锚点指向角]: 表示喷枪中心法向与{anchor_desc}喷枪法向在 3D 空间中的夹角。")
     lines.append("   3. [枪尖指向偏量(3D)]: 表示优化前后喷枪法向的实际偏转角度（排除了 Euler 欧拉角在 Ry≈-90° 时的万向节死锁双重表示现象）。")
 
     if rep:
@@ -283,8 +300,7 @@ class PoiConstraintOptimizer:
         if ref_rpy_deg is not None and len(ref_rpy_deg) == 3:
             effective_anchor_rpy = [float(v) for v in ref_rpy_deg]
         else:
-            _, effective_anchor_rpy = self.verifier.solver.forward_controller(home_rad)
-            effective_anchor_rpy = [round(float(v), 2) for v in effective_anchor_rpy]
+            effective_anchor_rpy = None
 
         t_start = time.time()
         opt_path, was_modified = self.spray_optimizer.optimize_path_item(
@@ -325,22 +341,36 @@ class PoiConstraintOptimizer:
         tolerance_rpy_deg: list[float] = None,
         tol_rpy_deg: list[float] = None,
         init_q: list[float] = None,
+        anchor_source: str = "home",
     ) -> tuple[dict, dict]:
         """
         Optimizes all manual paths in paths_data using POI constraint envelope search (Viterbi DP).
         Returns: (poi_paths_data, poi_verification_report)
+
+        :param ref_rpy_deg: 包络中心(锚点)参考姿态 [rx, ry, rz]（度）；None 时按 anchor_source 推导
+        :param anchor_source: 'config'/'home' → 整条路径共用一个锚点（优先用 ref_rpy_deg，缺省时用 Home 正解）；
+                             'raw' → 逐点以航点自身名义（法向）姿态为锚点，即每个点在自己法向 ±容差内选姿态
         """
         effective_tol = tolerance_rpy_deg or tol_rpy_deg or [10.0, 10.0, 180.0]
         if len(effective_tol) != 3:
             effective_tol = [10.0, 10.0, 180.0]
         effective_tol = [float(v) for v in effective_tol]
 
+        src = (anchor_source or "home").strip().lower()
+        if src not in {"config", "home", "raw"}:
+            src = "home"
+
         home_rad = init_q if init_q is not None else [0.0, 0.0, -math.pi / 2.0, -math.pi / 2.0, -math.pi / 2.0, 0.0]
-        if ref_rpy_deg is not None and len(ref_rpy_deg) == 3:
+        if src == "raw":
+            # 逐点名义法向锚点：ref_rpy 置 None 交给 path_opt.optimize 逐点展开
+            effective_anchor_rpy = None
+        elif ref_rpy_deg is not None and len(ref_rpy_deg) == 3:
             effective_anchor_rpy = [float(v) for v in ref_rpy_deg]
         else:
+            # 未给出参考姿态时退回 Home 正解，并把来源如实记成 home
             _, effective_anchor_rpy = self.verifier.solver.forward_controller(home_rad)
             effective_anchor_rpy = [round(float(v), 2) for v in effective_anchor_rpy]
+            src = "home"
 
         paths = paths_data.get("paths", [])
         opt_paths = []
@@ -362,7 +392,8 @@ class PoiConstraintOptimizer:
         opt_data["paths"] = opt_paths
         opt_data["type"] = "poi"
         opt_data["poi_config"] = {
-            "mode": "absolute_anchor_tolerance",
+            "mode": "per_waypoint_nominal_envelope" if effective_anchor_rpy is None else "absolute_anchor_tolerance",
+            "anchor_source": src,
             "ref_rpy_deg": effective_anchor_rpy,
             "tolerance_rpy_deg": effective_tol,
             "euler_order": "xyz",

@@ -170,14 +170,19 @@ class CR5PathVerifier:
         tolerance_rpy_deg: list[float] = None,
         tol_rpy_deg: list[float] = None,
         init_q: list[float] = None,
+        anchor_source: str = "home",
     ):
-        """Optimizes all paths within a bounded 3D tolerance envelope using PoiConstraintOptimizer (Viterbi DP)."""
+        """Optimizes all paths within a bounded 3D tolerance envelope using PoiConstraintOptimizer (Viterbi DP).
+
+        :param anchor_source: 'config'/'home' → 全局单一锚点；'raw' → 逐点名义法向锚点
+        """
         return self.poi_optimizer.optimize_poi_all_paths(
             paths_data,
             ref_rpy_deg=ref_rpy_deg,
             tolerance_rpy_deg=tolerance_rpy_deg,
             tol_rpy_deg=tol_rpy_deg,
-            init_q=init_q
+            init_q=init_q,
+            anchor_source=anchor_source
         )
 
     # ─── Sparse Viterbi MoveL Optimizer ─────────────────────────────────────

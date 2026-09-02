@@ -124,14 +124,19 @@ class SAMService:
         ]
         
         for idx, mask_data in enumerate(committed_masks):
-            # Parse points robustly: handles [x, y], {"x": ..., "y": ...}, etc.
+            # Parse points robustly: handles [x, y], {"x": ..., "y": ..., "label": ...}, etc.
             raw_pts = mask_data.get("points", [])
             pts = []
+            lbls_from_pts = []
             for p in raw_pts:
                 if isinstance(p, (list, tuple)) and len(p) >= 2 and p[0] is not None and p[1] is not None:
                     pts.append([int(p[0]), int(p[1])])
+                    if len(p) >= 3 and p[2] is not None:
+                        lbls_from_pts.append(int(p[2]))
                 elif isinstance(p, dict) and "x" in p and "y" in p and p["x"] is not None and p["y"] is not None:
                     pts.append([int(p["x"]), int(p["y"])])
+                    if "label" in p and p["label"] is not None:
+                        lbls_from_pts.append(int(p["label"]))
             
             raw_lbls = mask_data.get("labels", [])
             lbls = []
@@ -139,11 +144,23 @@ class SAMService:
                 if l is not None:
                     lbls.append(int(l))
             
-            # If labels length doesn't match pts length, default to 1 (foreground)
+            # If labels were not at top level, use labels extracted from points objects
+            if not lbls and lbls_from_pts:
+                lbls = lbls_from_pts
+            
+            # If labels length still doesn't match pts length, default remaining to 1 (foreground)
             if len(lbls) < len(pts):
                 lbls.extend([1] * (len(pts) - len(lbls)))
             
             if not pts:
+                if "polygons" in mask_data and mask_data["polygons"]:
+                    yaml_data["masks"].append({
+                        "id": idx + 1,
+                        "points": [],
+                        "labels": [],
+                        "score": float(mask_data.get("score", 1.0)),
+                        "polygons": mask_data["polygons"]
+                    })
                 continue
                 
             pts_tuples = [(p[0], p[1]) for p in pts]
@@ -162,7 +179,7 @@ class SAMService:
                     "polygons": polygons
                 })
                 logger.info(
-                    f"[SAM] Mask #{idx+1} processed: {len(pts)} points, "
+                    f"[SAM] Mask #{idx+1} processed: {len(pts)} points ({lbls}), "
                     f"score={score:.3f}, {len(polygons)} polygon(s)"
                 )
                 

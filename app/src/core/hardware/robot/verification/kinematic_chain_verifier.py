@@ -56,6 +56,17 @@ class KinematicChainVerifier:
     def _loc_xyz(self, T_gun: np.ndarray) -> list[float]:
         return [round(float(x), 2) for x in T_gun[:3, 3] * 1000.0]
 
+    def _to_urdf_flange(self, T_gun: np.ndarray) -> np.ndarray:
+        """
+        将控制器枪尖/工具系位姿 T_gun 转换为 URDF 机械臂法兰 (Link6) 位姿 T_flange:
+        T_flange_ctrl = T_gun @ self.config.T_tcp_inv
+        T_urdf_flange = controller_matrix_to_urdf(T_flange_ctrl)
+        """
+        if hasattr(self.config, 'T_tcp_inv') and self.config.T_tcp_inv is not None:
+            T_flange_ctrl = T_gun @ self.config.T_tcp_inv
+            return self.solver.controller_matrix_to_urdf(T_flange_ctrl)
+        return self.solver.controller_matrix_to_urdf(T_gun)
+
     def _append_issue(self, issues: list, **kwargs):
         issues.append(kwargs)
 
@@ -75,8 +86,8 @@ class KinematicChainVerifier:
         so a long near-singular segment does not spam one issue per millimetre.
         """
         loc = self._loc_xyz(T_gun)
-        T_urdf = self.solver.controller_matrix_to_urdf(T_gun)
-        risk = self.solver.check_singularity_risk(q, T=T_urdf)
+        T_urdf_flange = self._to_urdf_flange(T_gun)
+        risk = self.solver.check_singularity_risk(q, T=T_urdf_flange)
 
         if not self.solver.is_joint_valid(q):
             q_deg = [round(math.degrees(a), 2) for a in q]
@@ -161,13 +172,14 @@ class KinematicChainVerifier:
         }
 
         first_T_gun = dense_points[0][0]
+        first_T_flange = self._to_urdf_flange(first_T_gun)
         # Seed must be a reachable posture close to the real start; default is a typical
         # CR5 "ready" pose. When chaining paths, pass the previous path's last q as init_q
         # so the first step does not jump to a different IK branch.
         default_seed_q = np.array([PI, 0.0, PI / 2.0, PI / 2.0, PI / 2.0, 0.0], dtype=np.float64)
         q_ref = np.array(init_q, dtype=np.float64) if init_q is not None else default_seed_q
 
-        curr_q = self.solver.get_best_ik_controller(first_T_gun, q_ref)
+        curr_q = self.solver.get_best_ik(first_T_flange, q_ref)
         if curr_q is None:
             loc_xyz = self._loc_xyz(first_T_gun)
             logger.error(f"❌ [KinematicChainVerifier] Path {path_id} Start Point Unreachable: XYZ={loc_xyz}")
@@ -198,10 +210,11 @@ class KinematicChainVerifier:
         for step_idx in range(1, total_steps):
             T_gun, _, dt, seg_idx = dense_points[step_idx]
             loc_xyz = self._loc_xyz(T_gun)
+            T_flange = self._to_urdf_flange(T_gun)
 
             # Nearest of the 8 IK branches, unwrapped onto curr_q so J6 stays on
             # the same ±2π winding instead of snapping to the [-π, π] representative.
-            next_q = self.solver.get_best_ik_controller(T_gun, curr_q)
+            next_q = self.solver.get_best_ik(T_flange, curr_q)
             if next_q is None:
                 logger.error(
                     f"❌ [KinematicChainVerifier] Path {path_id} [UNREACHABLE]: "

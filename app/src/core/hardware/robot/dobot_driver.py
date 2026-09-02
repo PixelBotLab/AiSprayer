@@ -57,7 +57,7 @@ class DobotDriver(BaseRobotDriver):
             r = self.dashboard.EnableRobot()
             logger.info(f"EnableRobot: {r}")
             
-            if self.tool_num > 0:
+            if self.tool_num is not None and self.tool_num >= 0:
                 self.set_tool_number(self.tool_num)
                 logger.info(f"Dobot tool number set to {self.tool_num}")
 
@@ -314,19 +314,20 @@ class DobotDriver(BaseRobotDriver):
             time.sleep(0.05)
         return False
 
-    def move_j(self, pose: PoseLike, velocity: float = 10.0, acc: float = 20.0, dec: float = 20.0, tool_num: int = 0, wait: bool = True) -> int:
+    def move_j(self, pose: PoseLike, velocity: float = 10.0, acc: float = 20.0, dec: float = 20.0, tool_num: Optional[int] = None, wait: bool = True) -> int:
         if not self._connected or not self.move:
             return -2
         lst = _to_list(pose)
         x, y, z = lst[0], lst[1], lst[2]
         rx_deg, ry_deg, rz_deg = math.degrees(lst[3]), math.degrees(lst[4]), math.degrees(lst[5])
+        tool = self.tool_num if tool_num is None else tool_num
         
         try:
             # Fix Dobot firmware parsing bug where "-0.000000" causes -30004 error
             # Adding 0.0 converts -0.0 to 0.0 in Python.
             rx_deg, ry_deg, rz_deg = rx_deg + 0.0, ry_deg + 0.0, rz_deg + 0.0
-            r = self.move.MovJ(x, y, z, rx_deg, ry_deg, rz_deg, tool=tool_num, speedJ=velocity, accJ=acc)
-            logger.info(f"MovJ({x:.2f},{y:.2f},{z:.2f},{rx_deg:.2f},{ry_deg:.2f},{rz_deg:.2f},tool={tool_num},speedJ={velocity},accJ={acc}): {r}")
+            r = self.move.MovJ(x, y, z, rx_deg, ry_deg, rz_deg, tool=tool, speedJ=velocity, accJ=acc)
+            logger.info(f"MovJ({x:.2f},{y:.2f},{z:.2f},{rx_deg:.2f},{ry_deg:.2f},{rz_deg:.2f},tool={tool},speedJ={velocity},accJ={acc}): {r}")
             resp = parse_response(r)
             if not resp.ok:
                 return resp.id
@@ -338,7 +339,7 @@ class DobotDriver(BaseRobotDriver):
             self._wait_motion_done()
         return 0
 
-    def move_joint(self, joints: List[float], velocity: float = 10.0, acc: float = 20.0, dec: float = 20.0, tool_num: int = 0, wait: bool = True) -> int:
+    def move_joint(self, joints: List[float], velocity: float = 10.0, acc: float = 20.0, dec: float = 20.0, tool_num: Optional[int] = None, wait: bool = True) -> int:
         if not self._connected or not self.move:
             return -2
         if len(joints) < 6:
@@ -359,12 +360,13 @@ class DobotDriver(BaseRobotDriver):
             self._wait_motion_done()
         return 0
 
-    def move_l(self, pose: PoseLike, velocity_mm: float = 10.0, acc: float = 20.0, dec: float = 20.0, tool_num: int = 0, wait: bool = True) -> int:
+    def move_l(self, pose: PoseLike, velocity_mm: float = 10.0, acc: float = 20.0, dec: float = 20.0, tool_num: Optional[int] = None, wait: bool = True) -> int:
         if not self._connected or not self.move:
             return -2
         lst = _to_list(pose)
         x, y, z = lst[0], lst[1], lst[2]
         rx_deg, ry_deg, rz_deg = math.degrees(lst[3]), math.degrees(lst[4]), math.degrees(lst[5])
+        tool = self.tool_num if tool_num is None else tool_num
         
         try:
             if self.dashboard:
@@ -375,8 +377,8 @@ class DobotDriver(BaseRobotDriver):
             # Fix -0.0 bug
             x, y, z = x + 0.0, y + 0.0, z + 0.0
             rx_deg, ry_deg, rz_deg = rx_deg + 0.0, ry_deg + 0.0, rz_deg + 0.0
-            r = self.move.MovL(x, y, z, rx_deg, ry_deg, rz_deg, tool=tool_num, speedL=velocity_mm, accL=acc)
-            logger.info(f"MovL({x:.2f},{y:.2f},{z:.2f},{rx_deg:.2f},{ry_deg:.2f},{rz_deg:.2f},tool={tool_num},speedL={velocity_mm},accL={acc}): {r}")
+            r = self.move.MovL(x, y, z, rx_deg, ry_deg, rz_deg, tool=tool, speedL=velocity_mm, accL=acc)
+            logger.info(f"MovL({x:.2f},{y:.2f},{z:.2f},{rx_deg:.2f},{ry_deg:.2f},{rz_deg:.2f},tool={tool},speedL={velocity_mm},accL={acc}): {r}")
             resp = parse_response(r)
             if not resp.ok:
                 return resp.id
@@ -396,13 +398,14 @@ class DobotDriver(BaseRobotDriver):
         velocity: float = 10.0, 
         acc: float = 20.0, 
         dec: float = 20.0,
-        tool_num: int = 0,
+        tool_num: Optional[int] = None,
         wait: bool = True,
         cp_ratio: int = 50
     ) -> int:
         if not self._connected or not self.move:
             return -2
             
+        tool = self.tool_num if tool_num is None else tool_num
         try:
             if self.dashboard:
                 r = self.dashboard.CP(cp_ratio)
@@ -412,14 +415,14 @@ class DobotDriver(BaseRobotDriver):
                 x, y, z = lst[0] + 0.0, lst[1] + 0.0, lst[2] + 0.0
                 rx_deg, ry_deg, rz_deg = math.degrees(lst[3]) + 0.0, math.degrees(lst[4]) + 0.0, math.degrees(lst[5]) + 0.0
                 
-                r = self.move.MovJ(x, y, z, rx_deg, ry_deg, rz_deg, tool=tool_num, speedJ=velocity, accJ=acc)
+                r = self.move.MovJ(x, y, z, rx_deg, ry_deg, rz_deg, tool=tool, speedJ=velocity, accJ=acc)
                 # Parse response to ensure it was accepted
                 resp = parse_response(r)
                 if not resp.ok:
                     logger.error(f"MovJ queue rejected: {r}")
                     return resp.id
                 
-            logger.info(f"Sent {len(poses)} MovJ commands sequentially via move.MovJ")
+            logger.info(f"Sent {len(poses)} MovJ commands sequentially via move.MovJ (tool={tool})")
                 
         except DobotApiError as e:
             logger.error(f"MovJ queue failed: {e}")
@@ -436,13 +439,14 @@ class DobotDriver(BaseRobotDriver):
         velocity_mm: float = 10.0, 
         acc: float = 20.0, 
         dec: float = 20.0,
-        tool_num: int = 0,
+        tool_num: Optional[int] = None,
         wait: bool = True,
         cp_ratio: int = 50
     ) -> int:
         if not self._connected or not self.move:
             return -2
             
+        tool = self.tool_num if tool_num is None else tool_num
         try:
             if self.dashboard:
                 r = self.dashboard.CP(cp_ratio)
@@ -454,14 +458,14 @@ class DobotDriver(BaseRobotDriver):
                 x, y, z = lst[0] + 0.0, lst[1] + 0.0, lst[2] + 0.0
                 rx_deg, ry_deg, rz_deg = math.degrees(lst[3]) + 0.0, math.degrees(lst[4]) + 0.0, math.degrees(lst[5]) + 0.0
                 
-                r = self.move.MovL(x, y, z, rx_deg, ry_deg, rz_deg, tool=tool_num, accL=acc)
+                r = self.move.MovL(x, y, z, rx_deg, ry_deg, rz_deg, tool=tool, accL=acc)
                 resp = parse_response(r)
                 if not resp.ok:
                     logger.error(f"MovL queue rejected: {r}")
                     return resp.error_id
-                logger.info(f"MovL sent: {x,y,z,rx_deg,ry_deg,rz_deg}, response {r}")
+                logger.info(f"MovL sent: {x,y,z,rx_deg,ry_deg,rz_deg}, tool={tool}, response {r}")
                 
-            logger.info(f"Sent {len(poses)} MovL commands sequentially via move.MovL")
+            logger.info(f"Sent {len(poses)} MovL commands sequentially via move.MovL (tool={tool})")
                 
         except DobotApiError as e:
             if self.dashboard:

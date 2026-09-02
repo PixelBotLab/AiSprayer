@@ -9,13 +9,14 @@ import logging
 import cv2
 import numpy as np
 import yaml
+from core.config import sprayer_config
 from services.camera_service import camera_service
 from services.robot_service import robot_service
 from apps.interactive.sam_service import sam_service
 from apps.interactive.reconstruction_service import reconstruction_service
 from apps.interactive.manual_path_service import manual_path_service
 from apps.interactive.auto_path_service import auto_path_service, AutoPathServiceError
-from apps.interactive.path_verification_service import path_verification_service, DEFAULT_POI_TOLERANCE_RPY_DEG
+from apps.interactive.path_verification_service import path_verification_service, get_default_poi_tolerance_rpy_deg
 
 
 router = APIRouter(prefix="/api/interactive", tags=["Interactive"])
@@ -390,9 +391,11 @@ def get_session_data(name: str):
 
 
 class PoiConstraintConfig(BaseModel):
-    ref_rpy_deg: list[float] | None = None  # e.g. [0.0, 0.0, 0.0]
-    tolerance_rpy_deg: list[float] = Field(default_factory=lambda: list(DEFAULT_POI_TOLERANCE_RPY_DEG))  # [tol_rx, tol_ry, tol_rz]
-    anchor_source: str | None = None  # 'home' | 'live' | 'manual'
+    ref_rpy_deg: list[float] | None = None  # e.g. [0.0, 0.0, 0.0]; 显式给出时它就是包络中心
+    tolerance_rpy_deg: list[float] = Field(default_factory=get_default_poi_tolerance_rpy_deg)  # [tol_rx, tol_ry, tol_rz]
+    # 'config'(配置文件 poi_ref_rpy_deg) | 'home'(Home 正解) | 'live'(机械臂当前 TCP, 本层解析成 ref_rpy) | 'raw'(逐点名义法向)
+    # 缺省时沿用配置文件 spraying.poi_anchor_source
+    anchor_source: str | None = None
 
 
 class KinematicsOptions(BaseModel):
@@ -437,6 +440,16 @@ def verify_paths(name: str, req: VerifyPathRequest = VerifyPathRequest()):
 def optimize_paths(name: str, req: OptimizePathRequest = OptimizePathRequest()):
     try:
         poi_dict = req.poi_config.model_dump() if req.poi_config else None
+        if poi_dict and str(poi_dict.get("anchor_source") or "").strip().lower() == "live":
+            # live: 以机械臂当前 TCP 姿态作包络中心, 在这里解析成具体 ref_rpy 再下发给优化器
+            live_pose, _ = robot_service.get_current_pose()
+            if not live_pose or len(live_pose) < 6:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Live robot TCP pose is unavailable. Connect the robot before using anchor_source='live'."
+                )
+            poi_dict["ref_rpy_deg"] = [round(float(live_pose[3]), 2), round(float(live_pose[4]), 2), round(float(live_pose[5]), 2)]
+            poi_dict["anchor_source"] = "config"
         res = path_verification_service.optimize_template_paths(
             name,
             mode=req.mode,
@@ -445,6 +458,8 @@ def optimize_paths(name: str, req: OptimizePathRequest = OptimizePathRequest()):
             options=req.options.model_dump()
         )
         return res
+    except HTTPException:
+        raise
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -499,14 +514,24 @@ def get_robot_anchor_pose(source: str = "home"):
         live_xyz = [round(float(live_pose[0]), 2), round(float(live_pose[1]), 2), round(float(live_pose[2]), 2)]
         live_rpy = [round(float(live_pose[3]), 2), round(float(live_pose[4]), 2), round(float(live_pose[5]), 2)]
 
-    if source not in {"home", "live"}:
-        raise HTTPException(status_code=400, detail="source must be 'home' or 'live'")
+    if source not in {"home", "live", "config", "raw"}:
+        raise HTTPException(status_code=400, detail="source must be 'home', 'live', 'config' or 'raw'")
 
     if source == "live":
         if not live_rpy:
             raise HTTPException(status_code=409, detail="Live robot TCP pose is unavailable. Connect the robot before capturing a live POI anchor pose.")
         selected_rpy = live_rpy
         selected_xyz = live_xyz
+    elif source == "config":
+        cfg_ref = sprayer_config.poi_ref_rpy_deg
+        if not cfg_ref:
+            raise HTTPException(status_code=409, detail="spraying.poi_ref_rpy_deg is not configured in aisprayer_config.yaml")
+        selected_rpy = [round(float(v), 2) for v in cfg_ref]
+        selected_xyz = home_xyz
+    elif source == "raw":
+        # 逐点名义法向锚点: 没有全局参考姿态可言
+        selected_rpy = None
+        selected_xyz = None
     else:
         selected_rpy = home_rpy
         selected_xyz = home_xyz
@@ -516,7 +541,9 @@ def get_robot_anchor_pose(source: str = "home"):
         "is_connected": robot_service._is_connected,
         "rpy_deg": selected_rpy,
         "xyz_mm": selected_xyz,
-        "default_tolerance_rpy_deg": list(DEFAULT_POI_TOLERANCE_RPY_DEG),
+        "default_tolerance_rpy_deg": get_default_poi_tolerance_rpy_deg(),
+        "default_anchor_source": sprayer_config.poi_anchor_source,
+        "default_ref_rpy_deg": sprayer_config.poi_ref_rpy_deg,
         "home_pose": {
             "xyz_mm": home_xyz,
             "rpy_deg": home_rpy,
@@ -712,6 +739,15 @@ def execute_yaml_path(name: str, req: ExecuteYamlPathRequest):
     speed_j = req.speed_j if req.speed_j is not None else curr_speed_j
     acc_j = req.acc_j if req.acc_j is not None else curr_acc_j
 
+    # 0. 自动根据配置文件中的 robot_tcp_id 设置机械臂工具坐标系 (0=默认, 1=gripper_tip_link, 2=laser_head_link)
+    sprayer_config.reload()
+    target_tool_id = sprayer_config.robot_tcp_id
+    target_tcp_name = sprayer_config.robot_tcp
+    logger.info(f"execute_yaml_path: Automatically configuring robot tool to ID={target_tool_id} (TCP={target_tcp_name})...")
+    tool_ok, tool_err = robot_service.set_tool(target_tool_id)
+    if not tool_ok:
+        logger.warning(f"execute_yaml_path: Warning when setting robot tool to ID {target_tool_id}: {tool_err}")
+
     # 1. 在执行 path 之前先回到 Home 姿态 (使用 MoveJ 关节运动参数)
     logger.info(f"execute_yaml_path: Moving robot to Home position (speed_j={speed_j}%, acc_j={acc_j}%) before trajectory execution...")
     home_ok, home_err = robot_service.go_home(speed=speed_j, acc=acc_j)
@@ -763,8 +799,8 @@ def execute_yaml_path(name: str, req: ExecuteYamlPathRequest):
                     math.radians(first_pt["ry"]),
                     math.radians(first_pt["rz"])
                 ]
-                logger.info(f"execute_yaml_path: MovJ to 1st waypoint of {path_title} -> {first_pt} (speed_j={speed_j}%, acc_j={acc_j}%)")
-                j_ok, j_err = robot_service.move_to_pose_j(first_pose, speed=speed_j, acc=acc_j)
+                logger.info(f"execute_yaml_path: MovJ to 1st waypoint of {path_title} -> {first_pt} (speed_j={speed_j}%, acc_j={acc_j}%, tool={target_tool_id})")
+                j_ok, j_err = robot_service.move_to_pose_j(first_pose, speed=speed_j, acc=acc_j, tool_num=target_tool_id)
                 if not j_ok:
                     raise HTTPException(status_code=500, detail=f"Failed to MovJ to start waypoint of {path_title}: {j_err}")
                 has_moved_j_to_start = True
@@ -774,7 +810,7 @@ def execute_yaml_path(name: str, req: ExecuteYamlPathRequest):
             #    后续 path 从第 1 个 waypoint 开始（没有做 MovJ 过渡）
             exec_poses = poses[1:] if p_idx == 0 else poses
             logger.info(f"execute_yaml_path: Executing {len(exec_poses)}/{len(poses)} waypoints on {path_title} "
-                        f"(skip 1st: {p_idx == 0}, speed_l={speed_l} mm/s, acc_l={acc_l}%, cp={req.cp_ratio})")
+                        f"(skip 1st: {p_idx == 0}, speed_l={speed_l} mm/s, acc_l={acc_l}%, cp={req.cp_ratio}, tool={target_tool_id})")
             
             batch_ok, batch_err = True, ""
             if exec_poses:
@@ -783,7 +819,8 @@ def execute_yaml_path(name: str, req: ExecuteYamlPathRequest):
                     speed=speed_l,
                     acc=acc_l,
                     cp_ratio=req.cp_ratio if req.cp_ratio is not None else 100,
-                    wait=True
+                    wait=True,
+                    tool_num=target_tool_id
                 )
             if not batch_ok:
                 raise HTTPException(status_code=500, detail=f"Execution error on {path_title}: {batch_err}")

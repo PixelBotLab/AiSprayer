@@ -504,6 +504,7 @@ class SprayWaypointOptimizer:
             _axis_grid(self.tol_z_deg),
         )
         self._alphas_cache: dict[int, np.ndarray] = {}
+        self.T_tcp_inv = getattr(self.verifier.config, 'T_tcp_inv', None) if self.verifier and hasattr(self.verifier, 'config') else None
 
     def _ik_gun(self, T_gun: np.ndarray) -> list[np.ndarray]:
         """枪尖控制器系 4×4 → 最多 8 组 URDF 关节（弧度）。"""
@@ -514,7 +515,10 @@ class SprayWaypointOptimizer:
             if self.ik_returns_degrees:
                 return [np.deg2rad(np.asarray(q, dtype=np.float64)) for q in sols]
             return [np.asarray(q, dtype=np.float64) for q in sols]
-        return list(self.solver.inverse_controller_matrix(T_gun))
+        if self.T_tcp_inv is not None:
+            T_gun = T_gun @ self.T_tcp_inv
+        T_urdf = self.solver.controller_matrix_to_urdf(T_gun)
+        return list(self.solver.inverse(T_urdf))
 
     def _is_safe_q(
         self,
@@ -529,11 +533,15 @@ class SprayWaypointOptimizer:
         if abs(math.sin(float(qv[4]))) < _SING_SIN or abs(math.sin(float(qv[2]))) < _SING_SIN:
             return False
         if T_urdf is None:
+            if self.T_tcp_inv is not None:
+                T_gun = T_gun @ self.T_tcp_inv
             T_urdf = self.solver.controller_matrix_to_urdf(T_gun)
         return self.solver.shoulder_q1_half_separation_rad(T_urdf) >= _SHOULDER_HALF_RAD
 
     def _track_ik_step(self, T_ctrl: np.ndarray, prev_q: np.ndarray) -> np.ndarray | None:
         """一次 URDF 转换 + 跟最近支 + 限位/奇异。失败返回 None。"""
+        if self.T_tcp_inv is not None:
+            T_ctrl = T_ctrl @ self.T_tcp_inv
         T_urdf = _ctrl_to_urdf_into(T_ctrl, self._T_urdf_work)
         nxt = self.solver.get_best_ik(T_urdf, prev_q)
         if nxt is None or not self.solver.is_joint_valid(nxt):
@@ -660,7 +668,11 @@ class SprayWaypointOptimizer:
         T_ctrl[:, 3, 3] = 1.0
         T_ctrl[:, :3, :3] = R_keep
         T_ctrl[:, :3, 3] = base_pos
-        T_urdf = _ctrl_to_urdf_batch(T_ctrl)
+        if self.T_tcp_inv is not None:
+            T_flange_ctrl = T_ctrl @ self.T_tcp_inv
+            T_urdf = _ctrl_to_urdf_batch(T_flange_ctrl)
+        else:
+            T_urdf = _ctrl_to_urdf_batch(T_ctrl)
 
         if self._ik_override is not None:
             q_sols = np.zeros((P, 8, 6), dtype=np.float64)
@@ -815,7 +827,17 @@ class SprayWaypointOptimizer:
             return False, np.inf, None
 
         T_start, T_end = node_start["T"], node_end["T"]
-        p_start, p_end = T_start[:3, 3], T_end[:3, 3]
+        if self.T_tcp_inv is not None:
+            T_s_flange = T_start @ self.T_tcp_inv
+            T_e_flange = T_end @ self.T_tcp_inv
+            p_start, p_end = T_s_flange[:3, 3], T_e_flange[:3, 3]
+            q1 = _quat_from_R(T_s_flange[:3, :3])
+            q2 = _quat_from_R(T_e_flange[:3, :3])
+        else:
+            p_start, p_end = T_start[:3, 3], T_end[:3, 3]
+            q1 = node_start["quat"]
+            q2 = node_end["quat"]
+
         dist_mm = float(np.linalg.norm(p_end - p_start) * 1000.0)
         travel = float(np.max(np.abs(np.degrees(_wrap_pi(q_end_hint - q_start)))))
         travel_lim = min(
@@ -831,9 +853,6 @@ class SprayWaypointOptimizer:
         if alphas_full is None:
             alphas_full = np.linspace(0.0, 1.0, n_mid + 2, dtype=np.float64)[1:]
             self._alphas_cache[n_mid] = alphas_full
-
-        q1 = node_start["quat"]
-        q2 = node_end["quat"]
 
         return self._walk_alphas(
             p_start, p_end, q1, q2, q_start, alphas_full, node_end, check_end_branch=True,
@@ -870,21 +889,24 @@ class SprayWaypointOptimizer:
         q_seed = np.array(init_q, dtype=np.float64) if init_q is not None else _DEFAULT_SEED_Q.copy()
         T_list = [_waypoint_to_T(wp) for wp in waypoints]
 
-        # 默认锚点 = 第一枪姿态（工艺「相对这把垂直喷」）
+        # 默认锚点：若未指定全局参考位姿，则按逐点名义法向姿态作为各自的锚点中心
         rot_anchor = None
-        if anchor_poses:
+        if anchor_poses and len(anchor_poses) == 1:
             rot_anchor = R_scipy.from_matrix(_waypoint_to_T(anchor_poses[0])[:3, :3])
-        elif anchor_tolerances_deg is not None:
-            rot_anchor = R_scipy.from_matrix(T_list[0][:3, :3])
 
         # 1. 每个 Stage 展开候选节点（姿态 × IK 分支）
         t_cands_start = time.time()
         stages_fast: list[list[dict[str, Any]]] = []
         stages_full: list[list[dict[str, Any]]] = []
         for i, T_nom in enumerate(T_list):
-            rot_a = rot_anchor
             if anchor_poses is not None and len(anchor_poses) == n:
                 rot_a = R_scipy.from_matrix(_waypoint_to_T(anchor_poses[i])[:3, :3])
+            elif rot_anchor is not None:
+                rot_a = rot_anchor
+            elif anchor_tolerances_deg is not None:
+                rot_a = R_scipy.from_matrix(T_nom[:3, :3])
+            else:
+                rot_a = None
             c_fast, c_pack = self._generate_stage_candidates(T_nom, rot_a, anchor_tolerances_deg)
             if not c_fast and int(c_pack["q"].shape[0]) == 0:
                 raise RuntimeError(

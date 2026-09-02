@@ -36,7 +36,8 @@ hardware:
     max_tcp_speed_mm_s: 2000    # robot cr5最大线速度为2000mm/s, 在控制软件中设置
     max_joint_speed_deg_s: [180, 180, 180, 180, 180, 180]  # robot cr5最大关节速度为180度/s, 在控制软件中设置
     robot_urdf: "app/urdf/cr5_robot_with_my_tools.urdf" # cr5_robot.urdf/cr5_robot_with_gun.urdf
-    robot_tcp: "spray_nozzle_link"
+    robot_tcp_id: 1             # 机械臂末端工具坐标系ID: 默认 0 (法兰/工具0), 配置为 1 则是 gripper_tip_link (夹爪), 2 是 laser_head_link (激光头)
+    robot_tcp: "gripper_tip_link"  # 对应的 URDF TCP 节点名称 (laser_head_link / gripper_tip_link)
 
 # 2. 视觉与规划层配置 (Vision & Planning)
 vision:
@@ -80,15 +81,26 @@ spraying:
   standoff_dist_mm: 150.0       # 默认喷涂靶距 / TCP standoff 距离 (mm)
   velocity: 150.0               # 喷涂移动速度 (mm/s)
   slerp_step_mm: 2.0            # 仿真与运动学验证插值步长 (mm)
-  tool_num: 0                   # 默认工具号
+
+  # POI 锚点(容差包络中心)来源:
+  #   config = 用下面的 poi_ref_rpy_deg 作为整条路径共用的固定锚点
+  #   home   = 用 Home 关节角 [0,0,-90,-90,-90,0] 正解出的 TCP 姿态作为锚点
+  #   raw    = 逐点以航点自身的名义(法向)姿态为锚点, 即"每个点在自己法向 ±容差内选姿态"(最严格的法向跟随)
+  # 页面/接口显式传入 poi_config.anchor_source 时以传入值为准; live(机械臂当前 TCP)由后端接口解析成具体 ref_rpy 后下发
+  poi_anchor_source: "config"
+  # 锚点参考姿态 [Rx, Ry, Rz] (单位: 度, Euler 'xyz'), 仅 poi_anchor_source: config 时生效
+  poi_ref_rpy_deg: [90.0, 0.0, 90.0]
 
   # POI 锚点姿态容差包络 [Rx, Ry, Rz] (单位: ±度, 页面默认值)
-  poi_tolerance_rpy_deg: [10.0, 10.0, 180.0]
+  # Rz 收到 ±30 是为禁止绕喷枪轴自由自旋: 之前 ±180 时自旋几乎只由 DP 平滑项决定,
+  # 会翻到欧拉角另一侧并连带换 IK 分支(Δq_max 达 170°), 直接顶出 J6 超速
+  poi_tolerance_rpy_deg: [10.0, 10.0, 30.0]
 
   # 轨迹优化器候选姿态搜索网格 [min, max, step] (单位: 度)
+  # 候选姿态 = 名义(法向)姿态 × 本网格, 再裁剪进上面的锚点包络; 网格范围应不小于包络
   grid_tol_x_deg: [-5.0, 5.0, 2.0]       # 绕工具 X 轴倾斜容差与采样步长
   grid_tol_y_deg: [-5.0, 5.0, 2.0]       # 绕工具 Y 轴倾斜容差与采样步长
-  grid_tol_z_deg: [-180.0, 180.0, 10.0]  # 绕工具 Z 轴自旋容差与采样步长
+  grid_tol_z_deg: [-30.0, 30.0, 5.0]     # 绕工具 Z 轴自旋容差与采样步长
 
 # 5. 工位跟随 (Follow) —— 特征前端 + 配准 + 判据 + 臂侧镜像
 # 这一份 `follow:` 块有两个读者，跑的是同一套数学：

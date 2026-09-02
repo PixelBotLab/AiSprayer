@@ -13,6 +13,7 @@ export interface Point {
 export interface MaskData {
   id?: number;
   points?: Point[];
+  labels?: number[];
   polygons: number[][][]; // Array of polygons, each is Array of [x, y]
   score?: number;
 }

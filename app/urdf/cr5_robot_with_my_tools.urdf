@@ -41,10 +41,10 @@
   </link>
 
   <!-- ========================================================================= -->
-  <!-- 末端复合工具挂载 (End-Effector Composite Tool: 喷枪 + 夹爪 + 相机 + 支架)   -->
+  <!-- 末端复合工具挂载 (End-Effector Composite Tool: 激光头 + 夹爪 + 相机 + 支架)   -->
   <!-- ========================================================================= -->
 
-  <!-- 1. 黑色部件 (喷枪枪身 + 相机机身 + 夹爪驱动器本体) -> 颜色: 黑曜炭黑 -->
+  <!-- 1. 黑色部件 (激光头本体 + 相机机身 + 夹爪驱动器本体) -> 颜色: 黑曜炭黑 -->
   <link name="my_tools_black">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
@@ -119,12 +119,12 @@
     <child link="my_tools_fingers" />
   </joint>
 
-  <!-- 4. 喷枪前端部件 (喷枪锥形枪嘴 / 雾化喷头) -> 颜色: 金属黄铜金色 -->
-  <link name="my_tools_nozzle">
+  <!-- 4. 激光头出光嘴部件 (激光头锥形出光嘴 / 喷嘴) -> 颜色: 金属黄铜金色 -->
+  <link name="my_tools_laser_nozzle">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://dobot_rviz/meshes/dobot_gazebo_sim/my_tools_nozzle.stl" scale="0.001 0.001 0.001" />
+        <mesh filename="package://dobot_rviz/meshes/dobot_gazebo_sim/my_tools_laser_nozzle.stl" scale="0.001 0.001 0.001" />
       </geometry>
       <material name="brass_gold">
         <color rgba="0.88 0.65 0.14 1.0" />
@@ -133,24 +133,34 @@
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://dobot_rviz/meshes/dobot_gazebo_sim/my_tools_nozzle.stl" scale="0.001 0.001 0.001" />
+        <mesh filename="package://dobot_rviz/meshes/dobot_gazebo_sim/my_tools_laser_nozzle.stl" scale="0.001 0.001 0.001" />
       </geometry>
     </collision>
   </link>
 
-  <joint name="Link6_to_my_tools_nozzle" type="fixed">
+  <joint name="Link6_to_my_tools_laser_nozzle" type="fixed">
     <origin xyz="0 0 0" rpy="0 0 -1.5708" />
     <parent link="Link6" />
-    <child link="my_tools_nozzle" />
+    <child link="my_tools_laser_nozzle" />
   </joint>
 
   
-  <link name="spray_nozzle_link" />
+  <!-- 5. 激光头出光嘴 TCP (Laser Head TCP) -->
+  <link name="laser_head_link" />
 
-  <joint name="Link6_to_spray_nozzle_link" type="fixed">
-    <origin xyz="-0.002022 0.0353263 0.3122347" rpy="0.0329936 -0.0038327 0.8023751" />
+  <joint name="Link6_to_laser_head_link" type="fixed">
+    <origin xyz="0.002404 0.016223 0.138333" rpy="-0.0183085 -0.0662699 -1.4414342" />
     <parent link="Link6" />
-    <child link="spray_nozzle_link" />
+    <child link="laser_head_link" />
+  </joint>
+
+  <!-- 6. 夹爪手指指尖 TCP (Gripper Fingertip TCP) -->
+  <link name="gripper_tip_link" />
+
+  <joint name="Link6_to_gripper_tip_link" type="fixed">
+    <origin xyz="-0.003359 -0.022217 0.251675" rpy="0.0430748 0.0400553 3.0562138" />
+    <parent link="Link6" />
+    <child link="gripper_tip_link" />
   </joint>
 
   <link name="world" />

@@ -88,11 +88,13 @@ def align_gun(face_index=0):
             silver_mesh.export(silver_out)
             fingers_mesh.export(fingers_out)
             if nozzle_mesh:
-                noz_out = os.path.join(base_dir, "my_tools_nozzle.stl")
+                noz_out = os.path.join(base_dir, "my_tools_laser_nozzle.stl")
                 nozzle_mesh.export(noz_out)
-            print(f"已同步生成多材质部件: 喷枪+相机+夹爪本体(黑色), 支架(铁银色), 夹爪手指(哑光银), 喷枪嘴(金色)")
+                # 兼容旧命名
+                nozzle_mesh.export(os.path.join(base_dir, "my_tools_nozzle.stl"))
+            print(f"已同步生成多材质部件: 激光头+相机+夹爪本体(黑色), 支架(铁银色), 夹爪手指(哑光银), 激光头出光嘴(金色)")
 
-    print(f"\n对齐完成！喷枪已经按照 Region {face_index} 对齐到了原点。请在页面 3D 视图中查看。")
+    print(f"\n对齐完成！激光头复合工具已经按照 Region {face_index} 对齐到了原点。请在页面 3D 视图中查看。")
     print("（如果发现选错面了，可以把 align_gun.py 里的数字改成 1 或 2 再运行）")
 
 if __name__ == '__main__':

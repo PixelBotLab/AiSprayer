@@ -113,14 +113,17 @@ class RobotService:
 
                 self.start_status_polling()
 
-                logger.info(f"Robot connected successfully. Setting initial speeds to {self._global_speed_factor}% (SpeedFactor, MoveL, MoveJ)...")
-                # Enforce global_speed_factor speed on real robot upon connection
+                # Enforce global_speed_factor speed and configured tool on real robot upon connection
                 try:
+                    tool_id = self._config.robot_tcp_id
+                    if hasattr(self._driver, 'set_tool_number'):
+                        self._driver.set_tool_number(tool_id)
+                        logger.info(f"robot {robot_type} initialized tool to {tool_id} (target_tcp={self._config.robot_tcp})")
                     if hasattr(self._driver, 'set_global_speed'):
                         self._driver.set_global_speed(self._global_speed_factor)
                         logger.info(f"robot {robot_type} set_global_speed to {self._global_speed_factor}")
                 except Exception as e:
-                    logger.warning(f"Failed to set initial {self._global_speed_factor}% speed after connect: {e}")
+                    logger.warning(f"Failed to set initial speed/tool after connect: {e}")
 
                 return True, ""
             else:
@@ -211,16 +214,41 @@ class RobotService:
             logger.error(msg)
             return None, msg
 
-    def move_to_pose(self, pose: List[float], speed: float = 10.0, acc: float = 10.0) -> tuple[bool, str]:
+    def set_tool(self, tool_num: int) -> tuple[bool, str]:
+        """
+        设置机械臂当前工具坐标系编号 (例如 0=默认法兰, 1=gripper_tip_link, 2=laser_head_link)。
+        """
+        if not self._driver or not self._is_connected:
+            msg = "set_tool: Robot is not connected"
+            logger.error(msg)
+            return False, msg
+        try:
+            if hasattr(self._driver, 'set_tool_number'):
+                ok = self._driver.set_tool_number(tool_num)
+                if ok:
+                    logger.info(f"set_tool: Successfully set robot tool to {tool_num}")
+                    return True, ""
+                return False, f"Failed to set robot tool to {tool_num}"
+            return True, ""
+        except Exception as e:
+            msg = f"set_tool: Error setting robot tool to {tool_num}: {e}"
+            logger.error(msg)
+            return False, msg
+
+    def set_tool_number(self, tool_num: int) -> tuple[bool, str]:
+        return self.set_tool(tool_num)
+
+    def move_to_pose(self, pose: List[float], speed: float = 10.0, acc: float = 10.0, tool_num: Optional[int] = None) -> tuple[bool, str]:
         if not self._driver or not self._is_connected:
             msg = "move_to_pose: Robot is not connected"
             logger.error(msg)
             return False, msg
 
+        eff_tool = tool_num if tool_num is not None else self._config.robot_tcp_id
         pose_val, _ = self.get_current_pose()
-        logger.info(f"move_to_pose: from pose:{_fmt(pose_val)}, to pose:{_fmt(pose)}, speed:{speed:.2f}, acc:{acc:.2f}")
+        logger.info(f"move_to_pose: from pose:{_fmt(pose_val)}, to pose:{_fmt(pose)}, speed:{speed:.2f}, acc:{acc:.2f}, tool:{eff_tool}")
         try:
-            self._driver.move_l(pose, velocity_mm=speed, acc=acc)
+            self._driver.move_l(pose, velocity_mm=speed, acc=acc, tool_num=eff_tool)
             new_pose_val, _ = self.get_current_pose()
             logger.info(f"move_to_pose: Success moving to pose, actual pose:{_fmt(new_pose_val)}")
             return True, ""
@@ -229,21 +257,22 @@ class RobotService:
             logger.error(msg)
             return False, msg
 
-    def move_to_pose_j(self, pose: List[float], speed: float = 10.0, acc: float = 10.0) -> tuple[bool, str]:
+    def move_to_pose_j(self, pose: List[float], speed: float = 10.0, acc: float = 10.0, tool_num: Optional[int] = None) -> tuple[bool, str]:
         """使用 MovJ 关节插补运动到指定的直角坐标笛卡尔位姿。"""
         if not self._driver or not self._is_connected:
             msg = "move_to_pose_j: Robot is not connected"
             logger.error(msg)
             return False, msg
 
+        eff_tool = tool_num if tool_num is not None else self._config.robot_tcp_id
         # SpeedJ 接收 0-100 的百分比，需要把 deg/s 转换
         max_jnt = self.max_joint_speed_deg_s[0] if self.max_joint_speed_deg_s else 180.0
         ratio_j = max(1, min(100, int((speed / max_jnt) * 100)))
 
         pose_val, _ = self.get_current_pose()
-        logger.info(f"move_to_pose_j (MovJ): from pose:{_fmt(pose_val)}, to pose:{_fmt(pose)}, speed:{speed:.2f}, acc:{acc:.2f}")
+        logger.info(f"move_to_pose_j (MovJ): from pose:{_fmt(pose_val)}, to pose:{_fmt(pose)}, speed:{speed:.2f}, acc:{acc:.2f}, tool:{eff_tool}")
         try:
-            res = self._driver.move_j(pose, velocity=ratio_j, acc=acc)
+            res = self._driver.move_j(pose, velocity=ratio_j, acc=acc, tool_num=eff_tool)
             if res == 0:
                 new_pose_val, _ = self.get_current_pose()
                 logger.info(f"move_to_pose_j: Success moving to pose via MovJ, actual pose:{_fmt(new_pose_val)}")
@@ -261,7 +290,8 @@ class RobotService:
         speed: Optional[float] = None,
         acc: Optional[float] = None,
         cp_ratio: int = 98,
-        wait: bool = True
+        wait: bool = True,
+        tool_num: Optional[int] = None
     ) -> tuple[bool, str]:
         """
         通过驱动层 move_l_queue 批量执行笛卡尔连续轨迹路点 (Waypoints)。
@@ -270,6 +300,7 @@ class RobotService:
         :param acc: 加速度百分比 (1~100)
         :param cp_ratio: 平滑过渡比例 (1~100)
         :param wait: 是否等待整条队列执行完毕
+        :param tool_num: 工具坐标系编号 (为空则默认使用配置的 robot_tcp_id)
         """
         if not self._driver or not self._is_connected:
             msg = "move_l_queue: Robot is not connected"
@@ -279,6 +310,7 @@ class RobotService:
         if not poses:
             return True, ""
 
+        eff_tool = tool_num if tool_num is not None else self._config.robot_tcp_id
         speed_val = float(speed) if speed is not None else float(self._speed_l)
         acc_val = float(acc) if acc is not None else float(self._acc_l)
 
@@ -301,18 +333,19 @@ class RobotService:
             elif isinstance(p, (list, tuple)) and len(p) >= 6:
                 converted_poses.append(RobotPose.from_list(list(p)))
 
-        logger.info(f"move_l_queue: executing {len(converted_poses)} waypoints, speed:{speed_val} mm/s, acc:{acc_val}%, cp_ratio:{cp_ratio}")
+        logger.info(f"move_l_queue: executing {len(converted_poses)} waypoints, speed:{speed_val} mm/s, acc:{acc_val}%, cp_ratio:{cp_ratio}, tool:{eff_tool}")
         try:
             res = self._driver.move_l_queue(
                 converted_poses,
                 velocity_mm=speed_val,
                 acc=acc_val,
                 wait=wait,
-                cp_ratio=cp_ratio
+                cp_ratio=cp_ratio,
+                tool_num=eff_tool
             )
             if res == 0:
                 #self._driver.sync()
-                logger.info(f"move_l_queue: Successfully executed {len(converted_poses)} waypoints.")
+                logger.info(f"move_l_queue: Successfully executed {len(converted_poses)} waypoints (tool={eff_tool}).")
                 return True, ""
             return False, f"move_l_queue returned error code: {res}"
         except Exception as e:

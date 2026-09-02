@@ -26,7 +26,11 @@ PATH_YAML_LEGACY = {
     "raw": ("scan.raw.path.yaml",),
     "poi": ("scan.poi.path.yaml",),
 }
-DEFAULT_POI_TOLERANCE_RPY_DEG = sprayer_config.poi_tolerance_rpy_deg
+
+
+def get_default_poi_tolerance_rpy_deg() -> list[float]:
+    """Reads the live POI anchor tolerance envelope from aisprayer_config.yaml (spraying.poi_tolerance_rpy_deg)."""
+    return list(sprayer_config.poi_tolerance_rpy_deg or [10.0, 10.0, 180.0])
 
 
 def _ensure_state_type(state_type: str) -> str:
@@ -183,6 +187,7 @@ def _poi_optimization_worker(
     ref_rpy_deg: list[float],
     tolerance_rpy_deg: list[float],
     options: dict = None,
+    anchor_source: str = "home",
 ):
     """Subprocess worker: runs POI optimization in an isolated process."""
     try:
@@ -211,6 +216,7 @@ def _poi_optimization_worker(
             paths_data,
             ref_rpy_deg=ref_rpy_deg,
             tolerance_rpy_deg=tolerance_rpy_deg,
+            anchor_source=anchor_source,
         )
         res_conn.send({"success": True, "opt_data": opt_data, "opt_report": opt_report})
     except Exception as e:
@@ -249,6 +255,7 @@ def run_poi_optimization_subprocess(
     ref_rpy_deg: list[float],
     tolerance_rpy_deg: list[float],
     options: dict = None,
+    anchor_source: str = "home",
 ) -> tuple[dict, dict]:
     """Spawns an isolated worker process to execute POI optimization."""
     ctx = mp.get_context("spawn")
@@ -257,9 +264,12 @@ def run_poi_optimization_subprocess(
 
     proc = ctx.Process(
         target=_poi_optimization_worker,
-        args=(log_queue, child_conn, paths_data, ref_rpy_deg, tolerance_rpy_deg, options),
+        args=(log_queue, child_conn, paths_data, ref_rpy_deg, tolerance_rpy_deg, options, anchor_source),
     )
     proc.start()
+    # 必须关掉父进程手里的写端: 否则子进程万一崩溃, 管道仍有写入者,
+    # 下面的 recv() 收不到 EOF 会永久阻塞, 把路径优化接口和线程池的一个线程一起挂死
+    child_conn.close()
 
     log_thread = threading.Thread(target=_drain_log_queue, args=(log_queue, proc), daemon=True)
     log_thread.start()
@@ -432,30 +442,45 @@ class PathVerificationService:
 
         verifier = self.create_verifier(options)
 
-        # POI tolerance directly from config
-        effective_poi_config = {
-            "mode": "absolute_anchor_tolerance",
-            "anchor_source": "home",
-            "ref_rpy_deg": [90.0, 0.0, 90.0],
-            "tolerance_rpy_deg": sprayer_config.poi_tolerance_rpy_deg,
-            "euler_order": "XYZ",
-            "units": "deg",
-        }
+        # POI anchor & tolerance directly from config; a caller-supplied poi_config wins field by field
+        # anchor_source: 'config' = spraying.poi_ref_rpy_deg, 'home' = Home 关节正解, 'raw' = 逐点名义法向
+        anchor_source = sprayer_config.poi_anchor_source
+        ref_rpy = sprayer_config.poi_ref_rpy_deg if anchor_source == "config" else None
+        tol_rpy = get_default_poi_tolerance_rpy_deg()
         if poi_config and isinstance(poi_config, dict):
-            if "tolerance_rpy_deg" in poi_config and poi_config["tolerance_rpy_deg"]:
-                effective_poi_config["tolerance_rpy_deg"] = poi_config["tolerance_rpy_deg"]
-            if "ref_rpy_deg" in poi_config and poi_config["ref_rpy_deg"]:
-                effective_poi_config["ref_rpy_deg"] = poi_config["ref_rpy_deg"]
+            if poi_config.get("anchor_source"):
+                anchor_source = str(poi_config["anchor_source"]).strip().lower()
+                ref_rpy = sprayer_config.poi_ref_rpy_deg if anchor_source == "config" else None
+            if poi_config.get("tolerance_rpy_deg"):
+                tol_rpy = list(poi_config["tolerance_rpy_deg"])
+            # 调用方显式给出参考姿态时（live 已在接口层解析成具体姿态），以它为包络中心
+            if poi_config.get("ref_rpy_deg"):
+                ref_rpy = list(poi_config["ref_rpy_deg"])
+                anchor_source = "config"
 
-        logger.info(f"🚀 [Verification Service] Running POI optimization (tolerance: {effective_poi_config['tolerance_rpy_deg']})...")
+        if anchor_source == "config" and not ref_rpy:
+            logger.warning("⚠️ [Verification Service] poi_anchor_source='config' 但 spraying.poi_ref_rpy_deg 未配置，退回 Home 正解锚点")
+
+        logger.info(f"🚀 [Verification Service] Running POI optimization (anchor_source: {anchor_source}, ref_rpy: {ref_rpy}, tolerance: {tol_rpy})...")
         opt_data, opt_report = run_poi_optimization_subprocess(
             paths_data,
-            ref_rpy_deg=effective_poi_config["ref_rpy_deg"],
-            tolerance_rpy_deg=effective_poi_config["tolerance_rpy_deg"],
+            ref_rpy_deg=ref_rpy,
+            tolerance_rpy_deg=tol_rpy,
             options=options,
+            anchor_source=anchor_source,
         )
 
         cleaned_report = _clean_report_data(opt_report)
+
+        # Record the POI constraints actually used by the optimizer (anchor derived inside worker when ref_rpy is None)
+        effective_poi_config = opt_data.get("poi_config") or {
+            "mode": "per_waypoint_nominal_envelope" if anchor_source == "raw" else "absolute_anchor_tolerance",
+            "anchor_source": anchor_source,
+            "ref_rpy_deg": ref_rpy,
+            "tolerance_rpy_deg": tol_rpy,
+            "euler_order": "xyz",
+            "units": "deg",
+        }
 
         # De-duplicate: Clean waypoints and strip duplicate trajectory arrays inside each path
         cleaned_paths = []

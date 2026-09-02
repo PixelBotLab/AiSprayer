@@ -478,7 +478,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
           <div className="relative group flex items-center">
             <button
               onClick={onSaveAllSegMasks}
-              disabled={committedMasks.length === 0}
+              disabled={committedMasks.length === 0 && currentPolygons.length === 0}
               className="p-1 bg-sky-600/80 hover:bg-sky-600 text-white rounded-full shadow-lg shadow-sky-900/30 border border-sky-400/30 disabled:opacity-30 transition-all active:scale-95"
             >
               <Save size={12} />
