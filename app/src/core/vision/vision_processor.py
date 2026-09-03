@@ -684,7 +684,7 @@ if __name__ == "__main__":
     if sprayer_config.T_camera_to_base is None:
         raise ValueError("从配置中未能成功读取到 T_camera_to_base 手眼标定矩阵")
     if not sprayer_config.model_path:
-        raise ValueError("从配置中未能读取到 YOLO 模型路径 (vision.planner.model_path)")
+        raise ValueError("从配置中未能读取到 YOLO 模型路径 (spraying.model_path)")
 
     segmenter = SegmenterFactory.create("yolo_trousers", model_path=sprayer_config.model_path, conf=args.conf)
 

@@ -21,6 +21,8 @@ interface RobotState {
   velocity_ratio?: number;     // 1016 关节速度比例 (%)
   xyz_velocity_ratio?: number; // 1019 笛卡尔位置速度比例 (%)
   r_velocity_ratio?: number;   // 1020 笛卡尔姿态速度比例 (%)
+  digital_outputs?: number[];  // 16路数字输出状态 [DO1..DO16] (0或1)
+  digital_output_bits?: number;// 64位数字输出端子状态位掩码
 }
 
 interface RobotZoneProps {
@@ -61,6 +63,19 @@ const formatQdSpeed = (qd?: number[]) => {
   const maxStr = formatNum(absMax, 1, 0.05);
   const list = qd.slice(0, 6).map(v => formatNum(v, 1, 0.05)).join(', ');
   return `${maxStr} °/s [${list}]`;
+};
+
+const getDigitalOutputs = (state: RobotState): number[] => {
+  if (Array.isArray(state.digital_outputs) && state.digital_outputs.length > 0) {
+    const arr = [...state.digital_outputs];
+    while (arr.length < 16) arr.push(0);
+    return arr.slice(0, 16);
+  }
+  if (state.digital_output_bits !== undefined && state.digital_output_bits !== null) {
+    const bits = Number(state.digital_output_bits);
+    return Array.from({ length: 16 }, (_, i) => (bits >> i) & 1);
+  }
+  return Array(16).fill(0);
 };
 
 const RobotZone: React.FC<RobotZoneProps> = ({
@@ -195,6 +210,33 @@ const RobotZone: React.FC<RobotZoneProps> = ({
               </span>
             </div>
           )}
+          {/* DO (Digital Output 1~16) Compact Row */}
+          {(() => {
+            const dos = getDigitalOutputs(robotState);
+            return (
+              <div className="flex items-center gap-1.5 mt-0.5">
+                <span className="text-slate-300/80 text-[8.5px] uppercase tracking-wider font-semibold shrink-0">DO:</span>
+                <div className="flex items-center gap-0.5">
+                  {dos.map((val, idx) => {
+                    const isOn = val === 1;
+                    return (
+                      <span
+                        key={idx}
+                        title={`DO ${idx + 1}: ${isOn ? 'ON (1)' : 'OFF (0)'}`}
+                        className={`min-w-[12px] h-[12px] px-[1.5px] text-[7.5px] flex items-center justify-center rounded-[2px] font-mono leading-none font-bold transition-colors ${
+                          isOn
+                            ? 'bg-emerald-500/30 text-emerald-300 border border-emerald-400/60 shadow-[0_0_4px_rgba(16,185,129,0.5)]'
+                            : 'bg-slate-900/60 text-slate-500/70 border border-slate-700/30'
+                        } ${idx === 7 ? 'mr-1' : ''}`}
+                      >
+                        {idx + 1}
+                      </span>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
         </div>
       </div>
 

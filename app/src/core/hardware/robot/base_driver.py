@@ -270,11 +270,13 @@ class BaseRobotDriver(ABC):
         pass
 
     def get_feedback_diagnostics(self) -> dict:
-        """获取机械臂实时诊断与动力学反馈数据（笛卡尔位姿、关节速度、负载重量、报警状态等）"""
+        """获取机械臂实时诊断与动力学反馈数据（笛卡尔位姿、关节速度、负载重量、报警状态、DO 状态等）"""
         return {
             "tool_vector_actual": [0.0]*6,
             "qd_actual": [0.0]*6,
             "load": 0.0,
             "error_status": 0,
             "tcp_speed_actual": [0.0]*6,
+            "digital_outputs": [0]*16,
+            "digital_output_bits": 0,
         }

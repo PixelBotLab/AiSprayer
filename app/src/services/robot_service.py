@@ -564,6 +564,8 @@ class RobotService:
             "velocity_ratio": 0,
             "xyz_velocity_ratio": 0,
             "r_velocity_ratio": 0,
+            "digital_outputs": [0]*16,
+            "digital_output_bits": 0,
         }
 
     def _poll_loop(self, interval: float):
@@ -605,6 +607,8 @@ class RobotService:
                     "velocity_ratio": diagnostics.get("velocity_ratio", 0),
                     "xyz_velocity_ratio": diagnostics.get("xyz_velocity_ratio", 0),
                     "r_velocity_ratio": diagnostics.get("r_velocity_ratio", 0),
+                    "digital_outputs": diagnostics.get("digital_outputs", [0]*16),
+                    "digital_output_bits": diagnostics.get("digital_output_bits", 0),
                 }
                 for cb in self._ws_callbacks:
                     try:

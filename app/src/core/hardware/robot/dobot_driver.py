@@ -41,6 +41,7 @@ class DobotDriver(BaseRobotDriver):
         self._cached_tool_index: int = 0                    # 1013 当前工具坐标系索引
         self._cached_run_queued_cmd: int = 0                # 1014 算法队列运行标志 / 当前执行段序号
         self._cached_velocity_ratio: int = 0                # 1016 关节速度比例 (%)
+        self._cached_digital_output_bits: int = 0           # 0016~0023 数字输出端子状态（按位）
         self._feedback_thread: Optional[threading.Thread] = None
         self._stop_feedback = False
 
@@ -158,6 +159,8 @@ class DobotDriver(BaseRobotDriver):
                         self._cached_run_queued_cmd = int(d['run_queued_cmd'].item())
                     if 'velocity_ratio' in d.dtype.names:
                         self._cached_velocity_ratio = int(d['velocity_ratio'].item())
+                    if 'digital_output_bits' in d.dtype.names:
+                        self._cached_digital_output_bits = int(d['digital_output_bits'].item())
             except DobotTimeoutError as e:
                 # 反馈端口每 8ms 推一包，偶发超时视为可恢复，连续失败才退出
                 if self._stop_feedback:
@@ -168,11 +171,13 @@ class DobotDriver(BaseRobotDriver):
                     logger.error(f"Feedback read error: {e}")
 
     def get_feedback_diagnostics(self) -> dict:
-        """获取实时动力学与诊断反馈数据 (TCP 笛卡尔实际速度, 实际关节速度, 负载重量, 报警状态等)"""
+        """获取实时动力学与诊断反馈数据 (TCP 笛卡尔实际速度, 实际关节速度, 负载重量, 报警状态, DO 状态等)"""
         tcp_spd = self._cached_tcp_speed_actual or [0.0]*6
         # 计算 TCP 线速度合量 (mm/s)，取 Vx/Vy/Vz 欧几里得范数
         import math as _math
         tcp_speed_mm_s = _math.sqrt(sum(v**2 for v in tcp_spd[:3])) * 1000
+        do_bits = int(getattr(self, "_cached_digital_output_bits", 0))
+        digital_outputs = [(do_bits >> i) & 1 for i in range(16)]
         return {
             "tcp_speed_actual": tcp_spd,
             "tcp_speed_mm_s": tcp_speed_mm_s,  # 预计算标量，单位 mm/s
@@ -186,6 +191,8 @@ class DobotDriver(BaseRobotDriver):
             "velocity_ratio": self._cached_velocity_ratio,      # 1016 关节速度比例 (%)
             "xyz_velocity_ratio": int(self._cached_speed_l),    # 1019 笛卡尔位置速度比例 (%)
             "r_velocity_ratio": int(self._cached_speed_j),      # 1020 笛卡尔姿态速度比例 (%)
+            "digital_outputs": digital_outputs,                 # 16路数字输出状态 [DO1..DO16]
+            "digital_output_bits": do_bits,                     # 64位数字输出端子状态位掩码
         }
 
     def get_running_state(self) -> int:

@@ -24,6 +24,8 @@ interface RobotState {
   velocity_ratio?: number;
   xyz_velocity_ratio?: number;
   r_velocity_ratio?: number;
+  digital_outputs?: number[];
+  digital_output_bits?: number;
 }
 
 interface WorkspaceViewProps {

@@ -33,7 +33,10 @@ class SprayerConfig:
         self.config_data = self._load_yaml(self.config_path)
         
         # 自动加载关联的标定文件 (calibration_result.yaml)
-        calib_rel_path = self.config_data.get("vision", {}).get("planner", {}).get("calib_path")
+        calib_rel_path = (
+            self.config_data.get("spraying", {}).get("calib_path")
+            or self.config_data.get("calib", {}).get("result_path")
+        )
         self.calib_path = self._resolve_path(calib_rel_path) if calib_rel_path else None
         self.calib_data = self._load_yaml(self.calib_path) if self.calib_path else {}
 
@@ -133,19 +136,19 @@ class SprayerConfig:
     @property
     def model_path(self):
         """YOLO 分割模型路径 (自动解析为绝对路径)。"""
-        path = self.config_data.get("vision", {}).get("planner", {}).get("model_path")
+        path = self.config_data.get("spraying", {}).get("model_path")
         return self._resolve_path(path)
 
     @property
     def output_root(self):
         """生产运行数据存储根目录 (例如 data/runs) (自动解析为绝对路径)。"""
-        path = self.config_data.get("vision", {}).get("output_root", "data/runs")
+        path = self.config_data.get("spraying", {}).get("output_root", "data/runs")
         return self._resolve_path(path)
 
     @property
     def spray_width(self):
         """喷涂幅宽 (返回单位: 米)"""
-        mm = self.config_data.get("vision", {}).get("planner", {}).get("spray_width_mm", 100.0)
+        mm = self.config_data.get("spraying", {}).get("spray_width_mm", 100.0)
         return float(mm) / 1000.0
 
     @property
@@ -255,8 +258,7 @@ class SprayerConfig:
     def spray_distance_mm(self) -> float:
         """默认喷涂靶距 / TCP standoff 距离 (mm, 默认 150.0)"""
         spraying_cfg = self.config_data.get("spraying", {})
-        planner_cfg = self.config_data.get("vision", {}).get("planner", {})
-        mm = spraying_cfg.get("standoff_dist_mm") or planner_cfg.get("spray_dist_mm") or 150.0
+        mm = spraying_cfg.get("spray_dist_mm", 150.0)
         return float(mm)
 
     @property
@@ -265,24 +267,18 @@ class SprayerConfig:
         spraying_cfg = self.config_data.get("spraying", {})
         if "row_spacing_mm" in spraying_cfg and spraying_cfg["row_spacing_mm"]:
             return float(spraying_cfg["row_spacing_mm"])
-        planner_cfg = self.config_data.get("vision", {}).get("planner", {})
-        if "row_spacing_mm" in planner_cfg and planner_cfg["row_spacing_mm"]:
-            return float(planner_cfg["row_spacing_mm"])
-        width_mm = float(planner_cfg.get("spray_width_mm", 100.0))
-        overlap = float(planner_cfg.get("overlap_rate", 0.2))
+        width_mm = float(spraying_cfg.get("spray_width_mm", 100.0))
+        overlap = float(spraying_cfg.get("overlap_rate", 0.2))
         return width_mm * (1.0 - overlap)
 
     @property
     def point_spacing_mm(self) -> float:
-        """自动规划沿行点间距 (mm, 默认从 spraying.point_spacing_mm 或 vision.planner.v_step_mm 读取)"""
+        """自动规划沿行点间距 (mm, 默认从 spraying.point_spacing_mm 或 spraying.v_step_mm 读取)"""
         spraying_cfg = self.config_data.get("spraying", {})
         if "point_spacing_mm" in spraying_cfg and spraying_cfg["point_spacing_mm"]:
             return float(spraying_cfg["point_spacing_mm"])
-        planner_cfg = self.config_data.get("vision", {}).get("planner", {})
-        if "point_spacing_mm" in planner_cfg and planner_cfg["point_spacing_mm"]:
-            return float(planner_cfg["point_spacing_mm"])
-        if "v_step_mm" in planner_cfg and planner_cfg["v_step_mm"]:
-            return float(planner_cfg["v_step_mm"])
+        if "v_step_mm" in spraying_cfg and spraying_cfg["v_step_mm"]:
+            return float(spraying_cfg["v_step_mm"])
         return 20.0
 
     @property

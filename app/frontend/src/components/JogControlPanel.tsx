@@ -11,6 +11,8 @@ interface RobotState {
   load?: number;
   error_status?: number;
   tool_vector_actual?: number[];
+  digital_outputs?: number[];
+  digital_output_bits?: number;
 }
 
 interface JogControlPanelProps {
@@ -451,7 +453,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
         {/* Motion Dynamics Header & Global Speed */}
         <div className="flex flex-wrap items-center justify-between gap-2 px-0.5 border-b border-slate-800/40 pb-1.5 font-medium">
           <div className="flex items-center gap-2">
-            <span className="tracking-wider uppercase text-slate-400 font-semibold text-[9.5px]">Dynamics</span>
+            <span className="tracking-wider uppercase text-slate-400 font-semibold text-[9.5px]">Global Speed</span>
             <div className="flex items-center gap-1.5 w-24">
               <input
                 type="range"
