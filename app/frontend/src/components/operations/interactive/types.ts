@@ -36,6 +36,8 @@ export interface WaypointItem {
   };
   normal_2d_proj: [number, number]; // [dx, dy]
   path_id?: number;
+  spraying?: 'on' | 'off' | string;
+  is_jump?: boolean;
 }
 
 export interface ManualPathItem {

@@ -110,8 +110,11 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
           onMouseLeave={() => setHoveredWaypoint(null)}
         >
           <defs>
-            <marker id="view-traj-arrow" markerWidth="5.5" markerHeight="5.5" refX="4.2" refY="2.75" orient="auto">
+            <marker id="view-traj-arrow-on" markerWidth="5.5" markerHeight="5.5" refX="4.2" refY="2.75" orient="auto">
               <path d="M0,0.6 L0,4.9 L4.9,2.75 z" fill="#38bdf8" />
+            </marker>
+            <marker id="view-traj-arrow-off" markerWidth="5.5" markerHeight="5.5" refX="4.2" refY="2.75" orient="auto">
+              <path d="M0,0.6 L0,4.9 L4.9,2.75 z" fill="#f59e0b" />
             </marker>
             <marker id="view-normal-arrow" markerWidth="4" markerHeight="4" refX="3.2" refY="2" orient="auto">
               <path d="M0,0.6 L0,3.4 L3.4,2 z" fill="#ef4444" />
@@ -139,6 +142,7 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
                   pts.map((p, i) => {
                     if (i === 0) return null;
                     const prev = pts[i - 1];
+                    const isTransition = p.spraying === 'off' || p.is_jump;
                     return (
                       <line
                         key={`hseg-${i}`}
@@ -146,25 +150,44 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
                         y1={prev.pixel[1]}
                         x2={p.pixel[0]}
                         y2={p.pixel[1]}
-                        stroke={theme.hex}
+                        stroke={isTransition ? '#f59e0b' : theme.hex}
                         strokeWidth={9}
-                        strokeOpacity={0.4}
+                        strokeOpacity={0.35}
                         strokeLinecap="round"
                         style={{ pointerEvents: 'none' }}
                       />
                     );
                   })}
 
-                {/* Connecting Line with Arrow on EVERY consecutive segment */}
+                {/* Connecting Line with Arrow on EVERY consecutive segment (differentiating spraying ON vs OFF) */}
                 {pts.map((p, i) => {
                   if (i === 0) return null;
                   const prev = pts[i - 1];
                   const segIdx = i - 1;
                   const hasSegIssue = pathIssues.some((iss: any) => iss.segment_index === segIdx);
+                  const isTransition = p.spraying === 'off' || p.is_jump;
 
                   // If this path is currently simulating, highlight traversed vs pending segments
                   const segProgress = pts.length > 1 ? (i / (pts.length - 1)) : 1;
                   const isTraversed = isCurrentSimPath && simulationState && (simulationState.progress >= segProgress);
+
+                  // Color and arrow marker selection based on spraying status (ON vs OFF)
+                  let segStroke = pathStroke;
+                  let markerId = 'url(#view-traj-arrow-on)';
+                  let dashArray: string | undefined = undefined;
+
+                  if (hasSegIssue) {
+                    segStroke = '#f43f5e';
+                    dashArray = '6 3';
+                  } else if (isTraversed) {
+                    segStroke = '#fbbf24';
+                  } else if (isTransition) {
+                    segStroke = '#f59e0b'; // Amber for non-spraying transition between columns
+                    markerId = 'url(#view-traj-arrow-off)';
+                    dashArray = '5 3';
+                  } else {
+                    segStroke = isHighlighted ? '#ffffff' : (isCurrentSimPath ? theme.hex : '#0284c7');
+                  }
 
                   return (
                     <g key={`vseg-grp-${i}`}>
@@ -174,10 +197,10 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
                         y1={prev.pixel[1]}
                         x2={p.pixel[0]}
                         y2={p.pixel[1]}
-                        stroke={hasSegIssue ? '#f43f5e' : (isTraversed ? '#fbbf24' : pathStroke)}
-                        strokeWidth={isTraversed ? 4.0 : (isHighlighted ? 3.5 : (hasSegIssue ? 3.0 : 2.5))}
-                        markerEnd="url(#view-traj-arrow)"
-                        strokeDasharray={hasSegIssue ? '6 3' : undefined}
+                        stroke={segStroke}
+                        strokeWidth={isTraversed ? 4.0 : (isHighlighted ? 3.5 : (isTransition ? 2.0 : 2.6))}
+                        markerEnd={markerId}
+                        strokeDasharray={dashArray}
                         style={{ pointerEvents: 'none' }}
                       />
                     </g>
@@ -398,6 +421,21 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
           )}
 
         </svg>
+      )}
+
+      {/* Mini Legend for Spraying ON (Solid blue) vs Transition OFF (Dashed amber) */}
+      {!manualPathMode && showManualPathsOverlay && manualPaths.length > 0 && (
+        <div className="absolute top-2 left-2 z-10 flex items-center gap-2.5 px-2.5 py-1 bg-slate-900/85 backdrop-blur-md rounded-md border border-slate-700/60 shadow-lg text-[10.5px] text-slate-300 pointer-events-none select-none">
+          <div className="flex items-center gap-1.5">
+            <span className="w-3.5 h-[2.5px] bg-[#0284c7] inline-block rounded-full"></span>
+            <span className="text-sky-300 font-semibold">纵列喷涂 (ON)</span>
+          </div>
+          <span className="text-slate-600">|</span>
+          <div className="flex items-center gap-1.5">
+            <span className="w-3.5 h-0 border-t-2 border-dashed border-[#f59e0b] inline-block"></span>
+            <span className="text-amber-300 font-semibold">列间转移 (OFF)</span>
+          </div>
+        </div>
       )}
 
       {/* 2. MANUAL TCP EDIT MODE */}

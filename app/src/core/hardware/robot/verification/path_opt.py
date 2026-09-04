@@ -554,6 +554,7 @@ class SprayWaypointOptimizer:
 
     def _dense_verify_or_raise(
         self,
+        waypoints: list,
         transforms: list[np.ndarray],
         init_q: np.ndarray,
         path_id: int,
@@ -563,7 +564,10 @@ class SprayWaypointOptimizer:
         path_item = {
             "path_id": path_id,
             "name": path_name,
-            "points": [{"tcp_pose_base": matrix_to_pose_dict(T)} for T in transforms],
+            "points": [
+                {**wp, "tcp_pose_base": matrix_to_pose_dict(T)}
+                for wp, T in zip(waypoints, transforms)
+            ],
         }
         report = self.verifier.verify_single_path(path_item, init_q=init_q)
         hard = [
@@ -800,9 +804,11 @@ class SprayWaypointOptimizer:
         node_start: dict[str, Any],
         node_end: dict[str, Any],
         q_start: np.ndarray,
+        is_jump: bool = False,
     ) -> tuple[bool, float, np.ndarray | None]:
         """
         模拟两点间控制器 MoveL：位置线性插值 + 姿态 Slerp，多点抽检（含终点）。
+        如果是列间转移跳跃 (is_jump=True)，允许关节空间平滑过渡 (MoveJ/重定支)。
 
         从 q_start（已按入边展开的绕组）出发，每步跟最近支。
         任一点无解 / 奇异 / 超限 / 相邻单轴跳变过大 → 边不可行。
@@ -813,6 +819,15 @@ class SprayWaypointOptimizer:
 
         :return: (是否可行, 加权关节路程代价, 走到终点时的关节 q)
         """
+        if is_jump:
+            q_end_hint = self._unwrap_onto(node_end["q_branch"], q_start)
+            if q_end_hint is None:
+                q_end_hint = node_end["q_branch"]
+            if not self._is_safe_q(q_end_hint, node_end["T"]):
+                return False, np.inf, None
+            edge_cost = float(np.sum(self.joint_weights * np.degrees(_wrap_pi(q_end_hint - q_start)) ** 2))
+            return True, edge_cost, q_end_hint
+
         q_end_hint = self._unwrap_onto(node_end["q_branch"], q_start)
         if q_end_hint is None:
             return False, np.inf, None
@@ -963,6 +978,8 @@ class SprayWaypointOptimizer:
             edges_tested = 0
             valid_edges = 0
 
+            is_jump = bool(waypoints[i].get("is_jump", False) or waypoints[i].get("spraying") == "off")
+
             # 内部执行单层 DP 边的评估
             def _eval_segment(stage_curr_nodes: list[dict[str, Any]]):
                 c_tested = 0
@@ -977,7 +994,7 @@ class SprayWaypointOptimizer:
                     q_prev = dp_q[i - 1][prev_k]
                     for curr_j, node_curr in enumerate(stage_curr_nodes):
                         c_tested += 1
-                        ok, edge_cost, q_arr = self._check_movel_segment(node_prev, node_curr, q_prev)
+                        ok, edge_cost, q_arr = self._check_movel_segment(node_prev, node_curr, q_prev, is_jump=is_jump)
                         if not ok or q_arr is None:
                             continue
                         c_valid += 1
@@ -1036,6 +1053,7 @@ class SprayWaypointOptimizer:
         best_q_deg = [np.degrees(q) for q in best_q]
         if self.verifier is not None and self.dense_verify and n >= 2:
             self._last_dense_report = self._dense_verify_or_raise(
+                waypoints,
                 best_T,
                 q_seed,
                 path_id=int(path_id if path_id is not None else 0),

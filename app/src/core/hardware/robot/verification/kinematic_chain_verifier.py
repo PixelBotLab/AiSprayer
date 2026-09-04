@@ -208,13 +208,23 @@ class KinematicChainVerifier:
         trajectory_q.append(curr_q.tolist())
 
         for step_idx in range(1, total_steps):
-            T_gun, _, dt, seg_idx = dense_points[step_idx]
+            pt_info = dense_points[step_idx]
+            T_gun, _, dt, seg_idx = pt_info[:4]
+            is_seg_jump = bool(pt_info[4]) if len(pt_info) > 4 else False
             loc_xyz = self._loc_xyz(T_gun)
             T_flange = self._to_urdf_flange(T_gun)
 
             # Nearest of the 8 IK branches, unwrapped onto curr_q so J6 stays on
             # the same ±2π winding instead of snapping to the [-π, π] representative.
             next_q = self.solver.get_best_ik(T_flange, curr_q)
+            if next_q is None and is_seg_jump:
+                # Off-segment (column transition): continuity from curr_q has no
+                # solution, so re-seed from this path's initial reference posture
+                # (q_ref) to pick a genuinely different, reachable IK branch.
+                # NOTE: get_best_ik signature is (T, current_joints, weights=None);
+                # it requires a real 6-vector seed, not None.
+                next_q = self.solver.get_best_ik(T_flange, q_ref)
+
             if next_q is None:
                 logger.error(
                     f"❌ [KinematicChainVerifier] Path {path_id} [UNREACHABLE]: "
@@ -234,7 +244,8 @@ class KinematicChainVerifier:
             dq = next_q - curr_q
             # 45° in one Cartesian millimetre is not a continuous MoveL — usually a
             # different IK branch (shoulder/elbow/wrist flip) or a joint-limit bounce.
-            if np.max(np.abs(np.degrees(dq))) > BRANCH_JUMP_DEG:
+            # Transition jumps between columns (spraying: 'off') are repositioning moves.
+            if not is_seg_jump and np.max(np.abs(np.degrees(dq))) > BRANCH_JUMP_DEG:
                 logger.warning(
                     f"⚠️ [KinematicChainVerifier] Path {path_id} [DISCONTINUITY]: "
                     f"Step {step_idx} jump={np.max(np.abs(np.degrees(dq))):.1f}° at XYZ={loc_xyz}"

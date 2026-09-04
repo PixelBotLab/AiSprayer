@@ -497,6 +497,7 @@ class JeansAutoWaypoints:
                     "rz": round(float(euler[2]), 2),
                 },
                 "normal_2d_proj": proj,
+                "spraying": "off" if bool(s.get("is_jump", False)) else "on",
                 "is_jump": bool(s.get("is_jump", False)),
                 "leg_id": int(s.get("leg_id", 0)),
             })

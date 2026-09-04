@@ -10,8 +10,6 @@ import {
   Trash2,
   Check,
   Save,
-  Plus,
-  Minus,
   X,
 } from 'lucide-react';
 import type {
@@ -59,14 +57,12 @@ interface InteractiveCanvasProps {
   pan: { x: number; y: number };
   isPanning: boolean;
   isSpacePressed: boolean;
-  standoffDistMm: number;
   setZoom: React.Dispatch<React.SetStateAction<number>>;
   setPan: React.Dispatch<React.SetStateAction<{ x: number; y: number }>>;
   setIsPanning: React.Dispatch<React.SetStateAction<boolean>>;
   setNatSize: React.Dispatch<React.SetStateAction<{ w: number; h: number } | null>>;
   setHighlightedPathId: (id: number | null) => void;
   setHoveredWaypoint: (wp: WaypointItem | null) => void;
-  setStandoffDistMm: (dist: number) => void;
   onSelectPathForEdit?: (pathId: number) => void;
   onManualMouseMove?: (e: MouseEvent<SVGSVGElement>) => void;
   onManualImageClick?: (e: MouseEvent<SVGSVGElement>) => void;
@@ -118,14 +114,12 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
   pan,
   isPanning,
   isSpacePressed,
-  standoffDistMm,
   setZoom,
   setPan,
   setIsPanning,
   setNatSize,
   setHighlightedPathId,
   setHoveredWaypoint,
-  setStandoffDistMm,
   onSelectPathForEdit,
   onManualMouseMove,
   onManualImageClick,
@@ -534,25 +528,6 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
               })}
             </div>
           )}
-
-          {/* Standoff Adjuster */}
-          <div className="flex items-center gap-0.5 px-1 border-r border-white/10 text-[10px] text-slate-300">
-            <button
-              onClick={() => setStandoffDistMm(Math.max(50, standoffDistMm - 10))}
-              className="p-0.5 hover:bg-white/10 rounded text-slate-400 hover:text-white"
-              title="Decrease Standoff"
-            >
-              <Minus size={10} />
-            </button>
-            <span className="font-mono text-amber-400 px-0.5">{standoffDistMm}mm</span>
-            <button
-              onClick={() => setStandoffDistMm(Math.min(300, standoffDistMm + 10))}
-              className="p-0.5 hover:bg-white/10 rounded text-slate-400 hover:text-white"
-              title="Increase Standoff"
-            >
-              <Plus size={10} />
-            </button>
-          </div>
 
           {/* Undo Waypoint */}
           <div className="relative group flex items-center">

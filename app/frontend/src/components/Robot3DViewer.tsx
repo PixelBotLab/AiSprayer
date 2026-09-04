@@ -341,11 +341,18 @@ const RobotModel: React.FC<RobotModelProps> = ({
                   dp[2] / 1000.0 + 0.0015
                 ));
               });
+              const lineGeom = new BufferGeometry().setFromPoints(linePoints);
+              const lineMat = new LineBasicMaterial({ color: 0xb91c1c, linewidth: 3 });
+              const lineMesh = new Line(lineGeom, lineMat);
+              lineMesh.renderOrder = 999;
+              group.add(lineMesh);
             } else {
-              // 2. Dense normal-interpolated contour segments lifted along surface normal
+              // Separate segments by spraying status (ON vs OFF)
               for (let i = 0; i < pts.length - 1; i++) {
                 const p1 = pts[i];
                 const p2 = pts[i + 1];
+                const isTransition = p2.spraying === 'off' || p2.is_jump;
+
                 const pos1 = new Vector3(
                   p1.surface_point_base_mm[0] / 1000.0,
                   p1.surface_point_base_mm[1] / 1000.0,
@@ -367,43 +374,39 @@ const RobotModel: React.FC<RobotModelProps> = ({
                   p2.surface_normal_base[2]
                 ).normalize();
 
+                const segPts: Vector3[] = [];
                 const steps = 16;
                 for (let s = 0; s <= steps; s++) {
-                  if (i > 0 && s === 0) continue;
                   const t = s / steps;
                   const pt = new Vector3().lerpVectors(pos1, pos2, t);
                   const nt = new Vector3().lerpVectors(norm1, norm2, t).normalize();
-                  // Lift +2.0mm outward along local surface normal so it is 100% visible on surface
                   pt.addScaledVector(nt, 0.002);
-                  linePoints.push(pt);
+                  segPts.push(pt);
                 }
+
+                const segGeom = new BufferGeometry().setFromPoints(segPts);
+                // Spraying ON: Deep red/blue; Transition OFF: Amber orange
+                const segMat = new LineBasicMaterial({
+                  color: isTransition ? 0xf59e0b : 0xb91c1c,
+                  linewidth: isTransition ? 2 : 3,
+                });
+                const segMesh = new Line(segGeom, segMat);
+                segMesh.renderOrder = 999;
+                group.add(segMesh);
+
+                // TCP level segment
+                const tcp1 = new Vector3(p1.tcp_pose_base.x / 1000.0, p1.tcp_pose_base.y / 1000.0, p1.tcp_pose_base.z / 1000.0);
+                const tcp2 = new Vector3(p2.tcp_pose_base.x / 1000.0, p2.tcp_pose_base.y / 1000.0, p2.tcp_pose_base.z / 1000.0);
+                const tcpGeom = new BufferGeometry().setFromPoints([tcp1, tcp2]);
+                const tcpMat = new LineBasicMaterial({
+                  color: isTransition ? 0xf59e0b : tcpColorHex,
+                  linewidth: isTransition ? 1.5 : 2.5,
+                });
+                const tcpMesh = new Line(tcpGeom, tcpMat);
+                tcpMesh.renderOrder = 1000;
+                group.add(tcpMesh);
               }
             }
-
-            const lineGeom = new BufferGeometry().setFromPoints(linePoints);
-            // Deep rich red surface trajectory
-            const lineMat = new LineBasicMaterial({ color: 0xb91c1c, linewidth: 3 });
-            const lineMesh = new Line(lineGeom, lineMat);
-            lineMesh.renderOrder = 999;
-            group.add(lineMesh);
-
-            // Also draw TCP-level connecting line (distinct color for Raw vs Opt vs POI)
-            const tcpLinePoints: Vector3[] = [];
-            pts.forEach((p: any) => {
-              tcpLinePoints.push(new Vector3(
-                p.tcp_pose_base.x / 1000.0,
-                p.tcp_pose_base.y / 1000.0,
-                p.tcp_pose_base.z / 1000.0
-              ));
-            });
-            const tcpLineGeom = new BufferGeometry().setFromPoints(tcpLinePoints);
-            const tcpLineMat = new LineBasicMaterial({ 
-              color: tcpColorHex, 
-              linewidth: 2 
-            });
-            const tcpLineMesh = new Line(tcpLineGeom, tcpLineMat);
-            tcpLineMesh.renderOrder = 1000;
-            group.add(tcpLineMesh);
           }
 
           // Helper to create a crisp 2D billboard sprite with point number

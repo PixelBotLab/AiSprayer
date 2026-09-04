@@ -251,7 +251,6 @@ def reconstruct_surface(name: str):
 class SamplePointRequest(BaseModel):
     u: int
     v: int
-    standoff_dist_mm: float = 150.0
 
 @router.post("/templates/{name}/sample_point")
 def sample_point(name: str, req: SamplePointRequest):
@@ -260,7 +259,8 @@ def sample_point(name: str, req: SamplePointRequest):
         raise HTTPException(status_code=404, detail="Template not found")
 
     try:
-        result = manual_path_service.sample_point_pose(name, req.u, req.v, req.standoff_dist_mm)
+        # Standoff (spray target distance) is config-driven only: spraying.spray_dist_mm
+        result = manual_path_service.sample_point_pose(name, req.u, req.v, sprayer_config.spray_distance_mm)
         return result
     except Exception as e:
         logger.warning(f"Sample point calculation failed for '{name}' at ({req.u},{req.v}): {e}")
@@ -276,7 +276,8 @@ def get_manual_paths(name: str, state_type: str = "raw"):
 
 
 class AutoPathRequest(BaseModel):
-    standoff_dist_mm: Optional[float] = None
+    # standoff (spray target distance) is no longer client-overridable; it is read
+    # exclusively from config spraying.spray_dist_mm on the backend.
     row_spacing_mm: Optional[float] = None
     point_spacing_mm: Optional[float] = None
 
@@ -290,7 +291,7 @@ def generate_auto_paths(name: str, req: AutoPathRequest = AutoPathRequest()):
     try:
         return auto_path_service.generate_auto_paths(
             name,
-            standoff_dist_mm=body.standoff_dist_mm,
+            standoff_dist_mm=None,
             row_spacing_mm=body.row_spacing_mm,
             point_spacing_mm=body.point_spacing_mm,
         )
@@ -307,14 +308,14 @@ def generate_auto_paths(name: str, req: AutoPathRequest = AutoPathRequest()):
 
 class SaveManualPathsRequest(BaseModel):
     paths: list
-    standoff_distance_mm: float = 150.0
 
 @router.post("/templates/{name}/manual_paths")
 def save_manual_paths(name: str, req: SaveManualPathsRequest, state_type: str = "raw"):
     try:
         data = {
             "paths": req.paths,
-            "standoff_distance_mm": req.standoff_distance_mm
+            # Standoff is config-driven only: spraying.spray_dist_mm
+            "standoff_distance_mm": sprayer_config.spray_distance_mm
         }
         manual_path_service.save_manual_paths(name, data, state_type=state_type)
         return {"message": "Manual paths saved successfully"}
@@ -607,7 +608,9 @@ def get_template_summary(name: str):
     auto_paths = auto_paths_data.get("paths", []) if auto_paths_data.get("paths") else []
     auto_poi_paths = auto_poi_paths_data.get("paths", []) if auto_poi_paths_data.get("paths") else []
     poi_paths = poi_paths_data.get("paths", []) if poi_paths_data.get("paths") else []
-    standoff = raw_paths_data.get("standoff_distance_mm") or auto_paths_data.get("standoff_distance_mm") or sprayer_config.spray_distance_mm
+    # Standoff is config-driven only (spraying.spray_dist_mm); ignore any value baked
+    # into previously-saved path files so config stays the single source of truth.
+    standoff = sprayer_config.spray_distance_mm
 
     raw_report = raw_paths_data.get("verification")
     auto_report = auto_paths_data.get("verification")

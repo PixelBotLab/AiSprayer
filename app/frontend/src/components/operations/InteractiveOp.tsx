@@ -696,7 +696,6 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           paths: manualPaths,
-          standoff_distance_mm: standoffDistMm,
         }),
       });
       if (!res.ok) throw new Error('Failed to save manual paths');
@@ -1171,9 +1170,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       const res = await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/auto_paths`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          standoff_dist_mm: standoffDistMm,
-        }),
+        body: JSON.stringify({}),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
@@ -1340,14 +1337,12 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
           pan={pan}
           isPanning={isPanning}
           isSpacePressed={isSpacePressed}
-          standoffDistMm={standoffDistMm}
           setZoom={setZoom}
           setPan={setPan}
           setIsPanning={setIsPanning}
           setNatSize={setNatSize}
           setHighlightedPathId={setHighlightedPathId}
           setHoveredWaypoint={setHoveredWaypoint}
-          setStandoffDistMm={setStandoffDistMm}
           onSelectPathForEdit={(pathId) => {
             const p = manualPaths.find((it) => it.path_id === pathId);
             if (p) {

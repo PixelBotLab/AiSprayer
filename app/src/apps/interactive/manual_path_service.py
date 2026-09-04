@@ -206,6 +206,8 @@ class ManualPathService:
                 "rz": round(float(euler_deg[2]), 2),
             },
             "normal_2d_proj": [round(float(proj_dx), 1), round(float(proj_dy), 1)],
+            "spraying": "on",
+            "is_jump": False,
             "calib_source": calib_desc
         }
 
@@ -390,6 +392,14 @@ class ManualPathService:
                 }
                 if "normal_2d_proj" in p and p["normal_2d_proj"]:
                     wp["normal_2d_proj"] = [round(float(v), 1) for v in p["normal_2d_proj"]]
+                if "spraying" in p:
+                    wp["spraying"] = p["spraying"]
+                elif p.get("is_jump", False):
+                    wp["spraying"] = "off"
+                else:
+                    wp["spraying"] = "on"
+                if "is_jump" in p:
+                    wp["is_jump"] = bool(p["is_jump"])
                 cleaned_pts.append(wp)
             path["points"] = cleaned_pts
             cleaned_paths.append(path)

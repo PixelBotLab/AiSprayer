@@ -106,6 +106,7 @@ class PathInterpolator:
             rotations = R_scipy.from_matrix([T_start[:3, :3], T_end[:3, :3]])
             slerp = Slerp(times, rotations)
 
+            is_jump = bool(wp_end.get("is_jump", False) or wp_end.get("spraying") == "off")
             for step in range(num_steps):
                 t = step / float(num_steps)
                 interp_pos = (1.0 - t) * pos_start + t * pos_end
@@ -116,13 +117,13 @@ class PathInterpolator:
                 T_gun_interp[:3, 3] = interp_pos
 
                 T_flange_interp = T_gun_interp @ self.config.T_tcp_inv
-                dense_points.append((T_gun_interp, T_flange_interp, dt, seg_idx))
+                dense_points.append((T_gun_interp, T_flange_interp, dt, seg_idx, is_jump))
 
         # Add the final endpoint
         wp_final = waypoints[-1]
         p_final = wp_final.get("tcp_pose_base", wp_final)
         T_gun_final = pose_dict_to_matrix(p_final)
         T_flange_final = T_gun_final @ self.config.T_tcp_inv
-        dense_points.append((T_gun_final, T_flange_final, 0.05, len(waypoints) - 2))
+        dense_points.append((T_gun_final, T_flange_final, 0.05, len(waypoints) - 2, False))
 
         return dense_points
