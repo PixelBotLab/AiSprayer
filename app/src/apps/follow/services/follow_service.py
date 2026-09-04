@@ -60,8 +60,8 @@ class FollowService:
 
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        # CR5Kinematics 的 cpp 后端用 per-instance ctypes 缓冲（源码注释：one solver per
-        # thread）。路由线程要 FK、轮询线程要 IK ⇒ 必须串行化，否则两边共用同一块缓冲。
+        # CR5Kinematics 用 per-instance ctypes 缓冲。路由线程要 FK、轮询线程要 IK ⇒
+        # 必须串行化，否则两边共用同一块缓冲。
         self._kin_lock = threading.Lock()
         self._kin = None
 
@@ -379,7 +379,7 @@ class FollowService:
           3) 启动专用兜底 = home；调零**不兜底**（"当前位姿"拿不到就必须喊，而不是偷偷用 home
              当基线 —— 那会把臂瞬移走，而用户刚点的明明是"就停在这儿"）。
 
-        真机反馈**故意不在这里**：`cr5_kinematics` 明写 DH 的 q2/q4 相对 URDF 偏 ±π/2，控制器
+        真机反馈**故意不在这里**：motion 的 DH 里 q2/q4 相对 URDF 偏 ±π/2，控制器
         回报的 J2/J4 与 URDF 关节角差 90°，直接拿来当基线会让臂摆到一个错位 90° 的位姿上。
         那条换算属于 P5（真机控制路径），不是这里该顺手补的。
         """
@@ -650,8 +650,8 @@ class FollowService:
         with self._kin_lock:
             if self._kin is None:
                 try:
-                    from core.hardware.robot.cr5_kinematics import CR5Kinematics
-                    self._kin = CR5Kinematics(backend="auto")
+                    from core.motion.kinematics import CR5Kinematics
+                    self._kin = CR5Kinematics()
                 except Exception as e:
                     logger.error("CR5 运动学初始化失败: %s", e)
                     return None

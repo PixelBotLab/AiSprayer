@@ -17,7 +17,7 @@ set(CMAKE_CXX_FLAGS_RELEASE "-O3")
 set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "-O3 -g")
 
 # Resolve Project Root and Third Party Directory
-get_filename_component(PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." ABSOLUTE)
+get_filename_component(PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
 set(THIRD_PARTY_INSTALL_DIR "${PROJECT_ROOT}/third_party/install")
 set(SMALL_GICP_SRC_DIR "${PROJECT_ROOT}/third_party/src/small_gicp")
 

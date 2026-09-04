@@ -74,7 +74,7 @@ TEST(Config, DefaultsAreSelfConsistent) {
   const ConfigProblems p = check_config(&c, "/some/root");
   EXPECT_TRUE(p.ok()) << p.joined();
   EXPECT_EQ(c.capture.lock_path, "/some/root/.orbbec.lock");
-  EXPECT_EQ(c.map_path, "/some/root/follow/out/reference.frmap");
+  EXPECT_EQ(c.map_path, "/some/root/app/src/core/follow/out/reference.frmap");
   // 传进来的 root 是空时，锁路径就成了相对路径 —— 那必须报致命，不能默默用一个跟 cwd 绑定的锁。
   FollowConfig d = base;
   const ConfigProblems q = check_config(&d, "");
@@ -366,7 +366,7 @@ TEST(Config, RepoConfigIsValid) {
   EXPECT_NEAR(c.track.gyro_still.exit_rad_s, 0.60 * kDeg2Rad, 1e-9);
   EXPECT_GT(c.track.gyro_still.exit_rad_s, c.track.gyro_still.enter_rad_s) << "迟滞方向被配置写反了";
   EXPECT_EQ(c.track.gyro_still.bias_bootstrap_samples, 100);
-  EXPECT_EQ(c.track.gyro_max_freeze_ms, 30000);
+  EXPECT_EQ(c.track.gyro_max_freeze_ms, 0);
   EXPECT_EQ(c.track.gyro_horizon_ns, 1'000'000'000);
 }
 

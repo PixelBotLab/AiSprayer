@@ -3,9 +3,8 @@
 // 内部一律 SI：米、弧度、Eigen::Isometry3d。
 // 对外一律 Dobot 控制器表示：毫米 + 度，基座系绝对目标。
 //
-// 欧拉约定（已在本机对着 app/src/core/hardware/robot/cr5_kinematics.py 与
-// cr5_kinematics_cpp/cr5_kinematics.cpp 数值核对，300 组随机关节 FK→tuple→矩阵
-// 偏差 9.4e-16，FK→IK 300/300 复现同一位姿）：
+// 欧拉约定（与 motion/conventions.hpp、控制器 ServoP 同一套；曾用 300 组随机关节
+// FK→tuple→矩阵核对，偏差 9.4e-16）：
 //     R = Rz(rz) · Ry(ry) · Rx(rx)      （内旋 ZYX / 外旋 xyz，同一件事）
 // 也就是 ServoP(x, y, z, rx, ry, rz) 里那三个角的意义。
 //

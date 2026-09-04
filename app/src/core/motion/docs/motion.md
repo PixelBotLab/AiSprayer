@@ -2,7 +2,7 @@
 
 本文描述 `app/src/core/motion` **当前实现**（不是早期方案稿）。
 模块把 CR5 的 FK/IK、MoveL 密采样验证、Viterbi 姿态优化抽成独立 C++ 库与 CLI。
-**原 Python 实现未改**，仍是生产路径；C++ 以黄金数据对齐、供后续替换。
+Web 的验证 / POI 优化已改走 `motion_cli`（`cli_client.py`），原 Python Viterbi / 密采样实现已删除。
 
 ---
 
@@ -15,13 +15,12 @@
 - 工具系网格 + 锚点包络 + 8 分支分桶 + beam + 自适应全量回退的 Viterbi DP
 - 写出可被现有 Web 当 `auto_poi` 读的 `*.poi.path.yaml`
 - `motion_cli`：`verify` / `optimize` / `fk` / `ik`
-- 兼容旧 `libur_kin` 符号的 `libmotion_c.so`（尚未替换 Python 侧加载路径）
+- Web：`path_verification_service` 经 `cli_client.py` 调 CLI；stderr 进 Python 日志
+- `libmotion_c.so`：C ABI；Python `core.motion.kinematics.CR5Kinematics` 只走这一份
 
 明确不做 / 尚未做：
 
-- 不改 `app/src/core/hardware/robot` 下的 Python
-- 不迁 `AxialSpinOptimizer`、驱动层
-- Web 尚未切到 `motion_cli`（无 `MotionCliClient`、无 `motion.engine` 开关）
+- 不迁驱动层。Python / CLI / 路径验证的 FK/IK 都走 `core/motion`。C++ follow 是视觉里程计，不做 IK。
 - 无多线程边评估；DP 主循环串行
 - 稠密轨迹仍内联写在 yaml 的 `verification.trajectory_*`（无侧车 `.npy`）
 
@@ -67,6 +66,7 @@ app/src/core/motion/
 │   ├── cli_main.cpp
 │   ├── cli_report.cpp      # stderr 过程表（不进 core）
 │   └── cli_report.hpp
+├── cli_client.py           # Web 调 motion_cli；stderr → logging
 ├── scripts/
 │   ├── build.sh            # cmake -S <motion> -B <motion>/build
 │   └── run.sh              # 默认黄金参数跑 optimize
@@ -75,8 +75,7 @@ app/src/core/motion/
 │   ├── test_golden_verify.cpp
 │   ├── test_golden_optimize.cpp
 │   ├── compare_poi_yaml.py
-│   ├── compare_opt_vs_poi.py
-│   └── regen_py_poi.py
+│   └── compare_opt_vs_poi.py
 └── docs/
     └── motion.md           # 本文
 ```
@@ -257,15 +256,17 @@ CLI 在 DP 前后还会打 1–8 节对照表（输入、引擎、锚点、参�
 ### 8.2 子命令
 
 ```bash
-# 验证
+# 验证（--output 可与 --input 相同，把 verification 写回 yaml）
 motion_cli --config configs/aisprayer_config.yaml verify \
   --input data/.../scan.auto.path.yaml \
+  --output data/.../scan.auto.path.yaml \
   --speed 120 --step 1.5 [--path-id N] [--seed 0,0,-90,-90,-90,0]
 
-# 优化 → poi
+# 优化 → poi（--state-type auto_poi | poi）
 motion_cli --config configs/aisprayer_config.yaml optimize \
   --input data/.../scan.auto.path.yaml \
   --output build/out/scan.auto.cpp.poi.path.yaml \
+  --state-type auto_poi \
   --anchor-source config --ref-rpy 90,0,90 --anchor-tol 10,10,30 \
   --grid-x -5,5,2 --grid-y -5,5,2 --grid-z -30,30,5 \
   --speed 120 --step 1.5 [--no-dense-verify]
@@ -302,12 +303,10 @@ optimize：
 
 ## 9. C ABI（`libmotion_c.so`）
 
-符号与旧 `cr5_kinematics_cpp` 对齐，便于日后只改 Python 库路径：
-
 `c_ur_forward` / `c_ur_inverse`、`c_forward` / `c_inverse`、`c_compute_fk` / `c_compute_ik`、
 `c_forward_controller` / `c_inverse_controller`、`c_get_best_ik`、`c_walk_movel`、`c_inverse_batch`。
 
-当前 Python 仍加载原 `libur_kin.so`，未切到本库。
+Python 实时 FK/IK（follow / 交互页 Home）经 `core.motion.kinematics` 加载本库。
 
 ---
 
@@ -338,7 +337,7 @@ app/src/core/motion/scripts/run.sh verify --input data/.../scan.auto.path.yaml -
 黄金输入：`data/template_group/2026-09-03_225937/scan.auto.path.yaml`。
 对照物：同目录重构前 Python 产出的 `scan.auto.poi.path.yaml`。
 
-辅助脚本（不进 ctest）：`tests/compare_poi_yaml.py` 做三份 yaml 键集合/轨迹比对；`regen_py_poi.py` 用旧 Python 再跑一份对照。
+辅助脚本（不进 ctest）：`tests/compare_poi_yaml.py` 做 yaml 键集合/轨迹比对。
 
 实测（同一条 81 点路径，锚点 config，speed 120 / step 1.5，RK3588）：
 
@@ -362,7 +361,7 @@ app/src/core/motion/scripts/run.sh verify --input data/.../scan.auto.path.yaml -
 | 产物 | 仅 CLI | core.a + cli + c.so |
 | 性能目标 | 优化 5–15 ms | 实测约 1.4 s（81 点），与算法量级相符 |
 | 轨迹落盘 | 未细说 / 建议侧车 | 内联 `verification`，对齐现 Web |
-| Web 接入 | 立即 `MotionCliClient` | **未做**；Python 保持原样 |
+| Web 接入 | 立即 `MotionCliClient` | `cli_client.py` 调 CLI，stderr 进日志 |
 | 正确性 | 未写 | 黄金回归 + 禁 fast-math + 确定化顺序 |
 
 保留下来的判断：CLI + 单行 JSON 做进程隔离；DH 不从 URDF 读；航点聚合根带表面点/法向/standoff/`spraying`/`is_jump`。

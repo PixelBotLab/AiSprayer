@@ -60,7 +60,7 @@ def xcorr_shift(a, b, maxs):
 
 
 def main():
-    d = sys.argv[1] if len(sys.argv) > 1 else "follow/out/real"
+    d = sys.argv[1] if len(sys.argv) > 1 else "app/src/core/follow/out/real"
     color, depth, K, dist = load(d)
     h, w = depth.shape
     ok = (depth > 0) & (depth < 65000)

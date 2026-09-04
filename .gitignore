@@ -33,8 +33,6 @@ build_venv/
 *.o
 *.dylib
 *.dll
-test_cr5_kinematics
-
 # 编译器/IDE
 .idea/
 *.swp

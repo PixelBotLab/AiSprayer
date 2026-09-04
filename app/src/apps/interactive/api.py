@@ -400,11 +400,9 @@ class PoiConstraintConfig(BaseModel):
 
 
 class KinematicsOptions(BaseModel):
-    step_size_mm: float = 1.5
-    linear_velocity_mm_s: float = 120.0
-    tcp_offset_xyz_mm: list[float] | None = None  # e.g. [50.0, 0.0, 0.0]
-    tcp_offset_rpy_deg: list[float] | None = None  # e.g. [0.0, 90.0, 0.0]
-    max_joint_vel_deg_s: list[float] | None = None  # e.g. [150.0, 150.0, 150.0, 180.0, 180.0, 300.0]
+    # 不设默认速度/步长：前端通常不传，让 motion_cli 读配置（spraying.velocity / slerp_step_mm）。
+    step_size_mm: Optional[float] = None
+    linear_velocity_mm_s: Optional[float] = None
 
 
 class VerifyPathRequest(BaseModel):
@@ -425,7 +423,7 @@ def verify_paths(name: str, req: VerifyPathRequest = VerifyPathRequest()):
         res = path_verification_service.verify_template_paths(
             name, 
             state_type=req.state_type,
-            options=req.options.model_dump()
+            options=req.options.model_dump(exclude_none=True)
         )
         return res
     except FileNotFoundError as e:
@@ -453,10 +451,9 @@ def optimize_paths(name: str, req: OptimizePathRequest = OptimizePathRequest()):
             poi_dict["anchor_source"] = "config"
         res = path_verification_service.optimize_template_paths(
             name,
-            mode=req.mode,
             source=req.source,
             poi_config=poi_dict,
-            options=req.options.model_dump()
+            options=req.options.model_dump(exclude_none=True)
         )
         return res
     except HTTPException:
@@ -495,7 +492,7 @@ def get_robot_anchor_pose(source: str = "home"):
     2. Robot Home pose TCP orientation
     """
     from services.robot_service import robot_service
-    from core.hardware.robot.cr5_kinematics import CR5Kinematics
+    from core.motion.kinematics import CR5Kinematics
 
     solver = CR5Kinematics()
     

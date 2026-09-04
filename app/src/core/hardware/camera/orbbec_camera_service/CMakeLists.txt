@@ -56,13 +56,14 @@ find_package(Eigen3 3.3 REQUIRED NO_MODULE)
 # 和彩色不对齐的深度、或者干脆打不开还装作在跑。follow 要的就是"本进程已经在交付的那一路
 # D2C 帧"，所以它只能是消费者。
 #
-# FOLLOW_STANDALONE 由 follow/CMakeLists.txt 按"是否被单独 configure"自己判断：作为子项目
+# FOLLOW_STANDALONE 由 app/src/core/follow/CMakeLists.txt 按"是否被单独 configure"自己判断：作为子项目
 # 时只建 follow（算法核心）+ follow_config（读同一个 yaml 的 follow: 块）。**绝不链
 # follow_device** —— 那里面是第二个 Context/Pipeline/取流线程，同进程两份 driver 比两份
 # 进程更难查。也绝不链 follow_health：状态由本进程自己的 http_server 报，两处报同一个
 # 状态早晚分成两个答案。
 # ----------------------------------------------------------------------------------
-add_subdirectory("${PROJECT_ROOT}/follow" "${CMAKE_BINARY_DIR}/follow")
+set(FOLLOW_DIR "${PROJECT_ROOT}/app/src/core/follow")
+add_subdirectory("${FOLLOW_DIR}" "${CMAKE_BINARY_DIR}/follow")
 
 # Source files
 set(SOURCES
@@ -118,7 +119,7 @@ if(SERVICE_BUILD_TESTS)
             src/gyro_time_base.cpp)
         target_include_directories(test_gyro_time_base PRIVATE
             ${CMAKE_CURRENT_SOURCE_DIR}/include
-            "${PROJECT_ROOT}/follow/include"
+            "${FOLLOW_DIR}/include"
             ${OpenCV_INCLUDE_DIRS})
         # 只要 core：types.hpp 里的 cv::Mat 是成员声明，本用例不实例化它。
         target_link_libraries(test_gyro_time_base PRIVATE

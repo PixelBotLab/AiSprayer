@@ -8,8 +8,8 @@
 * `T_<a>_<b>` 表示"b 系的点表达成 a 系"的 4x4 齐次矩阵。
 * follow 快照里的 `delta_r` / `delta_t_m` 是**相机相对示教位**的增量，落在**示教时的相机轴**里，
   平移单位米（C++ 内部 SI，跨界才换单位 —— 见 follow/include/follow/pose_io.hpp）。
-* **本模块里所有 4x4 一律是米**。这一点是被踩出来的：`cr5_kinematics` 的
-  `forward/inverse/controller_matrix_to_urdf/get_best_ik_controller` 全都吃米制矩阵（仓库里
+* **本模块里所有 4x4 一律是米**。这一点是被踩出来的：`core.motion.kinematics` 的
+  `forward/inverse/controller_matrix_to_urdf/get_best_ik` 全都吃米制矩阵（仓库里
   `T_gun` 的既有用法就是这样，打印 mm 时才 ×1000），而 `forward_controller` 返回的是 **mm 位姿
   向量**（Dobot 报文口径）。两者差 1000，混用的表现是"矩阵看着完全正常、IK 却一个解都没有"。
   所以：矩阵走米，只有给页面的位姿向量走 mm。

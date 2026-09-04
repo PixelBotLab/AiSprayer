@@ -36,10 +36,10 @@ from apps.follow.services import follow_service as fs_mod  # noqa: E402
 from apps.follow.services.pose_stream import PoseStream  # noqa: E402
 from apps.follow.trajectory import JointTrajectorySmoother  # noqa: E402
 from apps.calib.services.hand_eye.geometry import matrix_to_pose, pose_to_matrix  # noqa: E402
-from core.hardware.robot.cr5_kinematics import CR5Kinematics  # noqa: E402
+from core.motion.kinematics import CR5Kinematics  # noqa: E402
 
 HOME_DEG = [0.0, 0.0, -90.0, -90.0, -90.0, 0.0]
-IK_POS_TOL_M = 5e-5       # == 0.05 mm，与 test_cr5_kinematics.py 同一档；矩阵全程米制
+IK_POS_TOL_M = 5e-5       # == 0.05 mm；矩阵全程米制
 IK_ROT_TOL = 1e-3
 IK_ANG_TOL_DEG = 0.5
 
@@ -101,7 +101,7 @@ class TestEulerConvention(unittest.TestCase):
 
     def test_forward_controller_pose_is_reconstructable(self):
         """forward_controller 的返回值经 pose_to_matrix 再 FK 一次，必须回到同一块姿态。"""
-        kin = CR5Kinematics(backend="auto")
+        kin = CR5Kinematics()
         q = np.radians(np.asarray(HOME_DEG))
         xyz, rpy = kin.forward_controller(list(q))
         T = pose_to_matrix([*xyz, *rpy])
@@ -172,7 +172,7 @@ class TestRotationFromCalibration(unittest.TestCase):
 class TestJointsToTarget(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.kin = CR5Kinematics(backend="auto")
+        cls.kin = CR5Kinematics()
         cls.home = np.radians(np.asarray(HOME_DEG))
 
     def test_zero_delta_keeps_baseline(self):

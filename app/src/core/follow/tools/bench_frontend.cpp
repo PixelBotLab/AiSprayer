@@ -25,7 +25,7 @@ double pctl(std::vector<double> v, double q) {
 }
 
 int bench_main(int argc, char** argv) {
-  std::string dir = "follow/out/real";
+  std::string dir = "app/src/core/follow/out/real";
   int rounds = 12;
   if (argc > 1) {
     dir = argv[1];

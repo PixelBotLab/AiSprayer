@@ -46,6 +46,7 @@ std::string BaseName(const std::string& p) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  std::cerr << std::unitbuf;
   CLI::App app{"AiSprayer motion CLI (verify / optimize / fk / ik)"};
   app.require_subcommand(1);
 
@@ -58,8 +59,9 @@ int main(int argc, char** argv) {
   app.add_option("--config", config_path,
                  "aisprayer_config.yaml（读取 spraying.poi_* / grid_tol_* / robot_urdf）");
 
-  auto* verify = app.add_subcommand("verify", "Dense MoveL kinematic verification (input: *.auto.path.yaml)");
-  verify->add_option("--input", input, "待验证路径 yaml（应为 scan.auto.path.yaml，不是 poi）")->required();
+  auto* verify = app.add_subcommand("verify", "Dense MoveL kinematic verification (input: *.path.yaml)");
+  verify->add_option("--input", input, "待验证路径 yaml")->required();
+  verify->add_option("--output", output, "写入 verification 后的 yaml（可与 --input 相同）");
   verify->add_option("--urdf", urdf, "robot URDF（可被 --config 填充）");
   verify->add_option("--tool-tcp", tool, "TCP link name");
   verify->add_option("--speed", speed, "Cartesian speed mm/s");
@@ -74,6 +76,7 @@ int main(int argc, char** argv) {
   std::string home_joints = "0,0,-90,-90,-90,0";
   int beam = 32, max_per_branch = 16;
   bool no_dense = false;
+  std::string state_type = "auto_poi";
 
   auto* optimize = app.add_subcommand("optimize", "Viterbi optimize scan.auto.path.yaml → poi");
   optimize->add_option("--input", input, "待优化路径 yaml（应为 scan.auto.path.yaml）")->required();
@@ -91,6 +94,7 @@ int main(int argc, char** argv) {
   optimize->add_option("--max-candidates-per-branch", max_per_branch);
   optimize->add_option("--speed", speed);
   optimize->add_option("--step", step);
+  optimize->add_option("--state-type", state_type, "写出的 type/state_type：auto_poi | poi");
   optimize->add_flag("--no-dense-verify", no_dense);
 
   std::string joints = "0,0,-90,-90,-90,0";
@@ -184,6 +188,12 @@ int main(int argc, char** argv) {
       const auto t1 = std::chrono::steady_clock::now();
       const double ms = std::chrono::duration<double, std::milli>(t1 - t0).count();
       motion::PrintVerifyReport(std::cerr, report, ms);
+      if (!output.empty()) {
+        doc.execution_speed_mm_s = speed;
+        if (!motion::SavePathYaml(output, doc, &report, nullptr, &err)) {
+          return EmitError(3, "verify", err);
+        }
+      }
       std::cout << motion::JsonReportVerify(report, ms, true, "") << "\n";
       return 0;
     }
@@ -238,9 +248,12 @@ int main(int argc, char** argv) {
       }
       last.elapsed_ms = total_ms;
       last.modified = any_modified;
-      // 与 Python 版一致：由 auto 优化出来的状态叫 auto_poi，web 模板状态机认这个值。
-      out_doc.type = "auto_poi";
-      out_doc.state_type = "auto_poi";
+      // web 模板状态机：auto → auto_poi，raw/manual → poi。
+      if (state_type != "poi" && state_type != "auto_poi") {
+        return EmitError(2, "optimize", "--state-type must be poi or auto_poi");
+      }
+      out_doc.type = state_type;
+      out_doc.state_type = state_type;
       out_doc.source_file = BaseName(input);
       out_doc.execution_speed_mm_s = speed;
       auto all = verifier.VerifyAll(out_doc.paths);

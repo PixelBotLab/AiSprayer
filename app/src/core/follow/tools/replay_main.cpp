@@ -310,7 +310,7 @@ bool print_report(const Report& rep, bool gate) {
 }
 
 int replay_main(int argc, char** argv) {
-  std::string root = "follow/out/synth";
+  std::string root = "app/src/core/follow/out/synth";
   std::vector<std::string> dirs;
   uint32_t seed = 0x5EEDu;
   bool verbose = false;

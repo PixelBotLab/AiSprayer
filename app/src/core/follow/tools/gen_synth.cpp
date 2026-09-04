@@ -415,7 +415,7 @@ std::vector<Case> build_cases(const Scene& piece, const Scene& wall) {
 }
 
 int gen_main(int argc, char** argv) {
-  std::string out = "follow/out/synth";
+  std::string out = "app/src/core/follow/out/synth";
   std::string mesh = std::string(FOLLOW_SCAN_DIR) + "/scan.mesh.ply";
   std::string only;
   bool have_seed = false;

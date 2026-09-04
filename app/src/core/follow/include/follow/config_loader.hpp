@@ -54,7 +54,7 @@ struct FollowConfig {
   TrackParams track;             // 不含 k：内参在运行时来自设备自报，配置里写它只会骗人
 
   // --- 示教 ---
-  std::string map_path_rel = "follow/out/reference.frmap";
+  std::string map_path_rel = "app/src/core/follow/out/reference.frmap";
   std::string map_path;          // 解析后
   int teach_frames = 1;
   // P2 示教静止门（度/秒）：收帧窗口内陀螺平均角速度超过它 ⇒ 拒绝示教（基准不能建在运动上）。

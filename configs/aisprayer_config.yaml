@@ -162,7 +162,7 @@ follow:
     sparse_min_inliers: 12
 
   teach:
-    map_path: "follow/out/reference.frmap"
+    map_path: "app/src/core/follow/out/reference.frmap"
     frames: 20                  # 采集 10 帧做时间域深度均值去噪融合，消除初始散斑噪声
     max_motion_deg_s: 2.0       # P2 示教静止门：收帧窗口内陀螺平均角速度超此值 ⇒ 拒绝示教（0=关，无 IMU 自动跳过）
                                 # 注意这里刻意用**绝对 |ω|**（示教时没有安静期可估零偏）：实测零偏

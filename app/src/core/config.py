@@ -1,4 +1,6 @@
+import math
 import os
+import xml.etree.ElementTree as ET
 import yaml
 import logging
 
@@ -336,17 +338,6 @@ class SprayerConfig:
         val = spraying_cfg.get("grid_tol_z_deg") or opt_cfg.get("grid_tol_z_deg") or [-180.0, 180.0, 10.0]
         return tuple(float(v) for v in val)
 
-    def get_optimization_config(self) -> dict:
-        """获取轨迹优化与 POI 容差字典"""
-        return {
-            "poi_anchor_source": self.poi_anchor_source,
-            "poi_ref_rpy_deg": self.poi_ref_rpy_deg,
-            "poi_tolerance_rpy_deg": self.poi_tolerance_rpy_deg,
-            "grid_tol_x_deg": self.grid_tol_x_deg,
-            "grid_tol_y_deg": self.grid_tol_y_deg,
-            "grid_tol_z_deg": self.grid_tol_z_deg,
-        }
-
 
 # ─── 全局单例对象 (模块导入时完成初始化与加载) ──────────────────────────────────
 config = SprayerConfig()
@@ -364,8 +355,65 @@ def get_configured_robot_config(config_path: str = None) -> tuple[str, str]:
     return cfg.robot_urdf, cfg.robot_tcp
 
 
-def get_configured_optimization_config(config_path: str = None) -> dict:
-    """统一从全局配置获取轨迹优化与 POI 容差配置字典。"""
-    cfg = config if config_path is None else SprayerConfig(config_path=config_path)
-    return cfg.get_optimization_config()
+def load_tcp_from_urdf(urdf_path: str = None, target_tcp_name: str = None) -> dict:
+    """从 URDF 解析挂在 Link6/法兰上的工具 TCP（毫米 / 度），给 Web 回显用。"""
+    if urdf_path is None or target_tcp_name is None:
+        cfg_urdf, cfg_tcp = get_configured_robot_config()
+        if urdf_path is None:
+            urdf_path = cfg_urdf
+        if target_tcp_name is None:
+            target_tcp_name = cfg_tcp
+
+    tcp_info = {
+        "has_tool": False,
+        "tool_name": "flange",
+        "xyz_mm": [0.0, 0.0, 0.0],
+        "rpy_deg": [0.0, 0.0, 0.0],
+        "urdf_source": os.path.basename(urdf_path) if urdf_path else None,
+    }
+    if not urdf_path or not os.path.exists(urdf_path):
+        return tcp_info
+
+    try:
+        root = ET.parse(urdf_path).getroot()
+        best_score = -1
+        for joint in root.findall("joint"):
+            parent = joint.find("parent")
+            child = joint.find("child")
+            if parent is None or parent.get("link") not in ["Link6", "link6", "flange"]:
+                continue
+            origin = joint.find("origin")
+            if origin is None:
+                continue
+            child_name = child.get("link", "") if child is not None else ""
+            xyz_m = [float(v) for v in origin.get("xyz", "0 0 0").split()]
+            rpy_rad = [float(v) for v in origin.get("rpy", "0 0 0").split()]
+            xyz_mm = [round(v * 1000.0, 2) for v in xyz_m]
+            rpy_deg = [round(math.degrees(v), 2) for v in rpy_rad]
+            score = 0
+            if target_tcp_name and (
+                child_name.lower() == target_tcp_name.lower()
+                or target_tcp_name.lower() in child_name.lower()
+            ):
+                score = 1000
+            elif any(k in child_name.lower() for k in ["laser", "nozzle", "tcp"]):
+                score = 100
+            elif "tip" in child_name.lower():
+                score = 80
+            elif "gun" in child_name.lower():
+                score = 50
+            elif "tool" in child_name.lower():
+                score = 30
+            if score > best_score:
+                best_score = score
+                tcp_info = {
+                    "has_tool": True,
+                    "tool_name": child_name,
+                    "xyz_mm": xyz_mm,
+                    "rpy_deg": rpy_deg,
+                    "urdf_source": os.path.basename(urdf_path),
+                }
+    except Exception as e:
+        logger.warning("Could not parse TCP from URDF %s: %s", urdf_path, e)
+    return tcp_info
 
