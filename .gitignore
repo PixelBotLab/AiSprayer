@@ -29,6 +29,8 @@ build_venv/
 # PyInstaller
 *.spec
 *.so
+*.a
+*.o
 *.dylib
 *.dll
 test_cr5_kinematics
