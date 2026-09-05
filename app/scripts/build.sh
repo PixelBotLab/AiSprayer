@@ -7,7 +7,7 @@
 #   motion  libmotion_core / libmotion_io / libmotion_c / motion_cli / 单测
 #   follow  standalone：libfollow、follow_node/pose（有 SDK 时）、验收工具与单测
 #   camera  orbbec_camera_service（内嵌 follow + follow_config 库）+ 离线单测
-# 不编：C++ planner、默认不编 Faiss / RKNN 前端。
+# 不编（需 --only）：C++ planner、visioncpp、默认不编 Faiss / RKNN 前端。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,17 +28,19 @@ while [[ $# -gt 0 ]]; do
         -c|--clean) CLEAN=true; shift ;;
         -h|--help)
             cat <<'EOF'
-Usage: app/scripts/build.sh [-c|--clean] [--only deps|motion|follow|camera] [--jobs N] [--force]
+Usage: app/scripts/build.sh [-c|--clean] [--only deps|motion|follow|camera|visioncpp] [--jobs N] [--force]
 
   (default)  third_party + motion + follow + camera service
-  --only deps    只编 third_party
-  --only motion  只编 motion（libmotion_c / motion_cli）
-  --only follow  只编 follow standalone（follow_node / 单测；无 Orbbec SDK 时跳过设备目标）
-  --only camera  只编 orbbec_camera_service（内嵌 follow 库，不含 follow_node）
-  --force        转发给 third_party/build.sh --force
-  -c, --clean    删除编译产物后退出（可与 --only 组合）
-                 默认：motion/build、follow/build、camera/build+bin
-                 --only deps：只删 third_party/install（保留 src/ 源码树）
+  --only deps      只编 third_party
+  --only motion    只编 motion（libmotion_c / motion_cli）
+  --only follow    只编 follow standalone（follow_node / 单测；无 Orbbec SDK 时跳过设备目标）
+  --only camera    只编 orbbec_camera_service（内嵌 follow 库，不含 follow_node）
+  --only visioncpp 只编视觉批处理 CLI（recon / auto-path，含 Kazhdan 泊松）
+  --force          转发给 third_party/build.sh --force
+  -c, --clean      删除编译产物后退出（可与 --only 组合）
+                   默认：motion/build、follow/build、camera/build+bin
+                   --only deps：只删 third_party/install（保留 src/ 源码树）
+                   --only visioncpp：只删 visioncpp/build
 EOF
             exit 0
             ;;
@@ -85,6 +87,10 @@ clean_camera() {
     rm_tree "${cam}/bin"
 }
 
+clean_visioncpp() {
+    rm_tree "${PROJECT_ROOT}/app/src/core/visioncpp/build"
+}
+
 if $CLEAN; then
     case "${ONLY}" in
         "")
@@ -97,8 +103,9 @@ if $CLEAN; then
         motion) clean_motion; echo "clean done." ;;
         follow) clean_follow; echo "clean done." ;;
         camera) clean_camera; echo "clean done." ;;
+        visioncpp) clean_visioncpp; echo "clean done." ;;
         *)
-            echo "未知 --only: ${ONLY}（deps|motion|follow|camera）" >&2
+            echo "未知 --only: ${ONLY}（deps|motion|follow|camera|visioncpp）" >&2
             exit 1
             ;;
     esac
@@ -154,6 +161,13 @@ build_camera() {
     echo "camera: ${src}/bin/orbbec_camera_service"
 }
 
+build_visioncpp() {
+    local src="${PROJECT_ROOT}/app/src/core/visioncpp"
+    cmake -S "${src}" -B "${src}/build" -DCMAKE_BUILD_TYPE=RelWithDebInfo
+    cmake --build "${src}/build" --parallel "${JOBS}"
+    echo "visioncpp: ${src}/build/vision_cli"
+}
+
 case "${ONLY}" in
     "")
         build_deps
@@ -165,8 +179,9 @@ case "${ONLY}" in
     motion) build_motion ;;
     follow) build_follow ;;
     camera) build_camera ;;
+    visioncpp) build_visioncpp ;;
     *)
-        echo "未知 --only: ${ONLY}（deps|motion|follow|camera）" >&2
+        echo "未知 --only: ${ONLY}（deps|motion|follow|camera|visioncpp）" >&2
         exit 1
         ;;
 esac
