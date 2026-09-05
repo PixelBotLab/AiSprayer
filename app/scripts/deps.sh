@@ -120,13 +120,14 @@ install_macos_deps() {
     fi
 
     # 1. 命令行基础工具检测
-    local CLI_TOOLS=(git cmake pkg-config)
+    local CLI_TOOLS=(git git-lfs cmake pkg-config)
     if ! command -v node &>/dev/null; then
         CLI_TOOLS+=(node)
     fi
 
     # 2. C++ 库 Formula 列表
     local BREW_FORMULAS=(
+        git-lfs
         eigen
         yaml-cpp
         tinyxml2
@@ -202,6 +203,7 @@ install_apt_deps() {
         build-essential
         cmake
         git
+        git-lfs
         wget
         g++
         pkg-config
@@ -347,7 +349,44 @@ esac
 # 2. 检查并补齐 vendored 源码
 ensure_vendored_deps
 
-# 3. 若为 all 模式，继续串联执行 env.sh 搭建 Python 与前端环境
+# 3. 检查并拉取 Git LFS 模型权重 (RKNN / ONNX)
+ensure_git_lfs_models() {
+    section "Git LFS 与模型权重检查 (RKNN/ONNX)"
+
+    if ! command -v git-lfs &>/dev/null; then
+        warn "系统未找到 git-lfs，跳过 Git LFS 模型自动拉取。"
+        return 0
+    fi
+
+    local LFS_PENDING=false
+    for model_file in "${PROJECT_ROOT}/models"/*.rknn "${PROJECT_ROOT}/models"/*.onnx; do
+        if [[ -f "$model_file" && ! -L "$model_file" ]]; then
+            local fsize
+            fsize=$(wc -c < "$model_file" 2>/dev/null || echo 0)
+            if [[ "$fsize" -lt 1000 ]]; then
+                if grep -q "version https://git-lfs" "$model_file" 2>/dev/null; then
+                    LFS_PENDING=true
+                    echo "  ✘ 发现未拉取的 LFS 指针文件: $(basename "$model_file") (${fsize} bytes)"
+                fi
+            fi
+        fi
+    done
+
+    if $LFS_PENDING; then
+        if [[ "$MODE" == "check-only" ]]; then
+            warn "存在未拉取的 Git LFS 大文件模型，请执行 'git lfs pull'"
+            return 0
+        fi
+        info "正在拉取 Git LFS 模型文件..."
+        (cd "${PROJECT_ROOT}" && git lfs install --skip-repo 2>/dev/null || true; git lfs pull)
+        info "Git LFS 模型文件拉取完成。"
+    else
+        echo "  ✔ Git LFS 模型权重已就绪"
+    fi
+}
+ensure_git_lfs_models
+
+# 4. 若为 all 模式，继续串联执行 env.sh 搭建 Python 与前端环境
 if [[ "$MODE" == "all" ]]; then
     section "Python 后端与前端依赖环境管理"
     bash "${SCRIPT_DIR}/env.sh"

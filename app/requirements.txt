@@ -15,3 +15,6 @@ pyorbbecsdk2>=2.1.0; sys_platform == 'linux'
 torch
 torchvision
 timm>=1.0.0
+# High-performance inference backends for MobileSAM / Vision
+onnxruntime>=1.16.0
+rknn-toolkit-lite2>=2.3.0; sys_platform == 'linux' and (platform_machine == 'aarch64' or platform_machine == 'arm64')

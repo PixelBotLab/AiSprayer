@@ -484,6 +484,13 @@ def load_mobilesam(
                 f"falling back to ONNX/PyTorch."
             )
             device = "onnx" if (Path(onnx_encoder_path).exists() and Path(onnx_decoder_path).exists()) else "cpu"
+        elif rknn_path.stat().st_size < 1024:
+            logger.warning(
+                f"[MobileSAM] RKNN encoder model at {rknn_path.resolve()} is an un-pulled Git LFS pointer "
+                f"({rknn_path.stat().st_size} bytes). Run 'git lfs pull' to download actual model weight. "
+                f"Falling back to ONNX/PyTorch."
+            )
+            device = "onnx" if (Path(onnx_encoder_path).exists() and Path(onnx_decoder_path).exists()) else "cpu"
         else:
             try:
                 ckpt_p = Path(checkpoint)
@@ -497,10 +504,10 @@ def load_mobilesam(
                     checkpoint=checkpoint,
                 )
             except Exception as e:
-                logger.error(
-                    f"[MobileSAM] Failed to initialize RKNN MobileSAM: {e}. Falling back to ONNX/PyTorch.",
-                    exc_info=True,
+                logger.warning(
+                    f"[MobileSAM] RKNN MobileSAM backend not available: {e}. Falling back to ONNX/PyTorch."
                 )
+                logger.debug("[MobileSAM] RKNN initialization error details:", exc_info=True)
                 device = "onnx" if (Path(onnx_encoder_path).exists() and Path(onnx_decoder_path).exists()) else "cpu"
 
     # 2. ONNX Runtime path (Fast, lightweight inference on non-RK platforms)
@@ -508,22 +515,29 @@ def load_mobilesam(
         enc_p = Path(onnx_encoder_path)
         dec_p = Path(onnx_decoder_path)
         if enc_p.exists() and dec_p.exists():
-            try:
-                enc_size = f"{enc_p.stat().st_size / (1024 * 1024):.1f} MB"
-                dec_size = f"{dec_p.stat().st_size / (1024 * 1024):.1f} MB"
-                logger.info(f"[MobileSAM] Loading ONNX Runtime Backend:")
-                logger.info(f"[MobileSAM]   * Encoder (.onnx): {enc_p.resolve()} ({enc_size})")
-                logger.info(f"[MobileSAM]   * Decoder (.onnx): {dec_p.resolve()} ({dec_size})")
-                predictor = ONNXMobileSAMPredictor(
-                    encoder_path=str(enc_p),
-                    decoder_path=str(dec_p),
-                )
-            except Exception as e:
-                logger.error(
-                    f"[MobileSAM] Failed to initialize ONNX MobileSAM: {e}. Falling back to PyTorch.",
-                    exc_info=True,
+            if enc_p.stat().st_size < 1024 or dec_p.stat().st_size < 1024:
+                logger.warning(
+                    f"[MobileSAM] ONNX models at {enc_p.name}/{dec_p.name} are un-pulled Git LFS pointers. "
+                    f"Falling back to PyTorch."
                 )
                 device = "cuda" if torch.cuda.is_available() else "cpu"
+            else:
+                try:
+                    enc_size = f"{enc_p.stat().st_size / (1024 * 1024):.1f} MB"
+                    dec_size = f"{dec_p.stat().st_size / (1024 * 1024):.1f} MB"
+                    logger.info(f"[MobileSAM] Loading ONNX Runtime Backend:")
+                    logger.info(f"[MobileSAM]   * Encoder (.onnx): {enc_p.resolve()} ({enc_size})")
+                    logger.info(f"[MobileSAM]   * Decoder (.onnx): {dec_p.resolve()} ({dec_size})")
+                    predictor = ONNXMobileSAMPredictor(
+                        encoder_path=str(enc_p),
+                        decoder_path=str(dec_p),
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"[MobileSAM] ONNX MobileSAM backend not available: {e}. Falling back to PyTorch."
+                    )
+                    logger.debug("[MobileSAM] ONNX initialization error details:", exc_info=True)
+                    device = "cuda" if torch.cuda.is_available() else "cpu"
         else:
             logger.warning(
                 f"[MobileSAM] ONNX models not found ({enc_p.name}, {dec_p.name}), falling back to PyTorch."
