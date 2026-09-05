@@ -32,7 +32,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--image", type=str, required=True, help="Input image path")
     parser.add_argument("--output", type=str, default="output_mask.jpg", help="Output overlay image path")
     parser.add_argument("--mobile_sam", type=str, default=None, help="MobileSAM weights path (optional)")
-    parser.add_argument("--device", type=str, default=None)
+    parser.add_argument("--device", type=str, default=None, help="Device to run MobileSAM on ('cuda', 'mps', 'cpu', 'rknn', 'onnx')")
+    parser.add_argument("--rknn_encoder", type=str, default=None, help="Path to RKNN encoder model for RK3588 (optional)")
     parser.add_argument(
         "--max_display",
         type=int,
@@ -219,13 +220,17 @@ def main() -> None:
     image_path = Path(args.image)
     output_path = Path(args.output)
     device = resolve_device(args.device)
+    kwargs = {"device": device}
+    if args.rknn_encoder:
+        kwargs["rknn_encoder_path"] = args.rknn_encoder
+
     if args.mobile_sam:
         weight_path = Path(args.mobile_sam)
         if not weight_path.exists():
             raise FileNotFoundError(f"找不到 MobileSAM: {weight_path}")
-        predictor = load_mobilesam(str(weight_path), device)
+        predictor = load_mobilesam(checkpoint=str(weight_path), **kwargs)
     else:
-        predictor = load_mobilesam(device=device)
+        predictor = load_mobilesam(**kwargs)
 
     image_bgr = cv2.imread(str(image_path))
     if image_bgr is None:

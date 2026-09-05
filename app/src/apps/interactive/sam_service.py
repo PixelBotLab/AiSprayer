@@ -24,7 +24,8 @@ class SAMService:
             t0 = time.time()
             self.predictor = load_mobilesam()
             if self.predictor:
-                logger.info(f"MobileSAM model initialized successfully in {time.time() - t0:.2f}s.")
+                desc = getattr(self.predictor, "backend_desc", type(self.predictor).__name__)
+                logger.info(f"MobileSAM model initialized successfully in {time.time() - t0:.2f}s [{desc}].")
             else:
                 logger.error("MobileSAM initialization returned None.")
         except Exception as e:

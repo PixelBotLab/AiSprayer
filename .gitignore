@@ -59,6 +59,8 @@ data/*.db
 models/*
 !models/wissight.pt
 !models/mobile_sam.pt
+!models/mobile_sam*.onnx
+!models/mobile_sam*.rknn
 
 *.cache/
 

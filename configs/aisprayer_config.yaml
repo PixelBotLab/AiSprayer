@@ -199,3 +199,9 @@ follow:
                                 #   留太长的后果是臂跟着一个半秒前的位姿走，那比延迟高更糟
     max_joint_vel_deg_s: 90.0   # 平滑器限速：插值段时长由它决定，保证相邻发射点关节角变化率不超此值
     teach_save_map: true        # 示教时把参考地图落盘到 teach.map_path（false = 只在内存里，重启即失）
+
+# 5. 交互式分割 (MobileSAM)
+interactive:
+  sam:
+    backend: "auto"             # 可选: auto (自动探测: RK3588走RKNN, PC有GPU走CUDA, 无GPU走ONNX), rknn, onnx, pt/cuda/cpu
+
