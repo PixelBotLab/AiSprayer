@@ -131,7 +131,7 @@ fi
 build_deps() {
     local extra=()
     $FORCE && extra+=(--force)
-    bash "${PROJECT_ROOT}/third_party/build.sh" --profile "${PROFILE}" --jobs "${JOBS}" "${extra[@]}"
+    bash "${PROJECT_ROOT}/third_party/build.sh" --profile "${PROFILE}" --jobs "${JOBS}" ${extra[@]+"${extra[@]}"}
 }
 
 build_motion() {

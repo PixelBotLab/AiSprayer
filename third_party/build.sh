@@ -346,7 +346,7 @@ if should_build zlmk && need_build "libmk_api.so"; then
           -DENABLE_API=ON \
           -DCMAKE_BUILD_TYPE=Release \
           -DCMAKE_INSTALL_PREFIX="${INSTALL_DIR}" \
-          "${ZLM_CMAKE_EXTRA[@]}"
+          ${ZLM_CMAKE_EXTRA[@]+"${ZLM_CMAKE_EXTRA[@]}"}
 
     #cmake --build  "${SRC_DIR}/ZLMediaKit/build" -j"${JOBS}" --target mk_api
     cmake --build  "${SRC_DIR}/ZLMediaKit/build" -j"${JOBS}"
@@ -488,8 +488,8 @@ if should_build openh264 && need_build "libopenh264.so"; then
         warn "未找到 nasm 汇编器，OpenH264 将使用纯 C 实现（ASM=No）编译"
         OPENH264_EXTRA_FLAGS+=("ASM=No")
     fi
-    make -C "${SRC_DIR}/openh264" -j"${JOBS}" OS="${OH264_OS}" ARCH="${OH264_ARCH}" "${OPENH264_EXTRA_FLAGS[@]}"
-    make -C "${SRC_DIR}/openh264" PREFIX="${INSTALL_DIR}" "${OPENH264_EXTRA_FLAGS[@]}" install
+    make -C "${SRC_DIR}/openh264" -j"${JOBS}" OS="${OH264_OS}" ARCH="${OH264_ARCH}" ${OPENH264_EXTRA_FLAGS[@]+"${OPENH264_EXTRA_FLAGS[@]}"}
+    make -C "${SRC_DIR}/openh264" PREFIX="${INSTALL_DIR}" ${OPENH264_EXTRA_FLAGS[@]+"${OPENH264_EXTRA_FLAGS[@]}"} install
     info "OpenH264 安装完成 → ${INSTALL_DIR}/lib"
 else
     should_build openh264 || info "OpenH264 已跳过（rk3588 不需要，或 --only 未指定）"
