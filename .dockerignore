@@ -1,0 +1,83 @@
+# =============================================================================
+# .dockerignore — 严格过滤无需发送给 Docker 守护进程的本地文件
+# =============================================================================
+
+# 版本控制与临时文件
+.git
+.git/**
+.gitignore
+.gitattributes
+.pytest_cache
+.pytest_cache/**
+scratch
+scratch/**
+out
+out/**
+calib_*.tar.*
+*.tar.*
+*.tar.gz
+*.tar.xz
+*.zip
+
+# Python 虚拟环境与字节码 (宿主机 .venv 含有 2GB+ PyTorch)
+.venv
+.venv/**
+app/.venv
+app/.venv/**
+**/__pycache__
+**/__pycache__/**
+**/*.pyc
+**/*.pyo
+**/*.pyd
+
+# Node.js 模块
+**/node_modules
+**/node_modules/**
+app/frontend/node_modules
+app/frontend/node_modules/**
+
+# C++ 编译中间产物
+build
+build/**
+**/build
+**/build/**
+**/build_*
+**/build_*/**
+**/CMakeFiles
+**/CMakeFiles/**
+cmake-build-*
+cmake-build-*/**
+*.o
+*.a
+
+# 第三方源码树与未精简模块（体积超 2GB，只需 third_party/install 即可）
+third_party/src
+third_party/src/**
+third_party/MobileSAM
+third_party/MobileSAM/**
+third_party/robot_sdk
+third_party/robot_sdk/**
+third_party/install/bin/*.debug
+
+# 运行日志与硬件锁文件（必须忽略，防止 OrbbecSDK.log.txt 写入冲突导致 tar 报错）
+Log
+Log/**
+**/logs
+**/logs/**
+*.log
+*.log.txt
+.orbbec.lock
+
+# 离线数据与开发源码树（构建已统一采用预打包的 install/ 目录）
+data
+data/**
+app
+app/**
+configs
+configs/**
+models
+models/**
+tools
+tools/**
+third_party/install
+third_party/install/**

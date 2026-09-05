@@ -14,9 +14,10 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
+import shutil
+
 _HERE = os.path.abspath(os.path.dirname(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_HERE, "../../../.."))
-_DEFAULT_CLI = os.path.join(_HERE, "build", "motion_cli")
 _DEFAULT_CONFIG = os.path.join(_REPO_ROOT, "configs", "aisprayer_config.yaml")
 
 
@@ -29,12 +30,32 @@ class MotionCliError(RuntimeError):
 
 def motion_cli_path() -> str:
     override = os.environ.get("MOTION_CLI")
-    return override if override else _DEFAULT_CLI
+    if override and os.path.isfile(override):
+        return override
+    candidates = [
+        os.path.join(_REPO_ROOT, "bin", "motion_cli"),
+        os.path.join(_HERE, "bin", "motion_cli"),
+        os.path.join(_HERE, "build", "motion_cli"),
+        shutil.which("motion_cli"),
+    ]
+    for p in candidates:
+        if p and os.path.isfile(p):
+            return p
+    return candidates[0]
 
 
 def aisprayer_config_path() -> str:
     override = os.environ.get("AISPRAYER_CONFIG")
-    return override if override else _DEFAULT_CONFIG
+    if override and os.path.isfile(override):
+        return override
+    candidates = [
+        os.path.join(_REPO_ROOT, "configs", "aisprayer_config.yaml"),
+        os.path.join(_REPO_ROOT, "install", "configs", "aisprayer_config.yaml"),
+    ]
+    for p in candidates:
+        if p and os.path.isfile(p):
+            return p
+    return candidates[0]
 
 
 def _log_stderr_line(line: str) -> None:

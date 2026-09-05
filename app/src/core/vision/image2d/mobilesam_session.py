@@ -7,16 +7,20 @@ from typing import Tuple, Optional, List
 
 import cv2
 import numpy as np
-import torch
+try:
+    import torch
+    HAS_TORCH = True
+    # MobileSAM is an interactive feature; it must not consume all CPU cores.
+    torch.set_num_threads(1)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
+except ImportError:
+    torch = None
+    HAS_TORCH = False
 
 logger = logging.getLogger(__name__)
-
-# MobileSAM is an interactive feature; it must not consume all CPU cores.
-torch.set_num_threads(1)
-try:
-    torch.set_num_interop_threads(1)
-except RuntimeError:
-    pass
 
 # Adjust paths based on the project structure
 REPO_ROOT = Path(__file__).resolve().parents[5]
@@ -140,6 +144,86 @@ def resolve_device(requested: str | None = None) -> str:
 
 
 
+def _run_onnx_decoder(
+    decoder_session,
+    features: np.ndarray,
+    original_size: Tuple[int, int],
+    input_size: Tuple[int, int],
+    point_coords: Optional[np.ndarray] = None,
+    point_labels: Optional[np.ndarray] = None,
+    box: Optional[np.ndarray] = None,
+    mask_input: Optional[np.ndarray] = None,
+    multimask_output: bool = True,
+    return_logits: bool = False,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Shared ONNX decoder inference function for both pure-ONNX and RKNN+ONNX pipelines."""
+    orig_h, orig_w = original_size
+    new_h, new_w = input_size
+
+    pts_list = []
+    lbls_list = []
+    if point_coords is not None and point_labels is not None:
+        coords = np.array(point_coords, dtype=np.float32).copy()
+        coords[:, 0] = coords[:, 0] * (new_w / orig_w)
+        coords[:, 1] = coords[:, 1] * (new_h / orig_h)
+        pts_list.append(coords)
+        lbls_list.append(np.array(point_labels, dtype=np.float32))
+
+    if box is not None:
+        box_pts = np.array(
+            [
+                [box[0] * (new_w / orig_w), box[1] * (new_h / orig_h)],
+                [box[2] * (new_w / orig_w), box[3] * (new_h / orig_h)],
+            ],
+            dtype=np.float32,
+        )
+        box_lbls = np.array([2.0, 3.0], dtype=np.float32)
+        pts_list.append(box_pts)
+        lbls_list.append(box_lbls)
+
+    if not pts_list:
+        raise ValueError("Must provide point_coords or box.")
+
+    all_coords = np.concatenate(pts_list, axis=0)[None, :, :]  # (1, N, 2)
+    all_labels = np.concatenate(lbls_list, axis=0)[None, :]    # (1, N)
+
+    if mask_input is not None:
+        has_mask = np.ones(1, dtype=np.float32)
+        m_input = mask_input[None, ...] if len(mask_input.shape) == 3 else mask_input
+    else:
+        has_mask = np.zeros(1, dtype=np.float32)
+        m_input = np.zeros((1, 1, 256, 256), dtype=np.float32)
+
+    orig_im_size = np.array([float(orig_h), float(orig_w)], dtype=np.float32)
+
+    ort_inputs = {
+        "image_embeddings": features,
+        "point_coords": all_coords,
+        "point_labels": all_labels,
+        "mask_input": m_input,
+        "has_mask_input": has_mask,
+        "orig_im_size": orig_im_size,
+    }
+
+    masks, iou_predictions, low_res_masks = decoder_session.run(None, ort_inputs)
+
+    # Unpack batch dimension
+    masks = masks[0]                  # (C, H, W)
+    iou_predictions = iou_predictions[0]  # (C,)
+    low_res_masks = low_res_masks[0]
+
+    if not return_logits:
+        masks = masks > 0.0
+
+    if not multimask_output and len(iou_predictions) > 1:
+        best_idx = int(np.argmax(iou_predictions))
+        masks = masks[best_idx : best_idx + 1]
+        iou_predictions = iou_predictions[best_idx : best_idx + 1]
+        low_res_masks = low_res_masks[best_idx : best_idx + 1]
+
+    return masks, iou_predictions, low_res_masks
+
+
 class ONNXMobileSAMPredictor:
     """
     Pure ONNX Runtime implementation of MobileSAM.
@@ -231,72 +315,18 @@ class ONNXMobileSAMPredictor:
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         if not self.is_image_set:
             raise RuntimeError("An image must be set with .set_image(...) before mask prediction.")
-
-        orig_h, orig_w = self.original_size
-        new_h, new_w = self.input_size
-
-        pts_list = []
-        lbls_list = []
-        if point_coords is not None and point_labels is not None:
-            coords = np.array(point_coords, dtype=np.float32).copy()
-            coords[:, 0] = coords[:, 0] * (new_w / orig_w)
-            coords[:, 1] = coords[:, 1] * (new_h / orig_h)
-            pts_list.append(coords)
-            lbls_list.append(np.array(point_labels, dtype=np.float32))
-
-        if box is not None:
-            box_pts = np.array(
-                [
-                    [box[0] * (new_w / orig_w), box[1] * (new_h / orig_h)],
-                    [box[2] * (new_w / orig_w), box[3] * (new_h / orig_h)],
-                ],
-                dtype=np.float32,
-            )
-            box_lbls = np.array([2.0, 3.0], dtype=np.float32)
-            pts_list.append(box_pts)
-            lbls_list.append(box_lbls)
-
-        if not pts_list:
-            raise ValueError("Must provide point_coords or box.")
-
-        all_coords = np.concatenate(pts_list, axis=0)[None, :, :]  # (1, N, 2)
-        all_labels = np.concatenate(lbls_list, axis=0)[None, :]    # (1, N)
-
-        if mask_input is not None:
-            has_mask = np.ones(1, dtype=np.float32)
-            m_input = mask_input[None, ...] if len(mask_input.shape) == 3 else mask_input
-        else:
-            has_mask = np.zeros(1, dtype=np.float32)
-            m_input = np.zeros((1, 1, 256, 256), dtype=np.float32)
-
-        orig_im_size = np.array([float(orig_h), float(orig_w)], dtype=np.float32)
-
-        ort_inputs = {
-            "image_embeddings": self.features,
-            "point_coords": all_coords,
-            "point_labels": all_labels,
-            "mask_input": m_input,
-            "has_mask_input": has_mask,
-            "orig_im_size": orig_im_size,
-        }
-
-        masks, iou_predictions, low_res_masks = self.decoder_session.run(None, ort_inputs)
-
-        # Unpack batch dimension
-        masks = masks[0]                  # (C, H, W)
-        iou_predictions = iou_predictions[0]  # (C,)
-        low_res_masks = low_res_masks[0]
-
-        if not return_logits:
-            masks = masks > 0.0
-
-        if not multimask_output and len(iou_predictions) > 1:
-            best_idx = int(np.argmax(iou_predictions))
-            masks = masks[best_idx : best_idx + 1]
-            iou_predictions = iou_predictions[best_idx : best_idx + 1]
-            low_res_masks = low_res_masks[best_idx : best_idx + 1]
-
-        return masks, iou_predictions, low_res_masks
+        return _run_onnx_decoder(
+            decoder_session=self.decoder_session,
+            features=self.features,
+            original_size=self.original_size,
+            input_size=self.input_size,
+            point_coords=point_coords,
+            point_labels=point_labels,
+            box=box,
+            mask_input=mask_input,
+            multimask_output=multimask_output,
+            return_logits=return_logits,
+        )
 
     def reset_image(self) -> None:
         self.is_image_set = False
@@ -308,44 +338,75 @@ class ONNXMobileSAMPredictor:
 class RKNNMobileSAMPredictor:
     """
     Drop-in replacement for SamPredictor on Rockchip RK3588.
-    The heavy Image Encoder (TinyViT, 1024x1024) runs on the RK3588 NPU via RKNN,
-    while the lightweight Prompt Encoder + Mask Decoder runs in PyTorch on CPU (<5ms).
+    The heavy Image Encoder (TinyViT, 1024x1024) runs on the RK3588 NPU via RKNN.
+    The lightweight Prompt Encoder + Mask Decoder runs via ONNX Runtime on CPU (<15ms, Zero-PyTorch)
+    or falls back to PyTorch if ONNX decoder is not available.
     """
 
     def __init__(
         self,
         rknn_encoder_path: str = str(DEFAULT_MOBILESAM_RKNN_ENCODER),
-        checkpoint: str = str(DEFAULT_MOBILESAM_WEIGHTS),
+        checkpoint: Optional[str] = None,
+        onnx_decoder_path: Optional[str] = str(DEFAULT_MOBILESAM_ONNX_DECODER),
     ):
         self.rknn_encoder_path = str(rknn_encoder_path)
-        self.checkpoint = str(checkpoint)
+        self.onnx_decoder_path = str(onnx_decoder_path) if onnx_decoder_path else None
+        self.checkpoint = str(checkpoint) if checkpoint else None
         self.backend_type = "rknn"
-        self.backend_desc = (
-            f"RKNN (Rockchip RK3588 NPU) | "
-            f"Encoder: {Path(rknn_encoder_path).name}, Decoder: {Path(checkpoint).name}"
-        )
-        self.model_files = {"encoder": self.rknn_encoder_path, "decoder": self.checkpoint}
         self.rknn = None
         self._init_rknn()
 
-        if str(MOBILESAM_DIR) not in sys.path:
-            sys.path.insert(0, str(MOBILESAM_DIR))
+        self.use_onnx_decoder = False
+        self.decoder_session = None
+        self.sam_predictor = None
 
-        from mobile_sam import sam_model_registry, SamPredictor
-        from mobile_sam.utils.transforms import ResizeLongestSide
+        # Prefer ONNX decoder for Zero-PyTorch dependency
+        if self.onnx_decoder_path:
+            dec_p = Path(self.onnx_decoder_path)
+            if dec_p.exists() and dec_p.stat().st_size > 1024:
+                try:
+                    import onnxruntime as ort
+                    self.decoder_session = ort.InferenceSession(str(dec_p), providers=["CPUExecutionProvider"])
+                    self.use_onnx_decoder = True
+                    self.backend_desc = (
+                        f"RKNN (Rockchip RK3588 NPU) + ONNX Decoder | "
+                        f"Encoder: {Path(rknn_encoder_path).name}, Decoder: {dec_p.name}"
+                    )
+                    self.model_files = {"encoder": self.rknn_encoder_path, "decoder": str(dec_p)}
+                    logger.info(f"[MobileSAM-RKNN] Initialized ONNX Runtime Decoder ({dec_p.name}, Zero-PyTorch).")
+                except Exception as e:
+                    logger.warning(f"[MobileSAM-RKNN] Failed to load ONNX decoder: {e}, falling back to PyTorch.")
 
-        logger.info(f"[MobileSAM-RKNN] Loading decoder weights from {checkpoint}...")
-        sam = sam_model_registry["vit_t"](checkpoint=checkpoint)
-        sam.eval()
+        if not self.use_onnx_decoder:
+            if not HAS_TORCH:
+                raise RuntimeError(
+                    "Neither ONNX decoder nor PyTorch is available for MobileSAM decoder on RK3588."
+                )
+            ckpt = self.checkpoint or str(DEFAULT_MOBILESAM_WEIGHTS)
+            self.backend_desc = (
+                f"RKNN (Rockchip RK3588 NPU) | "
+                f"Encoder: {Path(rknn_encoder_path).name}, Decoder: {Path(ckpt).name}"
+            )
+            self.model_files = {"encoder": self.rknn_encoder_path, "decoder": ckpt}
 
-        # Free heavy image encoder from CPU memory, retain dummy for property compatibility
-        del sam.image_encoder
-        sam.image_encoder = type("DummyEncoder", (), {"img_size": 1024})()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+            if str(MOBILESAM_DIR) not in sys.path:
+                sys.path.insert(0, str(MOBILESAM_DIR))
 
-        self.sam_predictor = SamPredictor(sam)
-        self.transform = ResizeLongestSide(1024)
+            from mobile_sam import sam_model_registry, SamPredictor
+            from mobile_sam.utils.transforms import ResizeLongestSide
+
+            logger.info(f"[MobileSAM-RKNN] Loading decoder weights from {ckpt}...")
+            sam = sam_model_registry["vit_t"](checkpoint=ckpt)
+            sam.eval()
+
+            # Free heavy image encoder from CPU memory, retain dummy for property compatibility
+            del sam.image_encoder
+            sam.image_encoder = type("DummyEncoder", (), {"img_size": 1024})()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+            self.sam_predictor = SamPredictor(sam)
+
         self.img_size = 1024
         self.is_image_set = False
         self.features = None
@@ -420,13 +481,14 @@ class RKNNMobileSAMPredictor:
         logger.debug(f"[MobileSAM-RKNN] NPU image encoding completed in {cost_ms:.1f}ms")
 
         features_np = outputs[0]  # shape: (1, 256, 64, 64)
-        self.features = torch.from_numpy(features_np).float()
+        self.features = features_np
 
-        # Update underlying predictor state
-        self.sam_predictor.features = self.features
-        self.sam_predictor.original_size = self.original_size
-        self.sam_predictor.input_size = self.input_size
-        self.sam_predictor.is_image_set = True
+        if not self.use_onnx_decoder and self.sam_predictor is not None:
+            self.sam_predictor.features = torch.from_numpy(features_np).float()
+            self.sam_predictor.original_size = self.original_size
+            self.sam_predictor.input_size = self.input_size
+            self.sam_predictor.is_image_set = True
+
         self.is_image_set = True
 
     def predict(
@@ -440,6 +502,21 @@ class RKNNMobileSAMPredictor:
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         if not self.is_image_set:
             raise RuntimeError("An image must be set with .set_image(...) before mask prediction.")
+
+        if self.use_onnx_decoder:
+            return _run_onnx_decoder(
+                decoder_session=self.decoder_session,
+                features=self.features,
+                original_size=self.original_size,
+                input_size=self.input_size,
+                point_coords=point_coords,
+                point_labels=point_labels,
+                box=box,
+                mask_input=mask_input,
+                multimask_output=multimask_output,
+                return_logits=return_logits,
+            )
+
         return self.sam_predictor.predict(
             point_coords=point_coords,
             point_labels=point_labels,
@@ -493,15 +570,22 @@ def load_mobilesam(
             device = "onnx" if (Path(onnx_encoder_path).exists() and Path(onnx_decoder_path).exists()) else "cpu"
         else:
             try:
+                dec_onnx = Path(onnx_decoder_path)
+                has_onnx_dec = dec_onnx.exists() and dec_onnx.stat().st_size > 1024
                 ckpt_p = Path(checkpoint)
                 rknn_size = f"{rknn_path.stat().st_size / (1024 * 1024):.1f} MB"
-                ckpt_size = f"{ckpt_p.stat().st_size / (1024 * 1024):.1f} MB" if ckpt_p.exists() else "missing"
+                if has_onnx_dec:
+                    dec_desc = f"{dec_onnx.name} ({dec_onnx.stat().st_size / (1024 * 1024):.1f} MB, ONNX - Zero PyTorch)"
+                else:
+                    dec_desc = f"{ckpt_p.name} (PyTorch)"
+
                 logger.info(f"[MobileSAM] Loading RKNN Backend (Rockchip RK3588 NPU):")
                 logger.info(f"[MobileSAM]   * Encoder (.rknn): {rknn_path.resolve()} ({rknn_size})")
-                logger.info(f"[MobileSAM]   * Decoder (.pt):   {ckpt_p.resolve()} ({ckpt_size})")
+                logger.info(f"[MobileSAM]   * Decoder:        {dec_desc}")
                 predictor = RKNNMobileSAMPredictor(
                     rknn_encoder_path=str(rknn_path),
-                    checkpoint=checkpoint,
+                    checkpoint=checkpoint if not has_onnx_dec else None,
+                    onnx_decoder_path=str(dec_onnx) if has_onnx_dec else None,
                 )
             except Exception as e:
                 logger.warning(

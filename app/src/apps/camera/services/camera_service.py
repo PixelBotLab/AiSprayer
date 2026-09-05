@@ -72,10 +72,14 @@ class CameraService:
         cur_dir = os.path.dirname(os.path.abspath(__file__))
         # cur_dir is app/src/apps/camera/services -> 4 levels up to PROJECT_ROOT
         self._project_root = os.path.abspath(os.path.join(cur_dir, "../../../../.."))
-        self._bin_path = os.path.join(
-            self._project_root,
-            "app/src/core/hardware/camera/orbbec_camera_service/bin/orbbec_camera_service"
-        )
+        candidate_bins = [
+            os.path.join(self._project_root, "bin/orbbec_camera_service"),
+            os.path.join(
+                self._project_root,
+                "app/src/core/hardware/camera/orbbec_camera_service/bin/orbbec_camera_service"
+            ),
+        ]
+        self._bin_path = next((b for b in candidate_bins if os.path.isfile(b)), candidate_bins[0])
         self._config_path = os.path.join(self._project_root, "configs/aisprayer_config.yaml")
 
         # Automatically clean up on Python interpreter exit

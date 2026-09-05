@@ -22,7 +22,8 @@ def find_motion_c_lib() -> Optional[str]:
     if override and os.path.isfile(override):
         return override
     here = os.path.dirname(os.path.abspath(__file__))
-    for folder in (os.path.join(here, "build"), here):
+    install_lib = os.path.abspath(os.path.join(here, "../../../../lib"))
+    for folder in (os.path.join(here, "bin"), install_lib, os.path.join(here, "build"), here):
         for name in ("libmotion_c.so", "libmotion_c.dylib", "motion_c.dll"):
             path = os.path.join(folder, name)
             if os.path.isfile(path):
