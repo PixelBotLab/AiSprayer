@@ -61,6 +61,10 @@ models/*
 !models/mobile_sam.pt
 !models/mobile_sam*.onnx
 !models/mobile_sam*.rknn
+!models/superpoint*.onnx
+!models/superpoint*.rknn
+!models/superpoint*.pth
+!superpoint.rknn
 
 *.cache/
 
