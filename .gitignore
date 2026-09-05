@@ -65,6 +65,8 @@ models/*
 !models/superpoint*.rknn
 !models/superpoint*.pth
 !superpoint.rknn
+!models/wissight*.onnx
+!models/wissight*.rknn
 
 *.cache/
 
