@@ -23,23 +23,27 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
+import cv2
 import numpy as np
 
 from .geometry import (
-    invert_transform, make_transform, project_points, rotation_angle_deg,
-    rotation_axis_coverage,
+    average_rotation, invert_transform, make_transform, project_points,
+    rotation_angle_deg, rotation_axis_coverage,
 )
 from .samples import CalibSample
-
-try:
-    import cv2 as _cv2
-except ImportError:  # pragma: no cover - cv2 是本项目的硬依赖
-    _cv2 = None
 
 # 尝试顺序, 最终按残差择优。
 AX_XB_METHODS: Tuple[str, ...] = ("tsai", "park", "andreff", "horaud", "daniilidis")
 
 _MIN_AXIS_COVERAGE = 0.30
+
+_OPENCV_METHOD_CONSTANTS: Dict[str, int] = {
+    "tsai": cv2.CALIB_HAND_EYE_TSAI,
+    "park": cv2.CALIB_HAND_EYE_PARK,
+    "andreff": cv2.CALIB_HAND_EYE_ANDREFF,
+    "horaud": cv2.CALIB_HAND_EYE_HORAUD,
+    "daniilidis": cv2.CALIB_HAND_EYE_DANIILIDIS,
+}
 
 
 @dataclass
@@ -55,18 +59,6 @@ class EyeInHandSolution:
     method_report: List[Dict[str, object]] = field(default_factory=list)
 
 
-def _opencv_method_constants() -> Dict[str, int]:
-    if _cv2 is None:
-        return {}
-    return {
-        "tsai": _cv2.CALIB_HAND_EYE_TSAI,
-        "park": _cv2.CALIB_HAND_EYE_PARK,
-        "andreff": _cv2.CALIB_HAND_EYE_ANDREFF,
-        "horaud": _cv2.CALIB_HAND_EYE_HORAUD,
-        "daniilidis": _cv2.CALIB_HAND_EYE_DANIILIDIS,
-    }
-
-
 def _board_pose_in_base(samples: Sequence[CalibSample],
                         T_flange_camera: np.ndarray) -> List[np.ndarray]:
     """每个样本独立推出的标定板基座位姿 U_i · X · V_i, 理论上应彼此相等。"""
@@ -75,12 +67,7 @@ def _board_pose_in_base(samples: Sequence[CalibSample],
 
 def _average_transform(T_list: Sequence[np.ndarray]) -> np.ndarray:
     """平移取均值, 旋转取均值后 SVD 正交化回 SO(3)。"""
-    R_avg = np.mean([T[:3, :3] for T in T_list], axis=0)
-    U, _, Vt = np.linalg.svd(R_avg)
-    R = U @ Vt
-    if np.linalg.det(R) < 0:
-        U[:, -1] *= -1
-        R = U @ Vt
+    R = average_rotation([T[:3, :3] for T in T_list])
     t_avg = np.mean([T[:3, 3] for T in T_list], axis=0)
     return make_transform(R, t_avg)
 
@@ -115,8 +102,6 @@ def solve(samples: Sequence[CalibSample],
           K: Optional[np.ndarray] = None,
           D: Optional[Sequence[float]] = None) -> Optional[EyeInHandSolution]:
     """跑遍 AX=XB 各方法, 按重投影残差 (无角点时退化为平移残差) 择优。"""
-    if _cv2 is None:
-        raise RuntimeError("cv2 is required for eye-in-hand calibration")
     if len(samples) < 3:
         return None
 
@@ -125,15 +110,14 @@ def solve(samples: Sequence[CalibSample],
     R_t2c = [np.ascontiguousarray(s.T_camera_board[:3, :3]) for s in samples]
     t_t2c = [np.ascontiguousarray(s.T_camera_board[:3, 3:4]) for s in samples]
 
-    constants = _opencv_method_constants()
     candidates: List[Tuple[float, str, np.ndarray, float, float, Optional[float]]] = []
     report: List[Dict[str, object]] = []
 
     for name in AX_XB_METHODS:
         entry: Dict[str, object] = {"method": name}
         try:
-            R_c2g, t_c2g = _cv2.calibrateHandEye(
-                R_g2b, t_g2b, R_t2c, t_t2c, constants[name])
+            R_c2g, t_c2g = cv2.calibrateHandEye(
+                R_g2b, t_g2b, R_t2c, t_t2c, _OPENCV_METHOD_CONSTANTS[name])
         except Exception as exc:
             entry["status"] = f"failed: {type(exc).__name__}"
             report.append(entry)

@@ -623,16 +623,21 @@ class DobotDriver(BaseRobotDriver):
             except Exception as e:
                 logger.warning(f"MoveJog stop: EnableRobot failed: {e}")
 
-#    def move_jog_stop(self, axis_id: str = "", coord_type: int = 1) -> bool:
-#        """
-#        统一点动入口（兼容性包装）。根据 axis_id 自动分发到 move_jog_joint 或 move_jog_cartesian。
-#        """
-#        if axis_id.startswith('J'):
-#            return self.move_jog_joint()
-#        else:
-#            c_type = 2 if coord_type == 1 else coord_type
-#            return self.move_jog_cartesian(coord_type=c_type)
-    
+    def clear_error(self) -> bool:
+        """Dobot 报警清除与重新使能"""
+        if not self._connected:
+            return False
+        try:
+            r = self.dashboard.ClearError()
+            logger.info(f"ClearError: {r}")
+            time.sleep(0.5)
+            r2 = self.dashboard.EnableRobot()
+            logger.info(f"EnableRobot after clear: {r2}")
+            return True
+        except Exception as e:
+            logger.error(f"Dobot clear_error failed: {e}")
+            return False
+
     def sync(self) -> bool:
         """
         同步

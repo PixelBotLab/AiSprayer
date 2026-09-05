@@ -169,7 +169,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
     const connect = () => {
-      ws = new WebSocket(`${WS_BASE}/api/calib/robot/ws`);
+      ws = new WebSocket(`${WS_BASE}/api/robot/ws`);
       robotWsRef.current = ws;
 
       ws.onopen = () => {};

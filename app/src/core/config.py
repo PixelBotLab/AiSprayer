@@ -101,12 +101,9 @@ class SprayerConfig:
             return None
 
         import numpy as np
-        from scipy.spatial.transform import Rotation
+        from core.handeye import pose_to_matrix
 
-        pose = [float(v) for v in base_flange_pose[:6]]
-        T_base_flange = np.eye(4)
-        T_base_flange[:3, :3] = Rotation.from_euler("xyz", pose[3:], degrees=True).as_matrix()
-        T_base_flange[:3, 3] = pose[:3]
+        T_base_flange = pose_to_matrix(base_flange_pose)
         T = T_base_flange @ np.array(self.T_flange_camera, dtype=float)
         T[:3, 3] /= 1000.0  # mm -> m, 与 T_camera_to_base 一致
         return T.tolist()

@@ -13,7 +13,7 @@ import cv2
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "app/src"))
 
-from apps.calib.services.hand_eye import (
+from core.handeye import (
     DOBOT_EULER_SEQ, EYE_IN_HAND, EYE_TO_HAND, INTERNAL_ANGLE_UNIT, MOUNTS,
     UNIT_DEG, UNIT_RAD, CalibSample, chessboard_object_points, clean_samples,
     evaluate_data_quality, infer_angle_unit, invert_transform, make_transform,
@@ -353,7 +353,7 @@ class CalibrationService:
 
     def capture_sample(self, session_id: str) -> int:
         """从机器人读当前位姿/关节并采集样本, 单位换算只发生在这一处。"""
-        from services.robot_service import robot_service
+        from apps.robot.services.robot_service import robot_service
 
         pose, err = robot_service.get_current_pose()
         if pose is None:
@@ -617,7 +617,7 @@ class CalibrationService:
         5. Pause for 1s, then proceed to the next waypoint pose;
         6. Solve calibration extrinsics automatically after all samples are collected.
         """
-        from services.robot_service import robot_service
+        from apps.robot.services.robot_service import robot_service
 
         session_path = os.path.join(self.calib_dir, session_id)
         yaml_file = os.path.join(session_path, "calibration_info.yaml")
@@ -656,7 +656,7 @@ class CalibrationService:
             safe_callback(0, total_samples, "", "error", err_msg)
             return {"success": False, "error": err_msg}
 
-        if not robot_service.is_connected:
+        if not robot_service.is_connected():
             err_msg = "Robot is not connected. Please connect robot before starting automatic resampling."
             logger.error(f"[-] [Resample ERROR] {err_msg}")
             safe_callback(0, total_samples, "", "error", err_msg)

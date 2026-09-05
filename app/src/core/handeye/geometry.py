@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Sequence
 
+import cv2
 import numpy as np
 from scipy.spatial.transform import Rotation as Rot
 
@@ -150,8 +151,6 @@ def project_points(obj_pts: np.ndarray, T_camera_obj: np.ndarray,
 
     未标定畸变时 (D 为空或长度不足) 退化为针孔投影, 与 cv2.projectPoints 无畸变分支一致。
     """
-    import cv2
-
     T = np.asarray(T_camera_obj, dtype=np.float64).reshape(4, 4)
     pts = np.asarray(obj_pts, dtype=np.float64).reshape(-1, 3)
     in_cam = T[:3, :3] @ pts.T + T[:3, 3:4]
@@ -189,12 +188,6 @@ def chessboard_object_points(pattern_size: Sequence[int], square_size_mm: float)
     objp = np.zeros((rows * cols, 3), dtype=np.float64)
     objp[:, :2] = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2)
     return objp * float(square_size_mm)
-
-
-def sample_board_points(T_camera_board: np.ndarray, objp: np.ndarray) -> np.ndarray:
-    """标定板角点从板系变换到相机系, 即 solvePnP 观测到的三维位置。"""
-    T = np.asarray(T_camera_board, dtype=np.float64).reshape(4, 4)
-    return (T[:3, :3] @ np.asarray(objp).T + T[:3, 3:4]).T
 
 
 def rotation_axis_coverage(R_list: Sequence[np.ndarray]) -> float:

@@ -15,7 +15,7 @@
   所以：矩阵走米，只有给页面的位姿向量走 mm。
 * 姿态口径：Dobot `[rx,ry,rz]` 展开成 `R = Rz(rz)·Ry(ry)·Rx(rx)`，与
   `CR5Kinematics.forward_controller` 的解析分解同一套；实现复用
-  `apps/calib/services/hand_eye/geometry.pose_to_matrix`，**不在这里再写一遍欧拉**
+  `core.handeye.pose_to_matrix`，**不在这里再写一遍欧拉**
   —— 两份"各自看着对"的欧拉代码是这条链路最贵的错误。
 
 为什么增量要**左乘**（共轭到基座系）而不是右乘：
@@ -32,7 +32,7 @@ from typing import Optional, Sequence
 
 import numpy as np
 
-from apps.calib.services.hand_eye.geometry import pose_to_matrix
+from core.handeye import pose_to_matrix
 
 MM_TO_M = 0.001           # 只用于把 forward_controller 的 mm 位姿向量搬进米制矩阵
 

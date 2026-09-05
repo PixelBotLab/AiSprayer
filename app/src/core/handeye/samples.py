@@ -16,7 +16,7 @@ from typing import List, Optional, Sequence
 import numpy as np
 from scipy.spatial.transform import Rotation as Rot
 
-from .geometry import rotation_angle_deg, rotation_axis_coverage
+from .geometry import DOBOT_EULER_SEQ, rotation_angle_deg, rotation_axis_coverage
 
 
 @dataclass
@@ -41,9 +41,7 @@ class CalibSample:
     def flange_euler(self) -> np.ndarray:
         """控制器原始欧拉角读数 (度)。网格搜索顺规时需要它, 矩阵已经丢失了参数化信息。"""
         if self.pose_dobot is None:
-            from scipy.spatial.transform import Rotation as _Rot
-            from .geometry import DOBOT_EULER_SEQ
-            return _Rot.from_matrix(self.rotation).as_euler(DOBOT_EULER_SEQ, degrees=True)
+            return Rot.from_matrix(self.rotation).as_euler(DOBOT_EULER_SEQ, degrees=True)
         return np.asarray(self.pose_dobot, dtype=np.float64)[3:6]
 
     @property

@@ -2,8 +2,11 @@
 """
 手眼标定求解内核 (两种安装共用)。
 
-对外只暴露一个入口 `solve_hand_eye(mount, samples, ...)`, 由 mount 决定走哪套数学模型,
-调用方不需要知道 EyeToHandSolution / EyeInHandSolution 的差异。
+对外提供统一求解入口 `solve_hand_eye(mount, samples, ...)`, 由 mount 决定算法模型:
+- 'eye-to-hand': 眼在手外 (标定板在手端, 相机固定)
+- 'eye-in-hand': 眼在手上 (相机在手端, 标定板固定)
+
+同时提供机器人位姿与 SE(3) 刚体变换工具函数 (如 pose_to_matrix, matrix_to_pose)。
 """
 from __future__ import annotations
 
@@ -17,9 +20,11 @@ from .eye_to_hand import EyeToHandSolution
 from .eye_to_hand import solve as solve_eye_to_hand
 from .geometry import (
     DOBOT_EULER_SEQ, EYE_IN_HAND, EYE_TO_HAND, INTERNAL_ANGLE_UNIT, MIN_SAMPLES,
-    MOUNTS, RECOMMENDED_SAMPLES, UNIT_DEG, UNIT_RAD, chessboard_object_points,
-    infer_angle_unit, invert_transform, make_transform, matrix_to_pose,
-    normalize_pose, pose_to_matrix, rotation_from_pose,
+    MOUNTS, RECOMMENDED_SAMPLES, UNIT_DEG, UNIT_RAD, average_rotation,
+    chessboard_object_points, infer_angle_unit, invert_transform,
+    make_transform, matrix_to_pose, normalize_pose, pose_to_matrix,
+    project_points, rotation_angle_deg, rotation_axis_coverage,
+    rotation_from_pose,
 )
 from .samples import CalibSample, clean_samples, evaluate_data_quality
 
@@ -27,9 +32,12 @@ __all__ = [
     "CalibSample", "DOBOT_EULER_SEQ", "EYE_IN_HAND", "EYE_TO_HAND",
     "EyeInHandSolution", "EyeToHandSolution", "INTERNAL_ANGLE_UNIT",
     "MIN_SAMPLES", "MOUNTS", "RECOMMENDED_SAMPLES", "UNIT_DEG", "UNIT_RAD",
-    "chessboard_object_points", "clean_samples", "evaluate_data_quality",
-    "infer_angle_unit", "invert_transform", "make_transform", "matrix_to_pose",
-    "normalize_pose", "pose_to_matrix", "rotation_from_pose", "solve_hand_eye",
+    "average_rotation", "chessboard_object_points", "clean_samples",
+    "evaluate_data_quality", "infer_angle_unit", "invert_transform",
+    "make_transform", "matrix_to_pose", "minimum_samples", "normalize_pose",
+    "pose_to_matrix", "project_points", "recommended_samples",
+    "rotation_angle_deg", "rotation_axis_coverage", "rotation_from_pose",
+    "solve_hand_eye",
 ]
 
 

@@ -35,7 +35,7 @@ from apps.follow.mirror import (  # noqa: E402
 from apps.follow.services import follow_service as fs_mod  # noqa: E402
 from apps.follow.services.pose_stream import PoseStream  # noqa: E402
 from apps.follow.trajectory import JointTrajectorySmoother  # noqa: E402
-from apps.calib.services.hand_eye.geometry import matrix_to_pose, pose_to_matrix  # noqa: E402
+from core.handeye import matrix_to_pose, pose_to_matrix  # noqa: E402
 from core.motion.kinematics import CR5Kinematics  # noqa: E402
 
 HOME_DEG = [0.0, 0.0, -90.0, -90.0, -90.0, 0.0]

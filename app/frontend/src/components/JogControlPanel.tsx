@@ -62,7 +62,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
   }, []);
 
   const connectWs = () => {
-    const ws = new WebSocket(`${WS_BASE}/api/calib/robot/ws`);
+    const ws = new WebSocket(`${WS_BASE}/api/robot/ws`);
     ws.onopen = () => { };
     ws.onclose = () => {
       setTimeout(connectWs, 2000); // Reconnect WebSocket
@@ -75,7 +75,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
 
   const fetchSpeed = async () => {
     try {
-      const spdRes = await fetch(`${API_BASE}/api/calib/robot/speed`);
+      const spdRes = await fetch(`${API_BASE}/api/robot/speed`);
       if (spdRes.ok) {
         const spdData = await spdRes.json();
         const gFactor = spdData.global_speed_factor ?? 50;
@@ -118,7 +118,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
     if (robotConnected) {
       // Disconnect
       try {
-        const res = await fetch(`${API_BASE}/api/calib/robot/disconnect`, { method: 'POST' });
+        const res = await fetch(`${API_BASE}/api/robot/disconnect`, { method: 'POST' });
         if (res.ok) {
           setRobotConnected(false);
         }
@@ -128,7 +128,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
     } else {
       // Connect
       try {
-        const res = await fetch(`${API_BASE}/api/calib/robot/connect`, {
+        const res = await fetch(`${API_BASE}/api/robot/connect`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ robot_type: 'dobot' })
@@ -149,7 +149,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
 
   const handleSpeedUpdate = async () => {
     try {
-      await fetch(`${API_BASE}/api/calib/robot/speed`, {
+      await fetch(`${API_BASE}/api/robot/speed`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ speed_l: speedL, acc_l: accL, speed_j: speedJ, acc_j: accJ })
@@ -161,7 +161,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
 
   const syncGlobalSpeed = async (newFactor: number) => {
     try {
-      await fetch(`${API_BASE}/api/calib/robot/global_speed`, {
+      await fetch(`${API_BASE}/api/robot/global_speed`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ factor: newFactor })
@@ -179,7 +179,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
       setActiveJog(null);
     }
     try {
-      const res = await fetch(`${API_BASE}/api/calib/robot/jog_continuous`, {
+      const res = await fetch(`${API_BASE}/api/robot/jog_continuous`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ axis, direction })
@@ -198,7 +198,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
   const handleZero = async () => {
     setActiveAction('zero');
     try {
-      const res = await fetch(`${API_BASE}/api/calib/robot/zero`, {
+      const res = await fetch(`${API_BASE}/api/robot/zero`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ speed: speedJ, acc: accJ })
@@ -217,7 +217,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
   const handleHome = async () => {
     setActiveAction('home');
     try {
-      const res = await fetch(`${API_BASE}/api/calib/robot/home`, {
+      const res = await fetch(`${API_BASE}/api/robot/home`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ speed: speedJ, acc: accJ })
@@ -236,7 +236,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
   const handleFold = async () => {
     setActiveAction('fold');
     try {
-      const res = await fetch(`${API_BASE}/api/calib/robot/fold`, {
+      const res = await fetch(`${API_BASE}/api/robot/fold`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ speed: speedJ, acc: accJ })
@@ -254,19 +254,19 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
 
   const handlePause = async () => {
     try {
-      await fetch(`${API_BASE}/api/calib/robot/pause`, { method: 'POST' });
+      await fetch(`${API_BASE}/api/robot/pause`, { method: 'POST' });
     } catch (err: any) { console.error('Pause error:', err); }
   };
 
   const handleResume = async () => {
     try {
-      await fetch(`${API_BASE}/api/calib/robot/resume`, { method: 'POST' });
+      await fetch(`${API_BASE}/api/robot/resume`, { method: 'POST' });
     } catch (err: any) { console.error('Resume error:', err); }
   };
 
   const handleEstop = async () => {
     try {
-      await fetch(`${API_BASE}/api/calib/robot/estop`, { method: 'POST' });
+      await fetch(`${API_BASE}/api/robot/estop`, { method: 'POST' });
     } catch (err: any) {
       alert(`E-Stop triggered!`);
       console.error('E-Stop error:', err);

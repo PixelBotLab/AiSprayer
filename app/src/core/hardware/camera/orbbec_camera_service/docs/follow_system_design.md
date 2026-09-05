@@ -124,7 +124,7 @@ get_best_ik` 全部吃**米制 4x4**，而 `forward_controller` 返回的是 **m
 ### 2.2 姿态欧拉约定：只有一个说法
 
 Dobot 的 `[rx,ry,rz]` 是**内禀 'xyz'**，等价于**定系矩阵乘序** `R = Rz(rz)·Ry(ry)·Rx(rx)`。
-这句话在三处必须一致：`pose_io.hpp:6-10`、`apps/calib/services/hand_eye/geometry.py`、
+这句话在三处必须一致：`pose_io.hpp:6-10`、`core/handeye/geometry.py`、
 `follow/tools/pose_main.cpp` 的横幅。已对本机 `cr5_kinematics`（Python）与 `cr5_kinematics_cpp`
 数值核对：300 组随机关节 FK→tuple→矩阵偏差 9.4e-16，FK→IK 300/300 复现同一位姿。
 
@@ -887,7 +887,7 @@ cd app/src && app/.venv/bin/python -m unittest \
     apps.follow.services.test_follow_mirror apps.follow.services.test_follow_api
 
 # 手眼几何（欧拉约定共用的那一层）
-cd app/src && app/.venv/bin/python -m unittest apps.calib.services.hand_eye.test_hand_eye
+cd app/src && app/.venv/bin/python -m unittest core.handeye.test_hand_eye
 # 运动学（unittest discover 会因 helper 包报 ImportError，直接点名模块）
 cd app/src && app/.venv/bin/python -m core.hardware.robot.test_cr5_kinematics
 ```

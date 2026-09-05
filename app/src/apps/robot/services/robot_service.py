@@ -1,24 +1,27 @@
-import sys
-import os
-import time
-import threading
+# -*- coding: utf-8 -*-
 import logging
 import math
-from typing import Optional, List, Callable, Any, Union
+import os
+import sys
+import threading
+import time
+from typing import Any, Callable, List, Optional, Union
 
-PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../.."))
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "app/src"))
 
-from core.hardware.robot.factory import get_robot
-from core.hardware.robot.base_driver import BaseRobotDriver, RobotPose, PoseLike
 from core.config import SprayerConfig
+from core.hardware.robot.base_driver import BaseRobotDriver, PoseLike, RobotPose
+from core.hardware.robot.factory import get_robot
 
 logger = logging.getLogger(__name__)
+
 
 def _fmt(arr: Optional[List[float]]) -> str:
     if arr is None:
         return "None"
     return "[" + ", ".join(f"{x:.2f}" for x in arr) + "]"
+
 
 class RobotService:
     def __init__(self, config: Optional[SprayerConfig] = None):
@@ -41,40 +44,41 @@ class RobotService:
         self._acc_l: float = 20.0
         self._speed_j: float = min(eff_max_jnt, 20.0)
         self._acc_j: float = 20.0
-        self._global_speed = self._speed_l
-        self._global_acc = self._acc_l
 
     @property
     def config(self) -> SprayerConfig:
         return self._config
 
     @property
+    def is_connected_prop(self) -> bool:
+        return self._is_connected
+
+    @property
     def global_speed_factor(self) -> int:
         return self._global_speed_factor
-        
+
     def set_global_speed_factor(self, factor: int) -> tuple[bool, str]:
         if not (1 <= factor <= 100):
             return False, "Global speed factor must be between 1 and 100"
-            
+
         self._global_speed_factor = factor
-        
+
         # Apply to connected robot if available
-        if self._is_connected and self._driver and hasattr(self._driver, 'set_global_speed'):
+        if self._is_connected and self._driver and hasattr(self._driver, "set_global_speed"):
             try:
                 self._driver.set_global_speed(factor)
                 logger.info(f"Dynamically updated robot set_global_speed to {factor}")
             except Exception as e:
                 logger.warning(f"Failed to dynamically set global speed: {e}")
-                
+
         # Re-calculate effective max speeds based on the new global_speed_factor
-        
         eff_max_tcp = self._max_tcp_speed_mm_s * (self._global_speed_factor / 100.0)
         eff_max_jnt = (self._max_joint_speed_deg_s[0] if self._max_joint_speed_deg_s else 180.0) * (self._global_speed_factor / 100.0)
         if self._speed_l > eff_max_tcp:
             self._speed_l = eff_max_tcp
         if self._speed_j > eff_max_jnt:
             self._speed_j = eff_max_jnt
-            
+
         return True, "Success"
 
     @property
@@ -103,7 +107,7 @@ class RobotService:
     def connect(self, robot_type: str, ip: str, port: str, **kwargs) -> tuple[bool, str]:
         if self._is_connected:
             self.disconnect()
-            
+
         try:
             logger.info(f"Connecting to robot {robot_type} at {ip}:{port}...")
             self._driver = get_robot(robot_type, ip, port, **kwargs)
@@ -116,10 +120,10 @@ class RobotService:
                 # Enforce global_speed_factor speed and configured tool on real robot upon connection
                 try:
                     tool_id = self._config.robot_tcp_id
-                    if hasattr(self._driver, 'set_tool_number'):
+                    if hasattr(self._driver, "set_tool_number"):
                         self._driver.set_tool_number(tool_id)
                         logger.info(f"robot {robot_type} initialized tool to {tool_id} (target_tcp={self._config.robot_tcp})")
-                    if hasattr(self._driver, 'set_global_speed'):
+                    if hasattr(self._driver, "set_global_speed"):
                         self._driver.set_global_speed(self._global_speed_factor)
                         logger.info(f"robot {robot_type} set_global_speed to {self._global_speed_factor}")
                 except Exception as e:
@@ -162,30 +166,12 @@ class RobotService:
         return self._speed_l, self._acc_l, self._speed_j, self._acc_j
 
     def set_speed(self, speed_l: float, acc_l: float, speed_j: float, acc_j: float) -> tuple[bool, str]:
+        if speed_l <= 0 or acc_l <= 0 or speed_j <= 0 or acc_j <= 0:
+            return False, "Speed and acceleration must be greater than 0"
         self._speed_l = float(speed_l)
         self._acc_l = float(acc_l)
         self._speed_j = float(speed_j)
         self._acc_j = float(acc_j)
-        self._global_speed = float(speed_l)
-        self._global_acc = float(acc_l)
-        # Pass to driver if connected
-        return True, ""
-        if self._driver and self._is_connected:
-            if hasattr(self._driver, 'dashboard') and self._driver.dashboard:
-                try:
-                    logger.info(f"set_speed: speed_l:{speed_l} mm/s, acc_l:{acc_l}%, speed_j:{speed_j} deg/s, acc_j:{acc_j}%")
-                    max_tcp = self.max_tcp_speed_mm_s or 2000.0
-                    max_jnt = self.max_joint_speed_deg_s[0] if self.max_joint_speed_deg_s else 180.0
-                    ratio_l = max(1, min(100, int((speed_l / max_tcp) * 100)))
-                    ratio_j = max(1, min(100, int((speed_j / max_jnt) * 100)))
-                    self._driver.dashboard.SpeedL(ratio_l)
-                    self._driver.dashboard.AccL(int(acc_l))
-                    self._driver.dashboard.SpeedJ(ratio_j)
-                    self._driver.dashboard.AccJ(int(acc_j))
-                except Exception as e:
-                    msg = f"Failed to set speed on robot: {e}"
-                    logger.error(msg)
-                    return False, msg
         return True, ""
 
     def get_current_pose(self) -> tuple[Optional[List[float]], str]:
@@ -223,7 +209,7 @@ class RobotService:
             logger.error(msg)
             return False, msg
         try:
-            if hasattr(self._driver, 'set_tool_number'):
+            if hasattr(self._driver, "set_tool_number"):
                 ok = self._driver.set_tool_number(tool_num)
                 if ok:
                     logger.info(f"set_tool: Successfully set robot tool to {tool_num}")
@@ -283,7 +269,6 @@ class RobotService:
             logger.error(msg)
             return False, msg
 
-
     def move_l_queue(
         self,
         poses: List[Any],
@@ -319,13 +304,13 @@ class RobotService:
             if isinstance(p, RobotPose):
                 converted_poses.append(p)
             elif isinstance(p, dict):
-                x = float(p.get('x', 0.0))
-                y = float(p.get('y', 0.0))
-                z = float(p.get('z', 0.0))
-                rx = float(p.get('rx', p.get('a', 0.0)))
-                ry = float(p.get('ry', p.get('b', 0.0)))
-                rz = float(p.get('rz', p.get('c', 0.0)))
-                if not p.get('is_radians', False):
+                x = float(p.get("x", 0.0))
+                y = float(p.get("y", 0.0))
+                z = float(p.get("z", 0.0))
+                rx = float(p.get("rx", p.get("a", 0.0)))
+                ry = float(p.get("ry", p.get("b", 0.0)))
+                rz = float(p.get("rz", p.get("c", 0.0)))
+                if not p.get("is_radians", False):
                     rx = math.radians(rx)
                     ry = math.radians(ry)
                     rz = math.radians(rz)
@@ -344,7 +329,6 @@ class RobotService:
                 tool_num=eff_tool
             )
             if res == 0:
-                #self._driver.sync()
                 logger.info(f"move_l_queue: Successfully executed {len(converted_poses)} waypoints (tool={eff_tool}).")
                 return True, ""
             return False, f"move_l_queue returned error code: {res}"
@@ -352,7 +336,6 @@ class RobotService:
             msg = f"move_l_queue error: {e}"
             logger.error(msg)
             return False, msg
-
 
     def move_to_joint(self, joints: List[float], speed: float = 10.0, acc: float = 10.0) -> tuple[bool, str]:
         if not self._driver or not self._is_connected:
@@ -382,8 +365,8 @@ class RobotService:
             logger.error(msg)
             return False, msg
 
-        cartesian_map = {'X': 0, 'Y': 1, 'Z': 2, 'Rx': 3, 'Ry': 4, 'Rz': 5}
-        joint_map = {'J1': 0, 'J2': 1, 'J3': 2, 'J4': 3, 'J5': 4, 'J6': 5}
+        cartesian_map = {"X": 0, "Y": 1, "Z": 2, "Rx": 3, "Ry": 4, "Rz": 5}
+        joint_map = {"J1": 0, "J2": 1, "J3": 2, "J4": 3, "J5": 4, "J6": 5}
 
         logger.info(f"jog_step: axis:{axis}, direction:{direction}, step_size:{step_size:.2f}, speed:{speed:.2f}, acc:{acc:.2f}")
 
@@ -393,15 +376,14 @@ class RobotService:
                 msg = f"jog_step: Pose is not valid ({err_msg})"
                 logger.error(msg)
                 return False, msg
-            
+
             pose_list = list(pose)
             idx = cartesian_map[axis]
             # Convert degree step to radian if rotational
             step = step_size
             if idx >= 3:
-                import math
                 step = math.radians(step_size)
-            
+
             pose_list[idx] += direction * step
             return self.move_to_pose(pose_list, speed=speed, acc=acc)
 
@@ -414,7 +396,7 @@ class RobotService:
             idx = joint_map[axis]
             joints[idx] += direction * step_size
             return self.move_to_joint(joints, speed=speed, acc=acc)
-            
+
         return False, f"jog_step: Invalid axis {axis}"
 
     def jog_continuous(self, axis: str, direction: int) -> tuple[bool, str]:
@@ -423,8 +405,8 @@ class RobotService:
             logger.error(msg)
             return False, msg
 
-        cartesian_axes = ['X', 'Y', 'Z', 'Rx', 'Ry', 'Rz']
-        joint_axes = ['J1', 'J2', 'J3', 'J4', 'J5', 'J6']
+        cartesian_axes = ["X", "Y", "Z", "Rx", "Ry", "Rz"]
+        joint_axes = ["J1", "J2", "J3", "J4", "J5", "J6"]
         dir_str = "+" if direction > 0 else "-"
 
         if direction == 0:
@@ -452,7 +434,7 @@ class RobotService:
             msg = f"jog_continuous: Failed to execute MoveJog({axis_id})"
             logger.error(msg)
             return False, msg
-            
+
         return True, ""
 
     def go_zero(self, speed: float = 10.0, acc: float = 10.0) -> tuple[bool, str]:
@@ -461,7 +443,7 @@ class RobotService:
             msg = "go_zero: Robot is not connected"
             logger.error(msg)
             return False, msg
-            
+
         try:
             return self.move_to_joint([0.0, 0.0, 0.0, 0.0, 0.0, 0.0], speed=speed, acc=acc)
         except Exception as e:
@@ -475,10 +457,9 @@ class RobotService:
             msg = "go_fold: Robot is not connected"
             logger.error(msg)
             return False, msg
-            
+
         try:
             return self.move_to_joint([0.0, 0.0, -156.0, 0.0, -170.0, 0.0], speed=speed, acc=acc)
-            #return self.move_to_joint([0.0, 0.0, -156.0, 0.0, 0.0, 0.0], speed=speed, acc=acc)
         except Exception as e:
             msg = f"Error going fold: {e}"
             logger.error(msg)
@@ -490,7 +471,7 @@ class RobotService:
             msg = "go_home: Robot is not connected"
             logger.error(msg)
             return False, msg
-            
+
         try:
             res = self._driver.go_home(wait=True, velocity=speed, acc=acc)
             if res == 0:
@@ -524,7 +505,7 @@ class RobotService:
         for cb in self._ws_callbacks:
             try:
                 cb(payload)
-            except:
+            except Exception:
                 pass
 
     def start_status_polling(self, interval: float = 0.02):
@@ -547,24 +528,24 @@ class RobotService:
 
     def get_feedback_diagnostics(self) -> dict:
         """获取机械臂驱动层的实时动力学与诊断数据"""
-        if self._driver and hasattr(self._driver, 'get_feedback_diagnostics'):
+        if self._driver and hasattr(self._driver, "get_feedback_diagnostics"):
             try:
                 return self._driver.get_feedback_diagnostics()
             except Exception as e:
                 logger.warning(f"Error getting feedback diagnostics: {e}")
         return {
-            "tcp_speed_actual": [0.0]*6,
-            "qd_actual": [0.0]*6,
+            "tcp_speed_actual": [0.0] * 6,
+            "qd_actual": [0.0] * 6,
             "load": 0.0,
             "error_status": 0,
-            "tool_vector_actual": [0.0]*6,
+            "tool_vector_actual": [0.0] * 6,
             "hand_type": [0, 0, 0, 0],
             "tool_index": 0,
             "run_queued_cmd": 0,
             "velocity_ratio": 0,
             "xyz_velocity_ratio": 0,
             "r_velocity_ratio": 0,
-            "digital_outputs": [0]*16,
+            "digital_outputs": [0] * 16,
             "digital_output_bits": 0,
         }
 
@@ -577,11 +558,11 @@ class RobotService:
             joints, _ = self.get_current_joint()
             status = self._driver.get_running_state() if self._driver else 0
             diagnostics = self.get_feedback_diagnostics()
-            
+
             if status != last_status:
                 logger.info(f"Robot status changed: {status}")
                 last_status = status
-                
+
             if pose and joints:
                 current_error = diagnostics.get("error_status", 0)
                 if current_error != 0 and last_error_status == 0:
@@ -594,9 +575,9 @@ class RobotService:
                     "pose": pose,
                     "joint": joints,
                     "status": status,
-                    "tcp_speed_actual": diagnostics.get("tcp_speed_actual", [0.0]*6),
+                    "tcp_speed_actual": diagnostics.get("tcp_speed_actual", [0.0] * 6),
                     "tcp_speed_mm_s": diagnostics.get("tcp_speed_mm_s", 0.0),
-                    "qd_actual": diagnostics.get("qd_actual", [0.0]*6),
+                    "qd_actual": diagnostics.get("qd_actual", [0.0] * 6),
                     "load": diagnostics.get("load", 0.0),
                     "error_status": current_error,
                     "error_details": cached_error_details,
@@ -607,16 +588,15 @@ class RobotService:
                     "velocity_ratio": diagnostics.get("velocity_ratio", 0),
                     "xyz_velocity_ratio": diagnostics.get("xyz_velocity_ratio", 0),
                     "r_velocity_ratio": diagnostics.get("r_velocity_ratio", 0),
-                    "digital_outputs": diagnostics.get("digital_outputs", [0]*16),
+                    "digital_outputs": diagnostics.get("digital_outputs", [0] * 16),
                     "digital_output_bits": diagnostics.get("digital_output_bits", 0),
                 }
                 for cb in self._ws_callbacks:
                     try:
                         cb({"type": "robot_state", "data": msg_payload})
-                    except:
+                    except Exception:
                         pass
             time.sleep(interval)
-
 
     def pause(self) -> tuple[bool, str]:
         if not self._driver or not self._is_connected:
@@ -635,16 +615,22 @@ class RobotService:
         return success, "" if success else "Failed to resume robot"
 
     def clear_error(self) -> tuple[bool, str]:
-        if not self._is_connected or not self._driver:
-            return False, "Not connected"
+        if not self._driver or not self._is_connected:
+            return False, "Robot is not connected"
+        logger.info("clearing error...")
         try:
-            r = self._driver.dashboard.ClearError()
-            logger.info(f"ClearError: {r}")
-            # Dobot V3 protocol requires calling EnableRobot again to reopen the motion queue after an alarm is cleared.
-            time.sleep(0.5) # small delay before enabling
-            r2 = self._driver.dashboard.EnableRobot()
-            logger.info(f"EnableRobot after clear: {r2}")
-            return True, r
+            if hasattr(self._driver, "clear_error"):
+                self._driver.clear_error()
+                return True, ""
+            elif hasattr(self._driver, "dashboard"):
+                r = self._driver.dashboard.ClearError()
+                logger.info(f"ClearError: {r}")
+                # Dobot V3 protocol requires calling EnableRobot again to reopen the motion queue after an alarm is cleared.
+                time.sleep(0.5)
+                r2 = self._driver.dashboard.EnableRobot()
+                logger.info(f"EnableRobot after clear: {r2}")
+                return True, r
+            return True, ""
         except Exception as e:
             return False, str(e)
 
@@ -654,5 +640,6 @@ class RobotService:
         logger.info("estoping robot...")
         success = self._driver.estop()
         return success, "" if success else "Failed to estop robot"
+
 
 robot_service = RobotService()

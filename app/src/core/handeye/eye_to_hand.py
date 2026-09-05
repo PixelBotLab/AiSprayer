@@ -21,7 +21,8 @@ import numpy as np
 from scipy.spatial.transform import Rotation as Rot
 
 from .geometry import (
-    DOBOT_EULER_SEQ, make_transform, project_points, rotation_angle_deg,
+    DOBOT_EULER_SEQ, average_rotation, make_transform, project_points,
+    rotation_angle_deg,
 )
 from .samples import CalibSample
 
@@ -125,7 +126,7 @@ def solve(samples: Sequence[CalibSample],
             T_base_cam, t_base_cam, t_off, errs = solved
             mean_err = float(np.mean(errs))
             if best is None or mean_err < best[0]:
-                best = (mean_err, order, signs, T_base_cam, t_base_cam, t_off, errs)
+                best = (mean_err, order, signs, T_base_cam, t_base_cam, t_off, errs, R_flange)
             if mean_err < _EARLY_EXIT_MM and order == DOBOT_EULER_SEQ and signs == (1, 1, 1):
                 break
         if best and best[0] < _EARLY_EXIT_MM:
@@ -134,9 +135,8 @@ def solve(samples: Sequence[CalibSample],
     if best is None:
         return None
 
-    mean_err, order, signs, T_base_cam, t_base_cam, t_off, errs = best
+    mean_err, order, signs, T_base_cam, t_base_cam, t_off, errs, R_bt_list = best
 
-    R_bt_list = _rotations(samples, order, signs)
     R_flange_board, rotation_error = _mean_board_rotation_residual(samples, T_base_cam, R_bt_list)
 
     reproj_px = None
@@ -164,9 +164,6 @@ def _mean_board_rotation_residual(
     法兰到标定板的相对姿态 T_fb = T_flange_base · T_base_camera · T_camera_board
     应当与样本无关: 其均值即板在法兰系的安装旋转 (含面外倾角), 各样本到均值的
     角位移均值即旋转标定精度 (度)。
-
-    旧实现只报告角位移散差而不保留这个旋转, 导致重建标定板位姿时丢掉板的安装
-    倾角, 重投影误差无法闭合。
     """
     T_fb_list = []
     for s, R_bt in zip(samples, R_bt_list):
@@ -174,10 +171,7 @@ def _mean_board_rotation_residual(
         T_bt[:3, :3] = R_bt
         T_fb_list.append((np.linalg.inv(T_bt) @ T_base_camera @ s.T_camera_board)[:3, :3])
 
-    U, _, Vt = np.linalg.svd(np.mean(T_fb_list, axis=0))
-    R_fb = U @ Vt
-    if np.linalg.det(R_fb) < 0:
-        R_fb = Rot.from_matrix(np.mean(T_fb_list, axis=0)).as_matrix()
+    R_fb = average_rotation(T_fb_list)
     return np.asarray(R_fb, dtype=np.float64), float(np.mean(
         [rotation_angle_deg(R, R_fb) for R in T_fb_list]))
 
@@ -188,8 +182,6 @@ def _reprojection_error_px(samples: Sequence[CalibSample], T_base_camera: np.nda
                            D: Optional[Sequence[float]]) -> Optional[float]:
     """
     真·重投影误差: 由标定结果反推板角点在相机系的三维位置, 投影回像素后与实测角点比较。
-
-    旧实现只报告平移残差 (mm), 与像素域精度不成比例, 无法跨标定板尺寸比较。
     """
     usable = [(s, R_bt) for s, R_bt in zip(samples, R_bt_list)
               if s.obj_pts is not None and s.corners_px is not None]

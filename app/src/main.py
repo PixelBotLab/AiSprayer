@@ -70,12 +70,13 @@ logging.getLogger().addHandler(ws_log_handler)
 from db.database import engine, Base
 from apps.camera.api import camera_router
 from apps.calib.api import calib_router
+from apps.robot.api import robot_router
 from apps.follow.api import follow_router
 from apps.system.api import sys_router
 from apps.interactive.api import router as interactive_router
 from contextlib import asynccontextmanager
 from apps.camera.services.camera_service import camera_service
-from services.robot_service import robot_service
+from apps.robot.services.robot_service import robot_service
 
 # Create DB tables
 Base.metadata.create_all(bind=engine)
@@ -113,6 +114,7 @@ app.add_middleware(
 
 app.include_router(camera_router)
 app.include_router(calib_router)
+app.include_router(robot_router)
 app.include_router(follow_router)
 app.include_router(sys_router)
 app.include_router(interactive_router)

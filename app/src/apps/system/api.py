@@ -45,19 +45,19 @@ class CalibrationModeUpdate(BaseModel):
 
 @sys_router.post("/camera/calibration_mode")
 def set_calibration_mode(req: CalibrationModeUpdate):
-    from services.camera_service import camera_service
+    from apps.camera.services.camera_service import camera_service
     camera_service.set_calibration_mode(req.enabled)
     return {"status": "ok", "enabled": req.enabled}
 
 @sys_router.get("/camera/status")
 def get_camera_status():
-    from services.camera_service import camera_service
+    from apps.camera.services.camera_service import camera_service
     return camera_service.get_status()
 
 @sys_router.websocket("/camera/ws")
 async def websocket_camera_status(websocket: WebSocket):
     await websocket.accept()
-    from services.camera_service import camera_service
+    from apps.camera.services.camera_service import camera_service
     import asyncio
     
     # 1. Push immediate status on connect

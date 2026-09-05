@@ -10,8 +10,8 @@ import cv2
 import numpy as np
 import yaml
 from core.config import sprayer_config
-from services.camera_service import camera_service
-from services.robot_service import robot_service
+from apps.camera.services.camera_service import camera_service
+from apps.robot.services.robot_service import robot_service
 from apps.interactive.sam_service import sam_service
 from apps.interactive.reconstruction_service import reconstruction_service
 from apps.interactive.manual_path_service import manual_path_service
@@ -491,7 +491,7 @@ def get_robot_anchor_pose(source: str = "home"):
     1. Current live robot TCP pose (if connected)
     2. Robot Home pose TCP orientation
     """
-    from services.robot_service import robot_service
+    from apps.robot.services.robot_service import robot_service
     from core.motion.kinematics import CR5Kinematics
 
     solver = CR5Kinematics()

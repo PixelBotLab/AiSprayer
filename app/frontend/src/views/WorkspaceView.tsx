@@ -49,7 +49,7 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({
 
   useEffect(() => {
     const connect = () => {
-      const ws = new WebSocket(`${WS_BASE}/api/calib/robot/ws`);
+      const ws = new WebSocket(`${WS_BASE}/api/robot/ws`);
       ws.onmessage = (e) => {
         try {
           const msg = JSON.parse(e.data);

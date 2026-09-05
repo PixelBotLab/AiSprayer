@@ -87,7 +87,7 @@ const RobotZone: React.FC<RobotZoneProps> = ({
 }) => {
   const handleClearError = async () => {
     try {
-      const res = await fetch(`${API_BASE}/api/calib/robot/clear_error`, { method: 'POST' });
+      const res = await fetch(`${API_BASE}/api/robot/clear_error`, { method: 'POST' });
       if (!res.ok) {
         const error = await res.json();
         alert(`Clear Error failed: ${error.detail || 'Unknown error'}`);

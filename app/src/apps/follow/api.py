@@ -88,7 +88,7 @@ def stop_follow():
 async def follow_ws(websocket: WebSocket):
     """
     实时通道：`{"type":"follow_state","data":{...follow 快照..., joints_deg, target_pose}}`。
-    格式与 `/api/calib/robot/ws` 一致（同一个前端复用同一套 dispatch），去重在服务里做。
+    格式与 `/api/robot/ws` 一致（同一个前端复用同一套 dispatch），去重在服务里做。
     """
     await websocket.accept()
     loop = asyncio.get_running_loop()

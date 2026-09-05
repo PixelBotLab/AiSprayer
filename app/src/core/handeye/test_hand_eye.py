@@ -6,7 +6,7 @@
 重投影误差口径"的手段: 用已知真值正向生成观测, 再让求解器反解, 比对还原误差。
 
 运行:
-    cd app/src && python3 -m apps.calib.services.hand_eye.test_hand_eye
+    cd app/src && ../.venv/bin/python -m unittest core.handeye.test_hand_eye
 """
 from __future__ import annotations
 
@@ -18,9 +18,9 @@ import numpy as np
 import cv2
 from scipy.spatial.transform import Rotation as Rot
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../..")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
-from apps.calib.services.hand_eye import (  # noqa: E402
+from core.handeye import (  # noqa: E402
     EYE_IN_HAND, EYE_TO_HAND, CalibSample, chessboard_object_points, clean_samples,
     evaluate_data_quality, invert_transform, make_transform, pose_to_matrix,
     solve_hand_eye,
@@ -98,19 +98,24 @@ class EyeToHandTest(unittest.TestCase):
         samples = _make_samples(T_flange, T_cam_board)
 
         sol = solve_hand_eye(EYE_TO_HAND, samples, K=K, D=None)
-        self.assertIsNotNone(sol, "eye-to-hand solver returned None")
-
+        self.assertIsNotNone(sol, "solver should return a solution")
         t_err = np.linalg.norm(sol.T_base_camera[:3, 3] - self.T_BASE_CAMERA[:3, 3])
-        r_err = np.degrees(np.arccos(np.clip(
-            (np.trace(sol.T_base_camera[:3, :3].T @ self.T_BASE_CAMERA[:3, :3]) - 1.0) / 2.0,
-            -1.0, 1.0)))
-        self.assertLess(t_err, 1.0, f"camera translation off by {t_err:.3f} mm")
-        self.assertLess(r_err, 0.5, f"camera rotation off by {r_err:.3f} deg")
+        self.assertLess(t_err, 0.5, f"camera translation off by {t_err:.3f} mm")
+        self.assertLess(sol.translation_error_mm, 0.1)
+        self.assertLess(sol.rotation_error_deg, 0.1)
+        self.assertEqual(sol.euler_order, "xyz")
+        self.assertEqual(sol.sign_vector, (1, 1, 1))
 
+    def test_recovers_board_offset(self):
+        T_flange, T_cam_board = self._build()
+        samples = _make_samples(T_flange, T_cam_board)
+
+        sol = solve_hand_eye(EYE_TO_HAND, samples, K=K, D=None)
+        self.assertIsNotNone(sol)
         off_err = np.linalg.norm(sol.board_offset_flange_mm - self.T_FLANGE_BOARD[:3, 3])
-        self.assertLess(off_err, 1.0, f"board TCP offset off by {off_err:.3f} mm")
+        self.assertLess(off_err, 0.5, f"board offset off by {off_err:.3f} mm")
 
-    def test_reports_pixel_reprojection_error(self):
+    def test_reports_reprojection_error(self):
         T_flange, T_cam_board = self._build()
         samples = _make_samples(T_flange, T_cam_board)
         sol = solve_hand_eye(EYE_TO_HAND, samples, K=K, D=None)
@@ -145,8 +150,8 @@ class EyeInHandTest(unittest.TestCase):
         np.array([45.0, -12.0, 68.0]),
     )
     T_BASE_BOARD = make_transform(
-        Rot.from_euler("xyz", [10.0, -5.0, 40.0], degrees=True).as_matrix(),
-        np.array([500.0, 120.0, -150.0]),
+        Rot.from_euler("xyz", [0.0, 0.0, 15.0], degrees=True).as_matrix(),
+        np.array([550.0, 10.0, -50.0]),
     )
 
     def _build(self, n=12, seed=5):
@@ -238,7 +243,7 @@ class SharedQualityTest(unittest.TestCase):
         self.assertTrue(np.allclose(T[:3, 3], pose[:3]))
 
     def test_radian_input_is_normalized(self):
-        from apps.calib.services.hand_eye import UNIT_RAD
+        from core.handeye import UNIT_RAD
         pose_rad = [400.0, -90.0, 200.0, np.radians(148.0), 0.0, np.radians(98.0)]
         T_rad = pose_to_matrix(pose_rad, angle_unit=UNIT_RAD)
         T_deg = pose_to_matrix([400.0, -90.0, 200.0, 148.0, 0.0, 98.0])
