@@ -12,7 +12,11 @@
 #include "config.hpp"
 #include "camera_driver.hpp"
 #include "rga_processor.hpp"
+#ifdef HAS_MPP
 #include "mpp_encoder.hpp"
+#else
+#include "software_encoder.hpp"
+#endif
 #include "zlm_streamer.hpp"
 #include "corner_detector.hpp"
 #include "async_disk_writer.hpp"
@@ -97,6 +101,8 @@ int main(int argc, char** argv) {
     std::string config_path = "";
     bool raw_log = false;
     int stats_interval_sec = -1;
+    bool replay_cli_flag = false;
+    std::string replay_cli_path = "";
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -104,6 +110,11 @@ int main(int argc, char** argv) {
             config_path = argv[++i];
         } else if (arg == "--raw-log" || arg == "--simple-log") {
             raw_log = true;
+        } else if (arg == "--replay") {
+            replay_cli_flag = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') {
+                replay_cli_path = argv[++i];
+            }
         } else if ((arg == "--stats-interval" || arg == "--report-interval" || arg == "-i") && i + 1 < argc) {
             try {
                 stats_interval_sec = std::stoi(argv[++i]);
@@ -121,6 +132,11 @@ int main(int argc, char** argv) {
 
     // 1. Load Configuration
     AppConfig config = ConfigLoader::load(config_path);
+
+    if (replay_cli_flag) {
+        config.replay_path = replay_cli_path.empty() ? "synthetic" : replay_cli_path;
+        LOG_INFO("Main", "Replay mode requested via CLI flag: '", config.replay_path, "'");
+    }
 
     if (stats_interval_sec < 0) {
         stats_interval_sec = config.stats_interval_sec;
@@ -154,12 +170,20 @@ int main(int argc, char** argv) {
     // 即便 follow 配置被 block，这个键仍按解析结果交给 CameraDriver：默认 true，关了必须两边一起关。
     config.enable_imu = fcfg.capture.enable_imu;
 
+#ifdef HAS_MPP
     LOG_INFO("Main", "Initializing Core Subsystems on RK3588 (Stats report interval: ", stats_interval_sec, "s)...");
+#else
+    LOG_INFO("Main", "Initializing Core Subsystems (software encode, stats interval: ", stats_interval_sec, "s)...");
+#endif
 
     // 2. Instantiate Subsystems
     auto camera = std::make_shared<CameraDriver>();
     auto rga = std::make_shared<RgaProcessor>();
+#ifdef HAS_MPP
     auto mpp = std::make_shared<MppEncoder>();
+#else
+    auto mpp = std::make_shared<SoftwareH264Encoder>();
+#endif
     auto zlm = std::make_shared<ZlmStreamer>();
     auto corner_detector = std::make_shared<CornerDetector>();
     auto disk_writer = std::make_shared<AsyncDiskWriter>();
@@ -171,8 +195,13 @@ int main(int argc, char** argv) {
         LOG_WARN("Main", "RGA Processor initialization returned warning.");
     }
 
-    if (!mpp->init(config.stream_width, config.stream_height, config.stream_fps, config.stream_bitrate_kbps)) {
-        LOG_ERROR("Main", "MPP Hardware Encoder initialization failed!");
+    bool enc_ok = mpp->init(config.stream_width, config.stream_height, config.stream_fps, config.stream_bitrate_kbps);
+    if (!enc_ok) {
+#ifdef HAS_MPP
+        LOG_ERROR("Main", "MPP Hardware Encoder initialization failed! Video streaming will be disabled.");
+#else
+        LOG_ERROR("Main", "Software H264 Encoder initialization failed! Video streaming will be disabled.");
+#endif
     }
 
     if (!zlm->init(config)) {
@@ -185,6 +214,16 @@ int main(int argc, char** argv) {
 
     if (!camera->init(config)) {
         LOG_ERROR("Main", "Camera Driver initialization failed!");
+    }
+
+    if (enc_ok) {
+#ifdef HAS_MPP
+        camera->setEncoderStatus("RK_MPP_H264", true);
+#else
+        camera->setEncoderStatus("OPENH264", true);
+#endif
+    } else {
+        camera->setEncoderStatus("none", false);
     }
 
     // follow 作为库跑在本进程里（默认不使能）。线程一上来就睡着，除非有人 POST /follow。
@@ -298,7 +337,8 @@ int main(int argc, char** argv) {
                      << " ms | max = " << std::setw(5) << stats.total_pipeline.getMax() << " ms";
 
             LOG_INFO("Status", "=== [Service Health & Stage Latency Report] ===");
-            LOG_INFO("Status", "  Camera Device   : [Model: ", st.camera_model, ", Online: ", (st.online ? "YES" : "NO"), 
+            LOG_INFO("Status", "  Camera Device   : [Model: ", st.camera_model, ", Source: ", st.source,
+                     ", Online: ", (st.online ? "YES" : "NO"),
                      ", Capture FPS: ", st.color_fps, ", Depth Stream: ", (st.depth_stream_enabled ? "\033[32mON\033[0m" : "\033[33mOFF (Calib Mode)\033[0m"), 
                      ", Depth Align: ", (st.depth_align_enabled ? "\033[32mON\033[0m" : "\033[33mOFF\033[0m"), 
                      ", Total Frames: ", st.total_frames, "]");
@@ -338,12 +378,21 @@ int main(int argc, char** argv) {
                 LOG_INFO("Status", "  * [Corner Worker] : OFF (skipped)");
             }
 
+#ifdef HAS_MPP
             LOG_INFO("Status", "  * [RGA BGR->NV12] : ", ss_rga.str());
             LOG_INFO("Status", "  * [MPP H.264 Enc] : ", ss_mpp.str());
             LOG_INFO("Status", "  * [ZLM StreamPush]: ", ss_zlm.str());
             LOG_INFO("Status", "  * [Total Pipeline]: ", ss_total.str());
-            LOG_INFO("Status", "  Hardware Engines: RGA2D=ACTIVE | MPP=ACTIVE | Mali-GPU=", 
+            LOG_INFO("Status", "  Hardware Engines: RGA2D=ACTIVE | MPP=ACTIVE | Mali-GPU=",
                      (corner_detector->isGpuAccelerated() ? "ACTIVE (OpenCL)" : "Disabled"));
+#else
+            LOG_INFO("Status", "  * [CPU BGR->NV12] : ", ss_rga.str());
+            LOG_INFO("Status", "  * [OpenH264 Enc]  : ", ss_mpp.str());
+            LOG_INFO("Status", "  * [ZLM StreamPush]: ", ss_zlm.str());
+            LOG_INFO("Status", "  * [Total Pipeline]: ", ss_total.str());
+            LOG_INFO("Status", "  Software path: OpenH264 | OpenCL=",
+                     (corner_detector->isGpuAccelerated() ? "ON" : "OFF"));
+#endif
             LOG_INFO("Status", "  Endpoints: HTTP-FLV: ", s_info.http_flv_url, " | RTSP: ", s_info.rtsp_url);
 
             stats.reset();

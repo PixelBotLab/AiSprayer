@@ -11,9 +11,8 @@ import numpy as np
 
 try:
     import pyrealsense2 as rs
-except ImportError:
-    print("错误: 请安装 pyrealsense2: pip install pyrealsense2")
-    sys.exit(1)
+except ImportError as e:
+    raise ImportError("请安装 pyrealsense2: pip install pyrealsense2") from e
 
 class RealSenseDriver:
     """Intel RealSense 相机驱动封装类"""

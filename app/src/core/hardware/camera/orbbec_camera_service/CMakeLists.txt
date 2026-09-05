@@ -5,13 +5,12 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Optimization flags for RK3588 (4x Cortex-A76 + 4x Cortex-A55) with ARM NEON / SIMD / FP16
-set(ARM_ARCH_FLAGS "-mcpu=cortex-a76.cortex-a55 -mtune=cortex-a76 -ftree-vectorize -fomit-frame-pointer")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 ${ARM_ARCH_FLAGS} -Wall -Wno-unused-function -pthread -fopenmp")
+include("${CMAKE_CURRENT_SOURCE_DIR}/../../../../../cmake/platform.cmake")
 
-# Resolve Project Root and Third Party Directory
-get_filename_component(PROJECT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../.." ABSOLUTE)
-set(THIRD_PARTY_INSTALL_DIR "${PROJECT_ROOT}/third_party/install")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 ${AIS_ARCH_FLAGS} -Wall -Wno-unused-function -pthread")
+
+set(PROJECT_ROOT "${AIS_PROJECT_ROOT}")
+set(THIRD_PARTY_INSTALL_DIR "${AIS_THIRD_PARTY_DIR}")
 
 message(STATUS "Project Root: ${PROJECT_ROOT}")
 message(STATUS "Third Party Install Dir: ${THIRD_PARTY_INSTALL_DIR}")
@@ -20,16 +19,19 @@ message(STATUS "Third Party Install Dir: ${THIRD_PARTY_INSTALL_DIR}")
 include_directories(
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${THIRD_PARTY_INSTALL_DIR}/include
-    ${THIRD_PARTY_INSTALL_DIR}/include/rockchip
     ${THIRD_PARTY_INSTALL_DIR}/include/libobsensor
     /usr/include
 )
+if(ENABLE_RK3588)
+    include_directories(${THIRD_PARTY_INSTALL_DIR}/include/rockchip)
+endif()
 
 # Link directories
-link_directories(
-    ${THIRD_PARTY_INSTALL_DIR}/lib
-    /usr/lib/aarch64-linux-gnu
-)
+set(_AIS_LINK_DIRS ${THIRD_PARTY_INSTALL_DIR}/lib)
+if(AIS_SYS_LIBDIR)
+    list(APPEND _AIS_LINK_DIRS ${AIS_SYS_LIBDIR})
+endif()
+link_directories(${_AIS_LINK_DIRS})
 
 # Find OpenCV
 find_package(OpenCV REQUIRED core imgproc imgcodecs calib3d)
@@ -46,7 +48,14 @@ endif()
 # follow 把 Eigen3::Eigen / OpenMP::OpenMP_CXX 作为 PUBLIC 依赖往外传，而**非 GLOBAL 的
 # imported target 不会从子目录向上冒**：不在本作用域先 find_package，configure 就会以
 # "no such target" 收场。这两个包板子上都是现成的（/usr/share/eigen3/cmake、系统 OpenMP）。
-find_package(OpenMP REQUIRED)
+find_package(OpenMP)
+if(NOT OpenMP_CXX_FOUND)
+    if(APPLE)
+        message(FATAL_ERROR "OpenMP not found. brew install libomp && export OpenMP_ROOT=$(brew --prefix libomp)")
+    else()
+        message(FATAL_ERROR "OpenMP is required")
+    endif()
+endif()
 find_package(Eigen3 3.3 REQUIRED NO_MODULE)
 
 # ----------------------------------------------------------------------------------
@@ -69,8 +78,8 @@ add_subdirectory("${FOLLOW_DIR}" "${CMAKE_BINARY_DIR}/follow")
 set(SOURCES
     src/main.cpp
     src/camera_driver.cpp
+    src/replay_frame_source.cpp
     src/rga_processor.cpp
-    src/mpp_encoder.cpp
     src/zlm_streamer.cpp
     src/corner_detector.cpp
     src/async_disk_writer.cpp
@@ -80,21 +89,66 @@ set(SOURCES
     src/http_server.cpp
 )
 
+if(ENABLE_RK3588)
+    set(_DEF_ENABLE_ORBBEC ON)
+else()
+    if(AIS_ORBBEC_LIB)
+        set(_DEF_ENABLE_ORBBEC ON)
+    else()
+        set(_DEF_ENABLE_ORBBEC OFF)
+    endif()
+endif()
+option(ENABLE_ORBBEC "Enable Orbbec hardware camera SDK support" ${_DEF_ENABLE_ORBBEC})
+
+if(ENABLE_ORBBEC)
+    if(NOT AIS_ORBBEC_LIB)
+        message(FATAL_ERROR
+            "ENABLE_ORBBEC=ON but Orbbec SDK not found (${AIS_ORBBEC_LIB}). "
+            "Run app/scripts/build.sh, or configure with -DENABLE_ORBBEC=OFF to build with Replay/Synthetic source only.")
+    endif()
+    add_compile_definitions(HAS_ORBBEC=1)
+    message(STATUS "Orbbec SDK hardware camera enabled: ${AIS_ORBBEC_LIB}")
+else()
+    add_compile_definitions(HAS_ORBBEC=0)
+    message(STATUS "Orbbec SDK hardware camera disabled. Building in Replay / Synthetic mode only.")
+endif()
+
+if(ENABLE_RK3588)
+    list(APPEND SOURCES src/mpp_encoder.cpp)
+else()
+    if(NOT AIS_MK_API_LIB OR NOT AIS_OPENH264_LIB)
+        message(FATAL_ERROR
+            "Generic camera build needs mk_api and OpenH264 in ${THIRD_PARTY_INSTALL_DIR}/lib. "
+            "Run app/scripts/build.sh")
+    endif()
+    list(APPEND SOURCES src/software_encoder.cpp)
+endif()
+
 # Executable target
 add_executable(orbbec_camera_service ${SOURCES})
 
 # Target link libraries
-target_link_libraries(orbbec_camera_service
-    PRIVATE
-    follow            # 工位跟随的算法核心（含 vendored small_gicp）
-    follow_config     # 读 configs/aisprayer_config.yaml 里那个 follow: 块
-    OpenMP::OpenMP_CXX  # small_gicp 的并行后端就是 OMP；编译有 -fopenmp，链接也得带上
+# RK3588 keeps the same four prebuilt .so paths as before so the link line does not change.
+set(_AIS_CAM_LIBS
+    follow
+    follow_config
+    OpenMP::OpenMP_CXX
     ${OpenCV_LIBS}
     ${YAML_CPP_LIB}
-    ${THIRD_PARTY_INSTALL_DIR}/lib/libOrbbecSDK.so
-    ${THIRD_PARTY_INSTALL_DIR}/lib/librga.so
-    ${THIRD_PARTY_INSTALL_DIR}/lib/librockchip_mpp.so
-    ${THIRD_PARTY_INSTALL_DIR}/lib/libmk_api.so
+    ${AIS_MK_API_LIB}
+)
+if(ENABLE_ORBBEC)
+    list(APPEND _AIS_CAM_LIBS ${AIS_ORBBEC_LIB})
+endif()
+if(ENABLE_RK3588)
+    list(APPEND _AIS_CAM_LIBS ${AIS_RGA_LIB} ${AIS_MPP_LIB})
+else()
+    list(APPEND _AIS_CAM_LIBS ${AIS_OPENH264_LIB})
+endif()
+
+target_link_libraries(orbbec_camera_service
+    PRIVATE
+    ${_AIS_CAM_LIBS}
     pthread
     dl
 )
@@ -141,3 +195,9 @@ endif()
 set_target_properties(orbbec_camera_service PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/bin"
 )
+if(NOT ENABLE_RK3588)
+    set_target_properties(orbbec_camera_service PROPERTIES
+        BUILD_RPATH "${THIRD_PARTY_INSTALL_DIR}/lib"
+        INSTALL_RPATH "${THIRD_PARTY_INSTALL_DIR}/lib"
+    )
+endif()

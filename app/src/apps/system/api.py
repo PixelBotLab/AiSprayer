@@ -40,44 +40,4 @@ async def websocket_logs(websocket: WebSocket):
     except WebSocketDisconnect:
         log_service.disconnect(websocket)
 
-class CalibrationModeUpdate(BaseModel):
-    enabled: bool
-
-@sys_router.post("/camera/calibration_mode")
-def set_calibration_mode(req: CalibrationModeUpdate):
-    from apps.camera.services.camera_service import camera_service
-    camera_service.set_calibration_mode(req.enabled)
-    return {"status": "ok", "enabled": req.enabled}
-
-@sys_router.get("/camera/status")
-def get_camera_status():
-    from apps.camera.services.camera_service import camera_service
-    return camera_service.get_status()
-
-@sys_router.websocket("/camera/ws")
-async def websocket_camera_status(websocket: WebSocket):
-    await websocket.accept()
-    from apps.camera.services.camera_service import camera_service
-    import asyncio
-    
-    # 1. Push immediate status on connect
-    await websocket.send_json(camera_service.get_status())
-    
-    loop = asyncio.get_running_loop()
-    
-    def on_status_change(status: dict):
-        if not loop.is_closed():
-            loop.call_soon_threadsafe(
-                lambda: asyncio.create_task(websocket.send_json(status))
-            )
-            
-    camera_service.register_status_callback(on_status_change)
-    try:
-        while True:
-            await websocket.receive_text()
-    except WebSocketDisconnect:
-        pass
-    finally:
-        camera_service.unregister_status_callback(on_status_change)
-
 

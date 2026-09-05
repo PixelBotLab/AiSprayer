@@ -29,11 +29,6 @@ public:
     bool encodeDirect(uint8_t* out_h264_buf, int max_out_len, int& out_len, 
                       bool& is_keyframe, uint64_t pts = 0);
 
-    // Legacy fallback encode
-    bool encode(const uint8_t* nv12_data, int data_size, 
-                uint8_t* out_h264_buf, int max_out_len, int& out_len, 
-                bool& is_keyframe, uint64_t pts = 0);
-
     bool isInitialized() const { return initialized_; }
     int getWidth() const { return width_; }
     int getHeight() const { return height_; }

@@ -16,11 +16,7 @@ public:
     bool init(int width, int height);
     void release();
 
-    // Convert BGR888 or RGB888 image to NV12 (YUV420SP)
     bool bgrToNv12(const cv::Mat& src_bgr, uint8_t* dst_nv12, int dst_width = 0, int dst_height = 0);
-    bool rgbToNv12(const uint8_t* src_rgb, int src_w, int src_h, uint8_t* dst_nv12, int dst_w, int dst_h);
-
-    bool isRgaAvailable() const { return rga_available_; }
 
 private:
     bool rga_available_ = false;

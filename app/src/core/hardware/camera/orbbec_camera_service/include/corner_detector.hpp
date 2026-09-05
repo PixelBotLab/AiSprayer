@@ -38,9 +38,6 @@ public:
     // Asynchronous feed: non-blocking, updates background worker target frame
     void feedFrame(const cv::Mat& bgr_image);
 
-    // Synchronous detection (for manual snapshot testing) on 100% full original resolution
-    bool detectSync(const cv::Mat& bgr_image, DetectedCorners& out_corners);
-
     // Draw cached detected corners onto image for video stream overlay (< 0.2ms)
     void drawOverlay(cv::Mat& bgr_image);
 

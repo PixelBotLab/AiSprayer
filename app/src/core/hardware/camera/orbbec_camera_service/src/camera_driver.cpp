@@ -1,5 +1,7 @@
 #include "camera_driver.hpp"
+#if HAS_ORBBEC
 #include <libobsensor/ObSensor.hpp>
+#endif
 #include <opencv2/imgproc.hpp>
 #include <opencv2/imgcodecs.hpp>
 #include <chrono>
@@ -21,10 +23,57 @@ bool CameraDriver::init(const AppConfig& config) {
     status_.depth_stream_enabled = !calib_mode_;
     status_.depth_align_enabled = (!calib_mode_ && config.enable_depth_align);
 
+#if !HAS_ORBBEC
+    if (config_.replay_path.empty()) {
+        config_.replay_path = "synthetic";
+    }
+    replay_mode_ = true;
+#else
+    if (!config_.replay_path.empty()) {
+        replay_mode_ = true;
+    }
+#endif
+
+    if (replay_mode_) {
+        if (!replay_source_.init(config_.replay_path, config_.camera_width, config_.camera_height,
+                                 config_.camera_fps)) {
+            LOG_ERROR("Camera", "Replay / synthetic source failed to initialize (path: '",
+                      config_.replay_path, "'). Refusing to start a fake camera.");
+            replay_mode_ = false;
+            return false;
+        }
+        const bool file_replay = replay_source_.isFileReplay();
+        {
+            std::lock_guard<std::mutex> lock(status_mutex_);
+            status_.source = file_replay ? "replay" : "synthetic";
+            status_.intrinsics_loaded = false;
+            status_.camera_model = file_replay ? "Replay" : "Synthetic";
+        }
+        // 零内参写入成员，避免磁盘写出 Gemini 默认 fx；follow 仍以 intrinsics_loaded=false 拒绝。
+        intrinsics_ = replay_source_.getIntrinsics();
+        LOG_INFO("Camera", "Initializing Camera Driver in ", (file_replay ? "REPLAY" : "SYNTHETIC"),
+                 " mode (Path: '", config_.replay_path, "', Target: ", config_.camera_width, "x",
+                 config_.camera_height, " @ ", config_.camera_fps, "fps). Intrinsics are untrusted.");
+        return true;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        status_.source = "orbbec";
+    }
     LOG_INFO("Camera", "Initializing Orbbec Camera Driver (Target resolution: ", 
              config_.camera_width, "x", config_.camera_height, " @ ", config_.camera_fps, 
              "fps, Initial Mode: ", (calib_mode_ ? "Calibration (Depth OFF)" : "Normal (Depth ON)"), ")");
     return true;
+}
+
+void CameraDriver::setEncoderStatus(const std::string& encoder, bool stream_ok) {
+    std::lock_guard<std::mutex> lock(status_mutex_);
+    status_.encoder = encoder;
+    encoder_ready_ = stream_ok;
+    if (!stream_ok) {
+        status_.streaming = false;
+    }
 }
 
 bool CameraDriver::start() {
@@ -33,10 +82,40 @@ bool CameraDriver::start() {
         return true;
     }
 
+    if (replay_mode_) {
+        running_ = true;
+        connected_ = true;
+        {
+            std::lock_guard<std::mutex> lock(status_mutex_);
+            status_.online = true;
+            // 编码器已失败时不要把 streaming 改回 true，否则 /status 再次假装在推流。
+            if (encoder_ready_) {
+                status_.streaming = true;
+            }
+            const bool file_replay = replay_source_.isFileReplay();
+            status_.source = file_replay ? "replay" : "synthetic";
+            status_.camera_model = file_replay ? "Replay" : "Synthetic";
+            status_.serial_number = file_replay ? "REPLAY" : "SYNTHETIC";
+            status_.firmware_version = "n/a";
+            status_.capture_width = replay_source_.getWidth();
+            status_.capture_height = replay_source_.getHeight();
+            status_.capture_fps = replay_source_.getFps();
+            status_.intrinsics_loaded = false;
+        }
+        capture_thread_ = std::thread(&CameraDriver::replayCaptureLoop, this);
+        LOG_INFO("Camera", "Replay camera capture thread started.");
+        return true;
+    }
+
+#if HAS_ORBBEC
     running_ = true;
     capture_thread_ = std::thread(&CameraDriver::captureLoop, this);
     LOG_INFO("Camera", "Camera capture thread started.");
     return true;
+#else
+    LOG_ERROR("Camera", "HAS_ORBBEC is not enabled and replay mode is not active.");
+    return false;
+#endif
 }
 
 void CameraDriver::stop() {
@@ -49,10 +128,24 @@ void CameraDriver::stop() {
         capture_thread_.join();
     }
 
+    if (replay_mode_) {
+        replay_source_.reset();
+        {
+            std::lock_guard<std::mutex> lock(status_mutex_);
+            status_.online = false;
+            status_.streaming = false;
+        }
+        LOG_INFO("Camera", "Replay camera driver stopped.");
+        return;
+    }
+
+#if HAS_ORBBEC
     resetHardwareConnection();
+#endif
     LOG_INFO("Camera", "Camera driver stopped.");
 }
 
+#if HAS_ORBBEC
 void CameraDriver::stopPipelineAndSensors() {
     if (gyro_sensor_) {
         try {
@@ -528,6 +621,7 @@ bool CameraDriver::refreshIntrinsics() {
     }
     return true;
 }
+#endif // HAS_ORBBEC
 
 bool CameraDriver::setCalibrationMode(bool enabled) {
     if (calib_mode_ == enabled && connected_) {
@@ -548,6 +642,14 @@ bool CameraDriver::setCalibrationMode(bool enabled) {
 
     calib_mode_ = enabled;
 
+    if (replay_mode_) {
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        status_.calibration_mode = calib_mode_;
+        status_.depth_stream_enabled = !calib_mode_;
+        return true;
+    }
+
+#if HAS_ORBBEC
     std::lock_guard<std::mutex> lock(pipe_mutex_);
     if (!pipe_ || !connected_) {
         return true;
@@ -555,6 +657,9 @@ bool CameraDriver::setCalibrationMode(bool enabled) {
 
     stopPipelineAndSensors();
     return configureAndStartPipeline();
+#else
+    return true;
+#endif
 }
 
 bool CameraDriver::setFollowProfile(bool enabled, int width, int height, int fps,
@@ -570,6 +675,21 @@ bool CameraDriver::setFollowProfile(bool enabled, int width, int height, int fps
     const int h = height > 0 ? height : 480;
     const int f_fps = fps > 0 ? fps : 15;
 
+    if (replay_mode_) {
+        follow_mode_ = enabled;
+        follow_width_ = w;
+        follow_height_ = h;
+        follow_fps_ = f_fps;
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        status_.follow_profile = enabled;
+        // 回放不会真的换档，status 必须报实际出帧尺寸，不能写成 follow 请求的 640x480。
+        status_.capture_width = replay_source_.getWidth();
+        status_.capture_height = replay_source_.getHeight();
+        status_.capture_fps = replay_source_.getFps();
+        return true;
+    }
+
+#if HAS_ORBBEC
     int64_t t0 = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
     std::lock_guard<std::mutex> lock(pipe_mutex_);
     int64_t t1 = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -632,8 +752,41 @@ bool CameraDriver::setFollowProfile(bool enabled, int width, int height, int fps
                (rolled_back ? "已回滚到切换前档位" : "回滚也失败，等自动重连");
     }
     return false;
+#else
+    return false;
+#endif
 }
 
+void CameraDriver::replayCaptureLoop() {
+    LOG_INFO("Camera", "Entering replay capture loop.");
+    last_stat_time_ms_ = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    while (running_) {
+        FrameData cur_frame;
+        if (!replay_source_.getNextFrame(cur_frame)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+
+        if (calib_mode_) {
+            cur_frame.has_depth = false;
+            cur_frame.depth.release();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(frame_mutex_);
+            latest_frame_ = cur_frame;
+        }
+        frame_cv_.notify_all();
+
+        updateFpsStats();
+    }
+
+    LOG_INFO("Camera", "Replay capture loop terminated.");
+}
+
+#if HAS_ORBBEC
 void CameraDriver::captureLoop() {
     LOG_INFO("Camera", "Entering high-speed capture loop.");
     last_stat_time_ms_ = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -807,6 +960,7 @@ void CameraDriver::captureLoop() {
 
     LOG_INFO("Camera", "Capture loop terminated.");
 }
+#endif
 
 void CameraDriver::updateFpsStats() {
     auto now_ms = (uint64_t)std::chrono::duration_cast<std::chrono::milliseconds>(

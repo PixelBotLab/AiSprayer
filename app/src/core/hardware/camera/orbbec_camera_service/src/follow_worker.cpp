@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <pthread.h>
 #include <thread>
 #include <vector>
 
@@ -13,6 +12,7 @@
 #include "follow/teach_core.hpp"
 #include "follow/types.hpp"
 #include "logger.hpp"
+#include "platform_thread.hpp"
 
 namespace orbbec_service {
 
@@ -283,6 +283,10 @@ bool FollowWorker::frameUsable(const FrameData& fd, std::string* why) const {
 
     if (!st.online || !st.streaming) {
         *why = "相机不在线";
+        return false;
+    }
+    if (st.source != "orbbec") {
+        *why = "取流来源是 " + st.source + "，不是真机，拒绝 follow";
         return false;
     }
     // 内参必须是设备给的。编译期那套默认值（fx≈611.68 @1280x800）"看起来像个内参"，而拿它去
@@ -652,21 +656,23 @@ void FollowWorker::loop() {
     // `track.threads` 的注释一直写着"绑 A76"，但从来没有任何一处真的设过亲和性 —— 实测进程
     // 76 条线程里 71 条的允许集是 0-7，落核全凭 EAS；A55@1.8G 上同样的数学慢约 5 倍，而那
     // 只会表现成"偶尔慢一帧"，从输出上看不出任何原因。命名是为了事后能从 /proc 认出它。
-    pthread_setname_np(pthread_self(), "follow_worker");
-    cpu_set_t big_cores;
-    CPU_ZERO(&big_cores);
-    for (const int cpu : {4, 5, 6, 7}) {   // RK3588 的 4×A76，与 corner_detector 同一约定
-        CPU_SET(cpu, &big_cores);
-    }
-    if (pthread_setaffinity_np(pthread_self(), sizeof(big_cores), &big_cores) != 0) {
+    set_current_thread_name("follow_worker");
+#ifdef HAS_RK3588
+    if (!pin_current_thread_to_rk3588_big_cores()) {
         LOG_WARN("Follow", "跟随线程绑大核失败：落核交给调度器，单帧成本可能出现数倍抖动且无从归因");
     }
+#endif
     // OpenCV 并行度此前只由 corner_detector 里那次**进程级** setNumThreads(2) 决定（谁先初始化
     // 谁说了算），而实测前端 extract 28ms = 单帧成本的 53%，正是被这两条线程卡住的。
     const int cv_threads = std::max(1, cfg_.track.threads);
     cv::setNumThreads(cv_threads);
+#ifdef HAS_RK3588
     LOG_INFO("Follow", "跟随线程就绪：绑 A76(4-7)，OpenCV 并行度 ", cv_threads,
              "（生效 ", cv::getNumThreads(), "）");
+#else
+    LOG_INFO("Follow", "跟随线程就绪：OpenCV 并行度 ", cv_threads,
+             "（生效 ", cv::getNumThreads(), "）");
+#endif
 
     fps_window_ms_ = steady_now_ms();
 

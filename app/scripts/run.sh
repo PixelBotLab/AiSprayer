@@ -45,7 +45,11 @@ pkill -9 -f "orbbec_camera_service" 2>/dev/null
 
 echo "Checking and freeing required ports..."
 for port in 8000 5173 18080 8554 8008 1935; do
-    lsof -t -i :$port | xargs -r kill -9 2>/dev/null
+    pids=$(lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+    if [ -n "$pids" ]; then
+        # shellcheck disable=SC2086
+        kill -9 $pids 2>/dev/null || true
+    fi
 done
 
 # Give OS a moment to reap processes
@@ -76,8 +80,12 @@ npm run dev 2>&1 | tee -a "$FRONTEND_LOG" &
 FRONTEND_PID=$!
 echo "Frontend started with PID: $FRONTEND_PID"
 
-LAN_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
-[ -z "$LAN_IP" ] && LAN_IP="127.0.0.1"
+if [ "$(uname -s)" = Darwin ]; then
+    LAN_IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)
+else
+    LAN_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+fi
+LAN_IP=${LAN_IP:-127.0.0.1}
 
 echo "=========================================="
 echo "AiSprayer is now running!"
@@ -107,7 +115,11 @@ cleanup() {
     # 3. Forcefully free ports
     echo "Forcefully freeing required ports..."
     for port in 8000 5173 18080 8554 8008 1935; do
-        lsof -t -i :$port | xargs -r kill -9 2>/dev/null
+        pids=$(lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+        if [ -n "$pids" ]; then
+            # shellcheck disable=SC2086
+            kill -9 $pids 2>/dev/null || true
+        fi
     done
     
     # 4. Restoring file ownership to target user so root files are never left behind

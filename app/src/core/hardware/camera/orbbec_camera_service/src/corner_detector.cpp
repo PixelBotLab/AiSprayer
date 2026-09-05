@@ -1,28 +1,19 @@
 #include "corner_detector.hpp"
+#include "platform_thread.hpp"
 #include <opencv2/imgproc.hpp>
 #include <opencv2/calib3d.hpp>
-#include <pthread.h>
-#include <sched.h>
 
 namespace orbbec_service {
 
 static void bindThreadToBigCores() {
-    cpu_set_t cpuset;
-    CPU_ZERO(&cpuset);
-    // RK3588 Big Cores: CPU 4, 5, 6, 7 (Cortex-A76 @ 2.35~2.40 GHz)
-    CPU_SET(4, &cpuset);
-    CPU_SET(5, &cpuset);
-    CPU_SET(6, &cpuset);
-    CPU_SET(7, &cpuset);
-
-    pthread_t thread = pthread_self();
-    pthread_setname_np(thread, "corner_worker");
-    int ret = pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset);
-    if (ret == 0) {
+    set_current_thread_name("corner_worker");
+#ifdef HAS_RK3588
+    if (pin_current_thread_to_rk3588_big_cores()) {
         LOG_INFO("CornerDetector", "Corner Worker thread successfully PINNED to RK3588 Cortex-A76 Big Cores (CPUs 4, 5, 6, 7).");
     } else {
-        LOG_WARN("CornerDetector", "Failed to pin worker thread to big cores, errno: ", ret);
+        LOG_WARN("CornerDetector", "Failed to pin worker thread to big cores");
     }
+#endif
 }
 
 CornerDetector::CornerDetector() {
@@ -162,11 +153,6 @@ void CornerDetector::workerLoop() {
         // Throttle detection frequency to ~7-10 Hz (sleep 100ms) to prevent pinning CPU cores at 100%
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-}
-
-bool CornerDetector::detectSync(const cv::Mat& bgr_image, DetectedCorners& out_corners) {
-    CalibrationConfig cur_cfg = getConfig();
-    return processInternal(bgr_image, cur_cfg, out_corners);
 }
 
 bool CornerDetector::processInternal(const cv::Mat& bgr_image, const CalibrationConfig& cfg, DetectedCorners& out_corners) {

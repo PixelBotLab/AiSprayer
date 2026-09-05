@@ -44,16 +44,20 @@ section() { echo -e "\n${BOLD}${CYAN}━━━ $* ━━━${NC}"; }
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC_DIR="${SCRIPT_DIR}/src"
 INSTALL_DIR="${SCRIPT_DIR}/install"
-JOBS=$(nproc)
+JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
 
 # ── 参数解析 ─────────────────────────────────────────────────────────────────
 FORCE=false
 ONLY_LIBS=()  # 若非空，只构建指定的库
+PROFILE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --force)  FORCE=true; shift ;;
         --jobs)   JOBS="$2"; shift 2 ;;
+        --profile)
+            PROFILE="$2"; shift 2
+            ;;
         --only)
             shift
             while [[ $# -gt 0 && "$1" != --* ]]; do
@@ -62,11 +66,23 @@ while [[ $# -gt 0 ]]; do
             ;;
         -h|--help)
             sed -n '2,30p' "$0" | grep '^#' | sed 's/^# \{0,2\}//'
+            echo "  --profile rk3588|generic   默认按主机自动选择"
             exit 0
             ;;
         *) error "未知参数: $1（使用 --help 查看帮助）" ;;
     esac
 done
+
+if [[ -z "$PROFILE" ]]; then
+    _os=$(uname -s | tr '[:upper:]' '[:lower:]')
+    _arch=$(uname -m)
+    if [[ "$_os" == "linux" && "$_arch" == "aarch64" ]]; then
+        PROFILE=rk3588
+    else
+        PROFILE=generic
+    fi
+fi
+info "构建配置: profile=${PROFILE}"
 
 should_build() {
     local name="$1"
@@ -76,51 +92,75 @@ should_build() {
         done
         return 1
     fi
+    # Faiss 全工程引用计数为 0，不再默认构建；仅在 --only faiss 时构建
+    if [[ "$name" == "faiss" ]]; then
+        return 1
+    fi
+    if [[ "$PROFILE" == "generic" ]]; then
+        case "$name" in
+            rga|rknn|mpp) return 1 ;;
+        esac
+    fi
+    if [[ "$PROFILE" == "rk3588" && "$name" == "openh264" ]]; then
+        return 1
+    fi
     return 0
 }
 
 # ── 前置检查 ─────────────────────────────────────────────────────────────────
 section "环境检查"
-for cmd in git cmake make gcc g++ pkg-config; do
+for cmd in git cmake make; do
     command -v "$cmd" &>/dev/null || error "缺少必要工具: $cmd"
 done
-
-# 检查必要头文件
-if ! pkg-config --exists libdrm 2>/dev/null; then
-    warn "未找到 libdrm，MPP 编译可能失败"
-    warn "请运行: sudo apt install libdrm-dev"
+if ! command -v g++ &>/dev/null && ! command -v clang++ &>/dev/null; then
+    error "缺少 C++ 编译器 (g++ 或 clang++)"
 fi
-if ! pkg-config --exists openssl 2>/dev/null; then
-    warn "未找到 OpenSSL，ZLMediaKit 编译可能失败"
-    warn "请运行: sudo apt install libssl-dev"
-fi
-if ! dpkg -s libopenblas-dev &>/dev/null 2>&1; then
-    warn "未找到 libopenblas-dev，Faiss 编译可能失败"
-    warn "请运行: sudo apt install libopenblas-dev"
-fi
-if ! dpkg -s libsqlite3-dev &>/dev/null 2>&1; then
-    warn "未找到 libsqlite3-dev，EventLog 编译可能失败"
-    warn "请运行: sudo apt install libsqlite3-dev"
+if ! command -v pkg-config &>/dev/null; then
+    warn "未找到 pkg-config，部分依赖探测会跳过"
 fi
 
-# 检查 Rockchip 硬件驱动节点 (仅作为警告，因为用户可能是在 x86 下做交叉编译)
-info "正在探测底层硬件驱动节点（若当前为异构交叉编译环境，请忽略以下警告）..."
-for dev_node in "/dev/rga" "/dev/mpp_service"; do
-    if [[ ! -e "$dev_node" ]]; then
-        warn "未检测到硬件节点 $dev_node ！如果本机是最终运行环境，程序启动时会由于找不到硬件支持而崩溃。"
-    else
-        [[ -w "$dev_node" ]] || warn "当前用户没有读写 $dev_node 的权限！若以此用户运行主程序，可能会触发 Permission denied 报错。"
+if [[ "$PROFILE" == "rk3588" ]]; then
+    if ! pkg-config --exists libdrm 2>/dev/null; then
+        warn "未找到 libdrm，MPP 编译可能失败"
+        warn "请运行: sudo apt install libdrm-dev"
     fi
-done
-
-if [[ ! -e "/dev/rknpu" ]] && [[ ! -e "/dev/galcore" ]]; then
-    if ! sudo -n ls "/sys/kernel/debug/rknpu/version" &>/dev/null && ! ls "/sys/kernel/debug/rknpu" &>/dev/null 2>&1; then
-        warn "未检测到 NPU 设备节点(rknpu/galcore) 及初始化日志，神经计算驱动可能未加载或因型号不匹配而不可用。"
+    if ! pkg-config --exists openssl 2>/dev/null; then
+        warn "未找到 OpenSSL，ZLMediaKit 编译可能失败"
+        warn "请运行: sudo apt install libssl-dev"
     fi
-fi
+    if command -v dpkg >/dev/null 2>&1; then
+        if ! dpkg -s libopenblas-dev &>/dev/null 2>&1; then
+            warn "未找到 libopenblas-dev，Faiss 编译可能失败"
+            warn "请运行: sudo apt install libopenblas-dev"
+        fi
+        if ! dpkg -s libsqlite3-dev &>/dev/null 2>&1; then
+            warn "未找到 libsqlite3-dev，EventLog 编译可能失败"
+            warn "请运行: sudo apt install libsqlite3-dev"
+        fi
+    fi
 
-if [[ ! -d "/dev/dma_heap" ]] && [[ ! -e "/dev/ion" ]]; then
-    warn "未检测到 dma_heap 或 ion 内存分配器节点，MPP 与 RGA 间的高效数据流转池可能无法初始化。"
+    info "正在探测底层硬件驱动节点（若当前为异构交叉编译环境，请忽略以下警告）..."
+    for dev_node in "/dev/rga" "/dev/mpp_service"; do
+        if [[ ! -e "$dev_node" ]]; then
+            warn "未检测到硬件节点 $dev_node ！如果本机是最终运行环境，程序启动时会由于找不到硬件支持而崩溃。"
+        else
+            [[ -w "$dev_node" ]] || warn "当前用户没有读写 $dev_node 的权限！若以此用户运行主程序，可能会触发 Permission denied 报错。"
+        fi
+    done
+
+    if [[ ! -e "/dev/rknpu" ]] && [[ ! -e "/dev/galcore" ]]; then
+        if ! sudo -n ls "/sys/kernel/debug/rknpu/version" &>/dev/null && ! ls "/sys/kernel/debug/rknpu" &>/dev/null 2>&1; then
+            warn "未检测到 NPU 设备节点(rknpu/galcore) 及初始化日志，神经计算驱动可能未加载或因型号不匹配而不可用。"
+        fi
+    fi
+
+    if [[ ! -d "/dev/dma_heap" ]] && [[ ! -e "/dev/ion" ]]; then
+        warn "未检测到 dma_heap 或 ion 内存分配器节点，MPP 与 RGA 间的高效数据流转池可能无法初始化。"
+    fi
+else
+    if ! pkg-config --exists openssl 2>/dev/null; then
+        warn "未找到 OpenSSL，ZLMediaKit 编译可能失败（macOS: brew install openssl）"
+    fi
 fi
 
 mkdir -p "${SRC_DIR}" "${INSTALL_DIR}/include" "${INSTALL_DIR}/lib"
@@ -136,9 +176,25 @@ info "并行编译: -j${JOBS}"
 need_build() {
     local lib_file="$1"
     if [[ "$FORCE" == true ]]; then return 0; fi
-    if [[ ! -f "${INSTALL_DIR}/lib/${lib_file}" ]]; then return 0; fi
-    info "已存在: ${lib_file}（跳过，使用 --force 强制重新构建）"
-    return 1
+    if [[ -f "${INSTALL_DIR}/lib/${lib_file}" ]]; then
+        info "已存在: ${lib_file}（跳过，使用 --force 强制重新构建）"
+        return 1
+    fi
+    if [[ "$lib_file" == *.so ]]; then
+        local alt="${lib_file%.so}.dylib"
+        if [[ -f "${INSTALL_DIR}/lib/${alt}" ]]; then
+            info "已存在: ${alt}（跳过，使用 --force 强制重新构建）"
+            return 1
+        fi
+    fi
+    # openh264 may install as versioned .so / .dylib / .a
+    if [[ "$lib_file" == libopenh264.* ]]; then
+        if ls "${INSTALL_DIR}/lib"/libopenh264.* >/dev/null 2>&1; then
+            info "已存在: libopenh264*（跳过，使用 --force 强制重新构建）"
+            return 1
+        fi
+    fi
+    return 0
 }
 
 clone_or_update() {
@@ -271,6 +327,15 @@ if should_build zlmk && need_build "libmk_api.so"; then
     fi
 
     rm -rf "${SRC_DIR}/ZLMediaKit/build"
+    ZLM_CMAKE_EXTRA=()
+    if [[ "$(uname -s)" == "Darwin" ]]; then
+        for _ssl in /opt/homebrew/opt/openssl /usr/local/opt/openssl; do
+            if [[ -d "$_ssl" ]]; then
+                ZLM_CMAKE_EXTRA+=(-DOPENSSL_ROOT_DIR="$_ssl")
+                break
+            fi
+        done
+    fi
     cmake -S "${SRC_DIR}/ZLMediaKit" \
           -B "${SRC_DIR}/ZLMediaKit/build" \
           -DENABLE_WEBRTC=OFF \
@@ -280,20 +345,22 @@ if should_build zlmk && need_build "libmk_api.so"; then
           -DENABLE_SERVER=ON \
           -DENABLE_API=ON \
           -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_INSTALL_PREFIX="${INSTALL_DIR}"
+          -DCMAKE_INSTALL_PREFIX="${INSTALL_DIR}" \
+          "${ZLM_CMAKE_EXTRA[@]}"
 
     #cmake --build  "${SRC_DIR}/ZLMediaKit/build" -j"${JOBS}" --target mk_api
     cmake --build  "${SRC_DIR}/ZLMediaKit/build" -j"${JOBS}"
     cmake --install "${SRC_DIR}/ZLMediaKit/build"
 
     # 确保 mk_mediakit.h 已安装到 include/
+    mkdir -p "${INSTALL_DIR}/include"
     ZLMK_HDR="${SRC_DIR}/ZLMediaKit/api/include/mk_mediakit.h"
     if [[ ! -f "${INSTALL_DIR}/include/mk_mediakit.h" && -f "${ZLMK_HDR}" ]]; then
-        install -Dm644 "${ZLMK_HDR}" "${INSTALL_DIR}/include/mk_mediakit.h"
+        cp "${ZLMK_HDR}" "${INSTALL_DIR}/include/mk_mediakit.h"
     fi
     for hdr in "${SRC_DIR}/ZLMediaKit/api/include/"*.h; do
         dest="${INSTALL_DIR}/include/$(basename "${hdr}")"
-        [[ -f "${dest}" ]] || install -Dm644 "${hdr}" "${dest}"
+        [[ -f "${dest}" ]] || cp "${hdr}" "${dest}"
     done
 
     info "ZLMediaKit 构建完成 → ${INSTALL_DIR}/lib/libmk_api.so"
@@ -360,6 +427,10 @@ if { should_build orbbec || should_build orbbecsdk; } && need_build "libOrbbecSD
     clone_or_update OrbbecSDK_v2 "https://github.com/orbbec/OrbbecSDK_v2.git"
 
     rm -rf "${SRC_DIR}/OrbbecSDK_v2/build"
+    ORBBEC_CFLAGS="-O3"
+    if [[ "$PROFILE" == "rk3588" ]]; then
+        ORBBEC_CFLAGS="-O3 -mcpu=cortex-a76.cortex-a55 -mtune=cortex-a76 -ftree-vectorize -fomit-frame-pointer"
+    fi
     cmake -S "${SRC_DIR}/OrbbecSDK_v2" \
           -B "${SRC_DIR}/OrbbecSDK_v2/build" \
           -DOB_BUILD_EXAMPLES=OFF \
@@ -368,8 +439,8 @@ if { should_build orbbec || should_build orbbecsdk; } && need_build "libOrbbecSD
           -DOB_BUILD_DOCS=OFF \
           -DOB_INSTALL_EXAMPLES_SOURCE=OFF \
           -DCMAKE_BUILD_TYPE=Release \
-          -DCMAKE_C_FLAGS="-O3 -mcpu=cortex-a76.cortex-a55 -mtune=cortex-a76 -ftree-vectorize -fomit-frame-pointer" \
-          -DCMAKE_CXX_FLAGS="-O3 -mcpu=cortex-a76.cortex-a55 -mtune=cortex-a76 -ftree-vectorize -fomit-frame-pointer" \
+          -DCMAKE_C_FLAGS="${ORBBEC_CFLAGS}" \
+          -DCMAKE_CXX_FLAGS="${ORBBEC_CFLAGS}" \
           -DCMAKE_INSTALL_PREFIX="${INSTALL_DIR}"
 
     cmake --build  "${SRC_DIR}/OrbbecSDK_v2/build" -j"${JOBS}"
@@ -381,6 +452,49 @@ else
     { should_build orbbec || should_build orbbecsdk; } || info "OrbbecSDK 已跳过（--only 未指定）"
 fi
 
+# ── 7. OpenH264（仅 generic：非 RK 软编码）──────────────────────────────────
+section "OpenH264（软件 H.264，非 RK3588）"
+
+if should_build openh264 && need_build "libopenh264.so"; then
+    OPENH264_TAG="v2.4.1"
+    if [[ ! -d "${SRC_DIR}/openh264/.git" ]]; then
+        info "克隆 OpenH264 ${OPENH264_TAG} ..."
+        git clone --depth=1 --branch "${OPENH264_TAG}" \
+                  "https://github.com/cisco/openh264.git" \
+                  "${SRC_DIR}/openh264"
+    else
+        info "OpenH264 源码已存在，跳过克隆"
+    fi
+    _os=$(uname -s | tr '[:upper:]' '[:lower:]')
+    _arch=$(uname -m)
+    OH264_OS=linux
+    OH264_ARCH=x86_64
+    if [[ "$_os" == "darwin" ]]; then
+        OH264_OS=darwin
+        if [[ "$_arch" == "arm64" ]]; then
+            OH264_ARCH=arm64
+        else
+            OH264_ARCH=x86_64
+        fi
+    else
+        if [[ "$_arch" == "aarch64" || "$_arch" == "arm64" ]]; then
+            OH264_ARCH=aarch64
+        else
+            OH264_ARCH=x86_64
+        fi
+    fi
+    OPENH264_EXTRA_FLAGS=()
+    if [[ "${OH264_ARCH}" == "x86_64" ]] && ! command -v nasm &>/dev/null; then
+        warn "未找到 nasm 汇编器，OpenH264 将使用纯 C 实现（ASM=No）编译"
+        OPENH264_EXTRA_FLAGS+=("ASM=No")
+    fi
+    make -C "${SRC_DIR}/openh264" -j"${JOBS}" OS="${OH264_OS}" ARCH="${OH264_ARCH}" "${OPENH264_EXTRA_FLAGS[@]}"
+    make -C "${SRC_DIR}/openh264" PREFIX="${INSTALL_DIR}" "${OPENH264_EXTRA_FLAGS[@]}" install
+    info "OpenH264 安装完成 → ${INSTALL_DIR}/lib"
+else
+    should_build openh264 || info "OpenH264 已跳过（rk3588 不需要，或 --only 未指定）"
+fi
+
 # ── 完成摘要 ─────────────────────────────────────────────────────────────────
 section "构建完成"
 
@@ -388,7 +502,7 @@ echo ""
 echo -e "${BOLD}安装目录: ${INSTALL_DIR}${NC}"
 echo ""
 echo "库文件一览："
-for f in librockchip_mpp.so librga.so librknnrt.so libmk_api.so libfaiss.a libOrbbecSDK.so; do
+for f in librockchip_mpp.so librga.so librknnrt.so libmk_api.so libmk_api.dylib libfaiss.a libOrbbecSDK.so libOrbbecSDK.dylib libopenh264.so libopenh264.dylib libopenh264.a; do
     path="${INSTALL_DIR}/lib/${f}"
     if [[ -f "${path}" ]]; then
         size=$(du -sh -L "${path}" 2>/dev/null | cut -f1)

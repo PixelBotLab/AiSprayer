@@ -65,15 +65,40 @@ if [ -f "$PROJECT_ROOT/setup.py" ] || [ -f "$PROJECT_ROOT/pyproject.toml" ]; the
     "$VENV_PIP" install -e "$PROJECT_ROOT"
 fi
 
-# Install local hardware SDK wheels from third_party directory (e.g. pyorbbecsdk)
+# Install matching local hardware SDK wheels (pyorbbecsdk2 is Linux-only in this repo).
 if [ -d "$PROJECT_ROOT/third_party" ]; then
-    echo "  ↳ Installing local hardware SDK wheels from third_party directory..."
-    for whl in "$PROJECT_ROOT/third_party"/*.whl; do
-        if [ -f "$whl" ]; then
-            echo "    ⏳ Installing wheel: $(basename "$whl") ..."
-            "$VENV_PIP" install --no-deps "$whl" 2>/dev/null || true
-        fi
-    done
+    PY_TAG=$("$VENV_PYTHON" -c "import sys; print(f'cp{sys.version_info.major}{sys.version_info.minor}')")
+    HOST_OS=$(uname -s)
+    HOST_ARCH=$(uname -m)
+    WHL_PAT=""
+    if [ "$HOST_OS" = Linux ]; then
+        case "$HOST_ARCH" in
+            x86_64) WHL_PAT="linux_x86_64" ;;
+            aarch64|arm64) WHL_PAT="linux_aarch64" ;;
+        esac
+    fi
+    echo "  ↳ Installing local wheels matching ${HOST_OS}/${HOST_ARCH} ${PY_TAG}..."
+    if [ -z "$WHL_PAT" ]; then
+        echo "    ↷ no prebuilt Linux wheel for this host (macOS uses pip / official Orbbec SDK)"
+    else
+        for whl in "$PROJECT_ROOT/third_party"/*.whl; do
+            [ -f "$whl" ] || continue
+            base=$(basename "$whl")
+            case "$base" in
+                *"${WHL_PAT}"*) ;;
+                *) continue ;;
+            esac
+            case "$base" in
+                *"${PY_TAG}"*) ;;
+                *)
+                    echo "    ↷ skip $base (python tag mismatch, need ${PY_TAG})"
+                    continue
+                    ;;
+            esac
+            echo "    ⏳ Installing wheel: $base"
+            "$VENV_PIP" install --no-deps "$whl" || true
+        done
+    fi
 fi
 
 echo "✅ Backend dependencies up to date."

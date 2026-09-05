@@ -1,8 +1,5 @@
-import os
 import cv2
 import numpy as np
-
-# VisionProcessor 导入被移至用到它的函数内，避免 2D 模块不必要地加载 open3d
 
 def split_jeans_mask(mask_2d, depth_threshold_ratio=0.1, overlap_px=12):
     """
@@ -107,32 +104,3 @@ def split_jeans_mask(mask_2d, depth_threshold_ratio=0.1, overlap_px=12):
     
     print(f"[*] Segmentation: Keeping a {overlap_px:.1f}px overlap at the leg seam.")
     return [mask_left, mask_right]
-
-def process_jeans_with_segmentation(raw_point_cloud, yolo_mask_2d, config, output_dir=None, base_name="jeans_smoothed"):
-    """
-    Splits the jeans mask (if needed) and processes them into 1 or 2 meshes.
-    Returns a list of generated mesh paths.
-    """
-    from core.vision.vision_processor import VisionProcessor, DEFAULT_DATA_DIR
-    if output_dir is None:
-        output_dir = DEFAULT_DATA_DIR
-        
-    processor = VisionProcessor.from_config_dict(config)
-    
-    masks = split_jeans_mask(yolo_mask_2d)
-    mesh_paths = []
-    
-    if len(masks) == 1:
-        out_path = f"{base_name}.obj"
-        print(f"[*] Extracting single mesh: {out_path}")
-        mesh_path = processor.filter_and_smooth_jeans(raw_point_cloud, masks[0], output_dir=output_dir, output_name=out_path)
-        mesh_paths.append(mesh_path)
-    else:
-        for i, mask in enumerate(masks):
-            part_name = "left" if i == 0 else "right"
-            out_path = f"{base_name}_{part_name}.obj"
-            print(f"[*] Extracting part {i+1}/2 ({part_name} leg): {out_path}")
-            mesh_path = processor.filter_and_smooth_jeans(raw_point_cloud, mask, output_dir=output_dir, output_name=out_path)
-            mesh_paths.append(mesh_path)
-            
-    return mesh_paths

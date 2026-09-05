@@ -263,23 +263,4 @@ bool MppEncoder::encodeDirect(uint8_t* out_h264_buf, int max_out_len, int& out_l
     return out_len > 0;
 }
 
-bool MppEncoder::encode(const uint8_t* nv12_data, int data_size,
-                        uint8_t* out_h264_buf, int max_out_len, int& out_len,
-                        bool& is_keyframe, uint64_t pts) {
-    if (!initialized_ || nv12_data == nullptr || out_h264_buf == nullptr) {
-        return false;
-    }
-
-    void* frm_ptr = getFrameBufferPtr();
-    if (frm_ptr == nullptr) return false;
-
-    size_t copy_size = hor_stride_ * ver_stride_ * 3 / 2;
-    if (data_size > 0 && (size_t)data_size < copy_size) {
-        copy_size = data_size;
-    }
-    std::memcpy(frm_ptr, nv12_data, copy_size);
-
-    return encodeDirect(out_h264_buf, max_out_len, out_len, is_keyframe, pts);
-}
-
 } // namespace orbbec_service

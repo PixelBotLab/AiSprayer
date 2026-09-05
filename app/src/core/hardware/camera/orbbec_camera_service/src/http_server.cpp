@@ -237,6 +237,7 @@ void HttpServer::setupRoutes() {
             {"color_fps", st.color_fps},
             {"depth_fps", st.depth_fps},
             {"encoder", st.encoder},
+            {"source", st.source},
             {"calibration_mode", st.calibration_mode},
             {"depth_stream_enabled", st.depth_stream_enabled},
             {"depth_align_enabled", st.depth_align_enabled},

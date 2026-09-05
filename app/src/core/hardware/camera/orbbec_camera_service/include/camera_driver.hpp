@@ -14,7 +14,9 @@
 #include "gyro_time_base.hpp"
 #include "follow/device_lock.hpp"
 #include "follow/types.hpp"
+#include "replay_frame_source.hpp"
 
+#if HAS_ORBBEC
 // Forward declaration of Orbbec SDK classes
 namespace ob {
     class Context;
@@ -23,6 +25,7 @@ namespace ob {
     class Config;
     class Sensor;
 }
+#endif
 
 namespace orbbec_service {
 
@@ -63,6 +66,8 @@ public:
     // Get current status & intrinsics
     CameraStatus getStatus();
     CameraIntrinsics getIntrinsics();
+    void setEncoderStatus(const std::string& encoder, bool stream_ok = true);
+    bool isReplayMode() const { return replay_mode_; }
 
     // 陀螺仪数据消费接口（由 FollowWorker 消费）
     bool drainGyroSamples(std::vector<follow::GyroSample>* out);
@@ -83,6 +88,8 @@ public:
 
 private:
     void captureLoop();
+    void replayCaptureLoop();
+#if HAS_ORBBEC
     bool tryConnectDevice();
     bool configureAndStartPipeline();
     void stopPipelineAndSensors();
@@ -95,6 +102,7 @@ private:
     // 硬重连会把设备从总线上拽下来重新枚举，重枚举后帧率经常掉到 3~4 fps，
     // 反而把一次短暂停滞放大成长时间故障 —— 所以先试软的，失败才升级。
     bool trySoftPipelineRestart();
+#endif
     void updateFpsStats();
 
 private:
@@ -102,6 +110,9 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> connected_{false};
     std::atomic<bool> calib_mode_{false};
+    bool replay_mode_{false};
+    bool encoder_ready_{false};
+    ReplayFrameSource replay_source_;
     int consecutive_timeouts_ = 0;
     // 分级恢复账本：软重启连续失败几次后才升级到硬重连；以及恢复后连续正常帧数（够多才算稳住，清零账本）。
     int soft_restart_attempts_ = 0;
@@ -114,8 +125,10 @@ private:
     int follow_height_ = 0;
     int follow_fps_ = 0;
 
+#if HAS_ORBBEC
     // 板载 IMU 陀螺仪
     std::shared_ptr<ob::Sensor> gyro_sensor_;
+#endif
     std::deque<follow::GyroSample> gyro_queue_;
     std::mutex gyro_mtx_;
     Eigen::Matrix3d R_cam_gyro_ = Eigen::Matrix3d::Identity();
@@ -139,9 +152,11 @@ private:
     // 每次一行会把日志刷满而信息量还是那一条。
     bool lock_notice_logged_ = false;
 
+#if HAS_ORBBEC
     std::unique_ptr<ob::Context> ctx_;
     std::unique_ptr<ob::Pipeline> pipe_;
     std::shared_ptr<ob::Device> device_;
+#endif
 
     std::thread capture_thread_;
     std::mutex pipe_mutex_;

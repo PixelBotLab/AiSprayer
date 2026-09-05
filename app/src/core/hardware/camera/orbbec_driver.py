@@ -5,7 +5,6 @@ Orbbec Gemini 336 相机原生驱动封装 (独立版)
 基于 pyorbbecsdk 实现。
 """
 
-import sys
 import os
 import logging
 import numpy as np
@@ -23,9 +22,8 @@ try:
             Pipeline, Config, OBSensorType, OBFormat,
             OBFrameAggregateOutputMode, AlignFilter, OBStreamType
         )
-except ImportError:
-    print("错误: 未找到 pyorbbecsdk 或 pyorbbecsdk2。请确认安装。")
-    sys.exit(1)
+except ImportError as e:
+    raise ImportError("未找到 pyorbbecsdk 或 pyorbbecsdk2。请确认安装。") from e
 
 logger = logging.getLogger(__name__)
 

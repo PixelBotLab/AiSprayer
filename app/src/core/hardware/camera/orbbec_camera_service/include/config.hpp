@@ -51,6 +51,7 @@ public:
                     if (cam_node["height"]) cfg.camera_height = cam_node["height"].as<int>();
                     if (cam_node["fps"]) cfg.camera_fps = cam_node["fps"].as<int>();
                     if (cam_node["enable_depth_align"]) cfg.enable_depth_align = cam_node["enable_depth_align"].as<bool>();
+                    if (cam_node["replay_path"]) cfg.replay_path = cam_node["replay_path"].as<std::string>();
 
                     // Check if server is nested under hardware.camera
                     if (cam_node["server"]) {

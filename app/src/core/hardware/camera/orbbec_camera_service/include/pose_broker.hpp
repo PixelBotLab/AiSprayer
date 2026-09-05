@@ -43,7 +43,6 @@ public:
     bool subscribe();
     void unsubscribe();
     int subscribers() const;
-    bool hasSubscribers() const { return subscribers() > 0; }
 
     // 发布"快照又变了"。无订阅者时退化成一次原子自增 —— 所以生产者**每帧无条件调用**它就行，
     // 不需要判断有没有人在听；把判断留给调用方早晚会出现"忘了判断"或"判断错了永远收不到"。

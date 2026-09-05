@@ -109,14 +109,18 @@ class CameraService:
             # 1. 确保二进制文件存在
             if not os.path.exists(self._bin_path):
                 logger.warning(f"C++ Camera binary not found at {self._bin_path}. Attempting build...")
-                build_dir = os.path.join(
-                    self._project_root,
-                    "app/src/core/hardware/camera/orbbec_camera_service/build"
-                )
-                os.makedirs(build_dir, exist_ok=True)
+                build_sh = os.path.join(self._project_root, "app/scripts/build.sh")
                 try:
-                    subprocess.run(["cmake", ".."], cwd=build_dir, check=True)
-                    subprocess.run(["make", "-j4"], cwd=build_dir, check=True)
+                    if os.path.isfile(build_sh):
+                        subprocess.run(["bash", build_sh, "--only", "camera"], check=True)
+                    else:
+                        build_dir = os.path.join(
+                            self._project_root,
+                            "app/src/core/hardware/camera/orbbec_camera_service/build"
+                        )
+                        os.makedirs(build_dir, exist_ok=True)
+                        subprocess.run(["cmake", ".."], cwd=build_dir, check=True)
+                        subprocess.run(["cmake", "--build", ".", "--parallel"], cwd=build_dir, check=True)
                     logger.info("C++ Camera binary built successfully.")
                 except Exception as e:
                     logger.error(f"Failed to auto-build C++ camera service: {e}")
@@ -125,11 +129,14 @@ class CameraService:
             # 2. 清理可能遗留的孤儿进程
             self._kill_stale_processes()
 
-            # 3. 设置 LD_LIBRARY_PATH 并启动子进程
+            # 3. 设置动态库搜索路径并启动子进程
             env = os.environ.copy()
             third_party_lib = os.path.join(self._project_root, "third_party/install/lib")
             current_ld = env.get("LD_LIBRARY_PATH", "")
             env["LD_LIBRARY_PATH"] = f"{third_party_lib}:{current_ld}"
+            if sys.platform == "darwin":
+                current_dyld = env.get("DYLD_LIBRARY_PATH", "")
+                env["DYLD_LIBRARY_PATH"] = f"{third_party_lib}:{current_dyld}"
 
             stats_interval = sprayer_config.config_data.get("hardware", {}).get("camera", {}).get("server", {}).get("stats_interval_sec", 10)
             cmd = [
@@ -359,7 +366,9 @@ class CameraService:
                     "calibration_mode": data.get("calibration_mode", False),
                     "depth_stream_enabled": data.get("depth_stream_enabled", True),
                     "depth_align_enabled": data.get("depth_align_enabled", True),
-                    "encoder": data.get("encoder", "RK_MPP_H264"),
+                    "encoder": data.get("encoder", "none"),
+                    "source": data.get("source", "orbbec"),
+                    "intrinsics_loaded": data.get("intrinsics_loaded", False),
                     "total_frames": data.get("total_frames", 0)
                 }
         except Exception:

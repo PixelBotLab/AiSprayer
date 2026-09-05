@@ -66,7 +66,10 @@ struct CameraStatus {
     std::string firmware_version = "Unknown";
     double color_fps = 0.0;
     double depth_fps = 0.0;
-    std::string encoder = "RK_MPP_H264";
+    std::string encoder = "none";
+    // 取流来源：orbbec = 真机，replay = 目录回放，synthetic = 显式合成彩条。
+    // 后两者没有设备内参，follow / 标定必须看这个字段，不能把画面当现场相机。
+    std::string source = "orbbec";
     double temperature_c = 0.0;
     bool calibration_mode = false;
     bool depth_stream_enabled = true;
@@ -160,6 +163,10 @@ struct AppConfig {
     // 一句能读的"被 PID x 占用"。值由 main.cpp 从 follow.camera.lock_path 灌进来（全项目只允许
     // 一处解析那个键），已经解析成绝对路径。空 = 不做进程间仲裁（回放/单测）。
     std::string device_lock_path = "";
+
+    // 回放路径。空 = 真机（无 Orbbec 编译时由 CameraDriver 改成 "synthetic"）。
+    // "synthetic" = 显式合成彩条。其它非空值必须是存在且含彩色图的目录/文件，失败则 init 失败，不静默造帧。
+    std::string replay_path = "";
 };
 
 } // namespace orbbec_service

@@ -11,7 +11,7 @@ python-multipart>=0.0.6
 requests>=2.25.0
 trimesh>=3.10.0
 open3d>=0.15.0
-pyorbbecsdk2>=2.1.0
+pyorbbecsdk2>=2.1.0; sys_platform == 'linux'
 torch
 torchvision
 timm>=1.0.0
