@@ -136,7 +136,6 @@ class ClickSession:
         self.current_mask: np.ndarray | None = None
         self.current_score = 0.0
         self.committed: list[np.ndarray] = []
-        self.committed_scores: list[float] = []
 
     def add_point(self, x: int, y: int, label: int) -> None:
         self.points.append((x, y))
@@ -164,13 +163,11 @@ class ClickSession:
         if self.current_mask is None or not self.current_mask.any():
             return False
         self.committed.append(self.current_mask)
-        self.committed_scores.append(self.current_score)
         self.reset_current()
         return True
 
     def clear_all(self) -> None:
         self.committed.clear()
-        self.committed_scores.clear()
         self.reset_current()
 
     def refresh_mask(self) -> None:

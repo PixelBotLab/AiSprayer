@@ -241,17 +241,6 @@ class PredictRequest(BaseModel):
 class SaveMasksRequest(BaseModel):
     committed_masks: list[dict]
 
-@router.get("/templates/{name}/masks")
-def get_template_masks(name: str):
-    template_path = os.path.join(TEMPLATE_GROUP_DIR, name)
-    if not os.path.exists(template_path):
-        raise HTTPException(status_code=404, detail="Template not found")
-        
-    data = sam_service.get_template_masks(template_path)
-    if data is None:
-        return {"masks": []}
-    return data
-
 @router.post("/templates/{name}/sam/init")
 def init_sam(name: str):
     template_path = os.path.join(TEMPLATE_GROUP_DIR, name)
@@ -266,8 +255,12 @@ def init_sam(name: str):
 
 @router.post("/templates/{name}/sam/predict")
 def predict_sam(name: str, req: PredictRequest):
+    template_path = os.path.join(TEMPLATE_GROUP_DIR, name)
+    if not os.path.exists(template_path):
+        raise HTTPException(status_code=404, detail="Template not found")
+
     try:
-        result = sam_service.predict_action(name, req.points, req.labels)
+        result = sam_service.predict_action(name, req.points, req.labels, template_path)
         return result
     except Exception as e:
         logger.error(f"Prediction failed for template '{name}': {e}", exc_info=True)

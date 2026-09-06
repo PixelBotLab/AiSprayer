@@ -83,6 +83,27 @@ def get_configured_sam_backend() -> Optional[str]:
     return None
 
 
+def _model_ready(path: Path) -> bool:
+    """模型文件存在、且不是未拉取的 Git LFS 指针文件。"""
+    return path.exists() and path.stat().st_size > 1024
+
+
+def _size_mb(path: Path) -> str:
+    return f"{path.stat().st_size / (1024 * 1024):.1f} MB"
+
+
+def _has_onnx_models() -> bool:
+    """ONNX encoder/decoder 是否都就绪。"""
+    return _model_ready(DEFAULT_MOBILESAM_ONNX_ENCODER) and _model_ready(DEFAULT_MOBILESAM_ONNX_DECODER)
+
+
+def _torch_device() -> Optional[str]:
+    """PyTorch 后端对应的设备名；torch 未安装（如 docker slim 镜像）时返回 None 交给自动探测。"""
+    if not HAS_TORCH:
+        return None
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
 def resolve_device(requested: str | None = None) -> str:
     """
     Resolve inference device/backend:
@@ -101,7 +122,7 @@ def resolve_device(requested: str | None = None) -> str:
             return None
         t = target.lower().strip()
         if t in ("pt", "pytorch", "torch"):
-            return "cuda" if torch.cuda.is_available() else "cpu"
+            return _torch_device()
         if t in ("auto", "default"):
             return None
         return t
@@ -126,22 +147,35 @@ def resolve_device(requested: str | None = None) -> str:
         return "rknn"
 
     # 2. PyTorch CUDA if available
-    if torch.cuda.is_available():
+    if HAS_TORCH and torch.cuda.is_available():
         return "cuda"
 
     # 3. Non-RK platform: prefer ONNX if onnx models exist and onnxruntime is available
-    if DEFAULT_MOBILESAM_ONNX_ENCODER.exists() and DEFAULT_MOBILESAM_ONNX_DECODER.exists():
+    if _has_onnx_models():
         try:
             import onnxruntime
             return "onnx"
         except ImportError:
             pass
 
-    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+    if HAS_TORCH and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return "mps"
 
     return "cpu"
 
+
+
+def _resize_and_pad(image: np.ndarray, img_size: int) -> Tuple[np.ndarray, Tuple[int, int], Tuple[int, int]]:
+    """按长边等比缩放 + 右下补零到 img_size，返回 (padded, original_size, input_size)。"""
+    orig_h, orig_w = image.shape[:2]
+    scale = img_size * 1.0 / max(orig_h, orig_w)
+    new_h = int(orig_h * scale + 0.5)
+    new_w = int(orig_w * scale + 0.5)
+    resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+    padded = cv2.copyMakeBorder(
+        resized, 0, img_size - new_h, 0, img_size - new_w, cv2.BORDER_CONSTANT, value=(0, 0, 0)
+    )
+    return padded, (orig_h, orig_w), (new_h, new_w)
 
 
 def _run_onnx_decoder(
@@ -149,60 +183,25 @@ def _run_onnx_decoder(
     features: np.ndarray,
     original_size: Tuple[int, int],
     input_size: Tuple[int, int],
-    point_coords: Optional[np.ndarray] = None,
-    point_labels: Optional[np.ndarray] = None,
-    box: Optional[np.ndarray] = None,
-    mask_input: Optional[np.ndarray] = None,
+    point_coords: np.ndarray,
+    point_labels: np.ndarray,
     multimask_output: bool = True,
-    return_logits: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Shared ONNX decoder inference function for both pure-ONNX and RKNN+ONNX pipelines."""
     orig_h, orig_w = original_size
     new_h, new_w = input_size
 
-    pts_list = []
-    lbls_list = []
-    if point_coords is not None and point_labels is not None:
-        coords = np.array(point_coords, dtype=np.float32).copy()
-        coords[:, 0] = coords[:, 0] * (new_w / orig_w)
-        coords[:, 1] = coords[:, 1] * (new_h / orig_h)
-        pts_list.append(coords)
-        lbls_list.append(np.array(point_labels, dtype=np.float32))
-
-    if box is not None:
-        box_pts = np.array(
-            [
-                [box[0] * (new_w / orig_w), box[1] * (new_h / orig_h)],
-                [box[2] * (new_w / orig_w), box[3] * (new_h / orig_h)],
-            ],
-            dtype=np.float32,
-        )
-        box_lbls = np.array([2.0, 3.0], dtype=np.float32)
-        pts_list.append(box_pts)
-        lbls_list.append(box_lbls)
-
-    if not pts_list:
-        raise ValueError("Must provide point_coords or box.")
-
-    all_coords = np.concatenate(pts_list, axis=0)[None, :, :]  # (1, N, 2)
-    all_labels = np.concatenate(lbls_list, axis=0)[None, :]    # (1, N)
-
-    if mask_input is not None:
-        has_mask = np.ones(1, dtype=np.float32)
-        m_input = mask_input[None, ...] if len(mask_input.shape) == 3 else mask_input
-    else:
-        has_mask = np.zeros(1, dtype=np.float32)
-        m_input = np.zeros((1, 1, 256, 256), dtype=np.float32)
-
-    orig_im_size = np.array([float(orig_h), float(orig_w)], dtype=np.float32)
+    coords = np.array(point_coords, dtype=np.float32).reshape(-1, 2)
+    coords[:, 0] *= new_w / orig_w
+    coords[:, 1] *= new_h / orig_h
 
     ort_inputs = {
         "image_embeddings": features,
-        "point_coords": all_coords,
-        "point_labels": all_labels,
-        "mask_input": m_input,
-        "has_mask_input": has_mask,
-        "orig_im_size": orig_im_size,
+        "point_coords": coords[None, :, :],  # (1, N, 2)
+        "point_labels": np.asarray(point_labels, dtype=np.float32)[None, :],  # (1, N)
+        "mask_input": np.zeros((1, 1, 256, 256), dtype=np.float32),
+        "has_mask_input": np.zeros(1, dtype=np.float32),
+        "orig_im_size": np.array([float(orig_h), float(orig_w)], dtype=np.float32),
     }
 
     masks, iou_predictions, low_res_masks = decoder_session.run(None, ort_inputs)
@@ -212,16 +211,17 @@ def _run_onnx_decoder(
     iou_predictions = iou_predictions[0]  # (C,)
     low_res_masks = low_res_masks[0]
 
-    if not return_logits:
-        masks = masks > 0.0
+    # SAM 的 mask decoder 有 4 个输出头：0 号是 multimask_output=False 的“稳定”单 mask，
+    # 1~3 号是三个粒度候选。这份 ONNX 导出把 4 路原样输出（未做切片），所以必须在这里
+    # 补上与 SamPredictor 一致的切片语义：否则加背景点精修时 argmax 会在不同粒度之间跳变，
+    # 表现为“右键点背景反而让 mask 变大”。
+    if masks.shape[0] == 4:
+        keep = slice(1, None) if multimask_output else slice(0, 1)
+        masks = masks[keep]
+        iou_predictions = iou_predictions[keep]
+        low_res_masks = low_res_masks[keep]
 
-    if not multimask_output and len(iou_predictions) > 1:
-        best_idx = int(np.argmax(iou_predictions))
-        masks = masks[best_idx : best_idx + 1]
-        iou_predictions = iou_predictions[best_idx : best_idx + 1]
-        low_res_masks = low_res_masks[best_idx : best_idx + 1]
-
-    return masks, iou_predictions, low_res_masks
+    return masks > 0.0, iou_predictions, low_res_masks
 
 
 class ONNXMobileSAMPredictor:
@@ -279,19 +279,7 @@ class ONNXMobileSAMPredictor:
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
         self.reset_image()
-        orig_h, orig_w = image.shape[:2]
-        self.original_size = (orig_h, orig_w)
-
-        # Aspect-ratio preserving resize to longest side 1024
-        scale = self.img_size * 1.0 / max(orig_h, orig_w)
-        new_h = int(orig_h * scale + 0.5)
-        new_w = int(orig_w * scale + 0.5)
-        self.input_size = (new_h, new_w)
-
-        resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        pad_h = self.img_size - new_h
-        pad_w = self.img_size - new_w
-        padded = cv2.copyMakeBorder(resized, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=(0, 0, 0))
+        padded, self.original_size, self.input_size = _resize_and_pad(image, self.img_size)
 
         # NCHW normalized float32
         tensor = padded.transpose(2, 0, 1)[None, ...].astype(np.float32)
@@ -306,12 +294,9 @@ class ONNXMobileSAMPredictor:
 
     def predict(
         self,
-        point_coords: Optional[np.ndarray] = None,
-        point_labels: Optional[np.ndarray] = None,
-        box: Optional[np.ndarray] = None,
-        mask_input: Optional[np.ndarray] = None,
+        point_coords: np.ndarray,
+        point_labels: np.ndarray,
         multimask_output: bool = True,
-        return_logits: bool = False,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         if not self.is_image_set:
             raise RuntimeError("An image must be set with .set_image(...) before mask prediction.")
@@ -322,10 +307,7 @@ class ONNXMobileSAMPredictor:
             input_size=self.input_size,
             point_coords=point_coords,
             point_labels=point_labels,
-            box=box,
-            mask_input=mask_input,
             multimask_output=multimask_output,
-            return_logits=return_logits,
         )
 
     def reset_image(self) -> None:
@@ -363,7 +345,7 @@ class RKNNMobileSAMPredictor:
         # Prefer ONNX decoder for Zero-PyTorch dependency
         if self.onnx_decoder_path:
             dec_p = Path(self.onnx_decoder_path)
-            if dec_p.exists() and dec_p.stat().st_size > 1024:
+            if _model_ready(dec_p):
                 try:
                     import onnxruntime as ort
                     self.decoder_session = ort.InferenceSession(str(dec_p), providers=["CPUExecutionProvider"])
@@ -458,21 +440,9 @@ class RKNNMobileSAMPredictor:
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
         self.reset_image()
-        orig_h, orig_w = image.shape[:2]
-        self.original_size = (orig_h, orig_w)
+        padded, self.original_size, self.input_size = _resize_and_pad(image, self.img_size)
 
-        # Scale image so longest side is 1024
-        scale = self.img_size * 1.0 / max(orig_h, orig_w)
-        new_h = int(orig_h * scale + 0.5)
-        new_w = int(orig_w * scale + 0.5)
-        self.input_size = (new_h, new_w)
-
-        resized = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
-        pad_h = self.img_size - new_h
-        pad_w = self.img_size - new_w
-        padded = cv2.copyMakeBorder(resized, 0, pad_h, 0, pad_w, cv2.BORDER_CONSTANT, value=(0, 0, 0))
-
-        # NPU input: NHWC float32 or uint8 (normalization mean/std is built into the RKNN model)
+        # NPU input: NHWC float32 (normalization mean/std is built into the RKNN model)
         input_tensor = np.expand_dims(padded, axis=0).astype(np.float32)
 
         t0 = cv2.getTickCount()
@@ -493,12 +463,9 @@ class RKNNMobileSAMPredictor:
 
     def predict(
         self,
-        point_coords: Optional[np.ndarray] = None,
-        point_labels: Optional[np.ndarray] = None,
-        box: Optional[np.ndarray] = None,
-        mask_input: Optional[np.ndarray] = None,
+        point_coords: np.ndarray,
+        point_labels: np.ndarray,
         multimask_output: bool = True,
-        return_logits: bool = False,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         if not self.is_image_set:
             raise RuntimeError("An image must be set with .set_image(...) before mask prediction.")
@@ -511,19 +478,13 @@ class RKNNMobileSAMPredictor:
                 input_size=self.input_size,
                 point_coords=point_coords,
                 point_labels=point_labels,
-                box=box,
-                mask_input=mask_input,
                 multimask_output=multimask_output,
-                return_logits=return_logits,
             )
 
         return self.sam_predictor.predict(
             point_coords=point_coords,
             point_labels=point_labels,
-            box=box,
-            mask_input=mask_input,
             multimask_output=multimask_output,
-            return_logits=return_logits,
         )
 
     def reset_image(self) -> None:
@@ -546,6 +507,10 @@ def load_mobilesam(
     Unified loader for MobileSAM supporting RKNN, ONNX, and PyTorch backends.
     """
     device = resolve_device(device)
+    onnx_enc, onnx_dec = Path(onnx_encoder_path), Path(onnx_decoder_path)
+    onnx_ready = _model_ready(onnx_enc) and _model_ready(onnx_dec)
+    # RKNN / ONNX 都不可用时的最终归宿（torch 未安装时就是 cpu，走不到 PyTorch 分支）
+    torch_dev = _torch_device() or "cpu"
 
     logger.info("=" * 66)
     logger.info(f"[MobileSAM] Resolving MobileSAM engine backend (target: '{device}')...")
@@ -560,81 +525,81 @@ def load_mobilesam(
                 f"[MobileSAM] RKNN encoder model not found at {rknn_path.resolve()}, "
                 f"falling back to ONNX/PyTorch."
             )
-            device = "onnx" if (Path(onnx_encoder_path).exists() and Path(onnx_decoder_path).exists()) else "cpu"
-        elif rknn_path.stat().st_size < 1024:
+            device = "onnx" if onnx_ready else torch_dev
+        elif not _model_ready(rknn_path):
             logger.warning(
                 f"[MobileSAM] RKNN encoder model at {rknn_path.resolve()} is an un-pulled Git LFS pointer "
                 f"({rknn_path.stat().st_size} bytes). Run 'git lfs pull' to download actual model weight. "
                 f"Falling back to ONNX/PyTorch."
             )
-            device = "onnx" if (Path(onnx_encoder_path).exists() and Path(onnx_decoder_path).exists()) else "cpu"
+            device = "onnx" if onnx_ready else torch_dev
         else:
             try:
-                dec_onnx = Path(onnx_decoder_path)
-                has_onnx_dec = dec_onnx.exists() and dec_onnx.stat().st_size > 1024
+                has_onnx_dec = _model_ready(onnx_dec)
                 ckpt_p = Path(checkpoint)
-                rknn_size = f"{rknn_path.stat().st_size / (1024 * 1024):.1f} MB"
                 if has_onnx_dec:
-                    dec_desc = f"{dec_onnx.name} ({dec_onnx.stat().st_size / (1024 * 1024):.1f} MB, ONNX - Zero PyTorch)"
+                    dec_desc = f"{onnx_dec.name} ({_size_mb(onnx_dec)}, ONNX - Zero PyTorch)"
                 else:
                     dec_desc = f"{ckpt_p.name} (PyTorch)"
 
                 logger.info(f"[MobileSAM] Loading RKNN Backend (Rockchip RK3588 NPU):")
-                logger.info(f"[MobileSAM]   * Encoder (.rknn): {rknn_path.resolve()} ({rknn_size})")
+                logger.info(f"[MobileSAM]   * Encoder (.rknn): {rknn_path.resolve()} ({_size_mb(rknn_path)})")
                 logger.info(f"[MobileSAM]   * Decoder:        {dec_desc}")
                 predictor = RKNNMobileSAMPredictor(
                     rknn_encoder_path=str(rknn_path),
                     checkpoint=checkpoint if not has_onnx_dec else None,
-                    onnx_decoder_path=str(dec_onnx) if has_onnx_dec else None,
+                    onnx_decoder_path=str(onnx_dec) if has_onnx_dec else None,
                 )
             except Exception as e:
                 logger.warning(
                     f"[MobileSAM] RKNN MobileSAM backend not available: {e}. Falling back to ONNX/PyTorch."
                 )
                 logger.debug("[MobileSAM] RKNN initialization error details:", exc_info=True)
-                device = "onnx" if (Path(onnx_encoder_path).exists() and Path(onnx_decoder_path).exists()) else "cpu"
+                device = "onnx" if onnx_ready else torch_dev
 
     # 2. ONNX Runtime path (Fast, lightweight inference on non-RK platforms)
-    if device == "onnx" and predictor is None:
-        enc_p = Path(onnx_encoder_path)
-        dec_p = Path(onnx_decoder_path)
-        if enc_p.exists() and dec_p.exists():
-            if enc_p.stat().st_size < 1024 or dec_p.stat().st_size < 1024:
-                logger.warning(
-                    f"[MobileSAM] ONNX models at {enc_p.name}/{dec_p.name} are un-pulled Git LFS pointers. "
-                    f"Falling back to PyTorch."
-                )
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-            else:
-                try:
-                    enc_size = f"{enc_p.stat().st_size / (1024 * 1024):.1f} MB"
-                    dec_size = f"{dec_p.stat().st_size / (1024 * 1024):.1f} MB"
-                    logger.info(f"[MobileSAM] Loading ONNX Runtime Backend:")
-                    logger.info(f"[MobileSAM]   * Encoder (.onnx): {enc_p.resolve()} ({enc_size})")
-                    logger.info(f"[MobileSAM]   * Decoder (.onnx): {dec_p.resolve()} ({dec_size})")
-                    predictor = ONNXMobileSAMPredictor(
-                        encoder_path=str(enc_p),
-                        decoder_path=str(dec_p),
-                    )
-                except Exception as e:
-                    logger.warning(
-                        f"[MobileSAM] ONNX MobileSAM backend not available: {e}. Falling back to PyTorch."
-                    )
-                    logger.debug("[MobileSAM] ONNX initialization error details:", exc_info=True)
-                    device = "cuda" if torch.cuda.is_available() else "cpu"
-        else:
+    if device == "onnx":
+        if not (onnx_enc.exists() and onnx_dec.exists()):
             logger.warning(
-                f"[MobileSAM] ONNX models not found ({enc_p.name}, {dec_p.name}), falling back to PyTorch."
+                f"[MobileSAM] ONNX models not found ({onnx_enc.name}, {onnx_dec.name}), falling back to PyTorch."
             )
-            device = "cuda" if torch.cuda.is_available() else "cpu"
+            device = torch_dev
+        elif not onnx_ready:
+            logger.warning(
+                f"[MobileSAM] ONNX models at {onnx_enc.name}/{onnx_dec.name} are un-pulled Git LFS pointers. "
+                f"Falling back to PyTorch."
+            )
+            device = torch_dev
+        else:
+            try:
+                logger.info(f"[MobileSAM] Loading ONNX Runtime Backend:")
+                logger.info(f"[MobileSAM]   * Encoder (.onnx): {onnx_enc.resolve()} ({_size_mb(onnx_enc)})")
+                logger.info(f"[MobileSAM]   * Decoder (.onnx): {onnx_dec.resolve()} ({_size_mb(onnx_dec)})")
+                predictor = ONNXMobileSAMPredictor(
+                    encoder_path=str(onnx_enc),
+                    decoder_path=str(onnx_dec),
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[MobileSAM] ONNX MobileSAM backend not available: {e}. Falling back to PyTorch."
+                )
+                logger.debug("[MobileSAM] ONNX initialization error details:", exc_info=True)
+                device = torch_dev
 
     # 3. PyTorch path (CUDA / MPS / CPU fallback)
     if predictor is None:
+        if not HAS_TORCH:
+            logger.error(
+                "[MobileSAM] No usable RKNN/ONNX model and PyTorch is not installed; MobileSAM is disabled."
+            )
+            logger.info("=" * 66)
+            return None
+
         if str(MOBILESAM_DIR) not in sys.path:
             sys.path.insert(0, str(MOBILESAM_DIR))
 
         ckpt_p = Path(checkpoint)
-        ckpt_size = f"{ckpt_p.stat().st_size / (1024 * 1024):.1f} MB" if ckpt_p.exists() else "missing"
+        ckpt_size = _size_mb(ckpt_p) if ckpt_p.exists() else "missing"
         gpu_name = f" ({torch.cuda.get_device_name(0)})" if device.startswith("cuda") and torch.cuda.is_available() else ""
 
         logger.info(f"[MobileSAM] Loading PyTorch Backend on device '{device}'{gpu_name}:")
@@ -661,16 +626,17 @@ def load_mobilesam(
 
 
 class MobileSAMSession:
+    """一张已编码图像及其点选会话。predictor 同时只能持有一张图的 embedding，
+    所以一个 predictor 只能对应一个活跃会话（切换模板必须重新 set_image）。"""
+
     def __init__(self, predictor):
         self.predictor = predictor
         self.image_bgr = None
-        self.image_rgb = None
 
     def set_image(self, image_bgr: np.ndarray):
         self.image_bgr = image_bgr
-        self.image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
         if self.predictor:
-            self.predictor.set_image(self.image_rgb)
+            self.predictor.set_image(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
 
     def predict(self, points: list[tuple[int, int]], labels: list[int]) -> tuple[np.ndarray | None, float]:
         """
@@ -683,6 +649,8 @@ class MobileSAMSession:
 
         coords = np.array(points, dtype=np.float32)
         lbls = np.array(labels, dtype=np.int32)
+        # 只点一个前景点时输入是歧义的，SAM 建议在三个粒度候选里取最优；一旦加了补充点
+        # （尤其是背景点）就改用稳定单 mask，否则 mask 会在不同粒度之间跳变。
         multimask = len(points) == 1
 
         masks, scores, _ = self.predictor.predict(

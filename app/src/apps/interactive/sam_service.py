@@ -4,7 +4,7 @@ import yaml
 import numpy as np
 import logging
 import time
-from typing import Dict, List, Tuple, Optional
+from typing import List, Tuple, Optional
 
 from core.vision.image2d.mobilesam_session import load_mobilesam, MobileSAMSession
 
@@ -13,7 +13,11 @@ logger = logging.getLogger(__name__)
 class SAMService:
     def __init__(self):
         self.predictor = None
-        self.sessions: Dict[str, MobileSAMSession] = {}
+        # MobileSAM predictor 内部只留一份 image embedding，所以只能有一个活跃会话；
+        # 旧实现按模板名缓存多个 session，它们共享同一个 predictor，跨模板预测会静默
+        # 用到另一个模板的图像，所以改成“单会话 + 当前模板名”。
+        self.session: Optional[MobileSAMSession] = None
+        self.loaded_template: Optional[str] = None
 
     def initialize(self):
         """Loads the MobileSAM weights into predictor on server startup."""
@@ -31,12 +35,14 @@ class SAMService:
         except Exception as e:
             logger.error(f"Failed to initialize MobileSAM: {e}", exc_info=True)
 
-    def get_session(self, template_name: str) -> MobileSAMSession:
-        if self.predictor is None:
-            self.initialize()
-        if template_name not in self.sessions:
-            self.sessions[template_name] = MobileSAMSession(self.predictor)
-        return self.sessions[template_name]
+    def _ensure_session(self, template_path: str, template_name: str) -> Optional[MobileSAMSession]:
+        """返回已编码 template_name 图像的会话；未 init 或已切到其他模板时重新加载图像。
+        predictor 只持有一份 embedding，所以这里必须校验当前模板，否则会静默预测另一张图。"""
+        if self.session is not None and self.loaded_template == template_name:
+            return self.session
+        if template_path and self.init_template(template_path, template_name):
+            return self.session
+        return None
 
     def init_template(self, template_path: str, template_name: str) -> bool:
         """Loads scan.color.jpg (or legacy scan.jpg) for the template and sets it in the predictor."""
@@ -55,8 +61,12 @@ class SAMService:
             return False
             
         h, w = image_bgr.shape[:2]
-        session = self.get_session(template_name)
-        session.set_image(image_bgr)
+        if self.predictor is None:
+            self.initialize()
+        if self.session is None:
+            self.session = MobileSAMSession(self.predictor)
+        self.session.set_image(image_bgr)
+        self.loaded_template = template_name
         logger.info(f"[SAM] MobileSAM image encoded for '{template_name}' ({w}x{h}) in {time.time() - t0:.2f}s.")
         return True
 
@@ -73,9 +83,17 @@ class SAMService:
                 polygons.append(cnt.tolist())
         return polygons
 
-    def predict_action(self, template_name: str, points: List[List[int]], labels: List[int]) -> dict:
+    def predict_action(
+        self,
+        template_name: str,
+        points: List[List[int]],
+        labels: List[int],
+        template_path: str = "",
+    ) -> dict:
         """Predict mask based on points and return polygons."""
-        session = self.get_session(template_name)
+        session = self._ensure_session(template_path, template_name)
+        if session is None:
+            raise RuntimeError(f"Failed to load SAM session for template '{template_name}'")
         
         # Convert List[List[int]] to List[Tuple[int, int]]
         points_tuples = [(int(p[0]), int(p[1])) for p in points]
@@ -98,6 +116,24 @@ class SAMService:
         )
         return {"polygons": polygons, "score": float(score)}
 
+    @staticmethod
+    def _parse_mask_points(mask_data: dict) -> Tuple[List[List[int]], List[int]]:
+        """解析提交的点集，兼容两种格式：[[x, y], ...]（yaml 回读）与 [{x, y, label}, ...]（前端）。"""
+        pts: List[List[int]] = []
+        lbls: List[int] = []
+        for p in mask_data.get("points") or []:
+            if isinstance(p, dict):
+                x, y, label = p.get("x"), p.get("y"), p.get("label")
+            elif p and len(p) >= 2:
+                x, y, label = p[0], p[1], p[2] if len(p) > 2 else None
+            else:
+                continue
+            if x is None or y is None:
+                continue
+            pts.append([int(x), int(y)])
+            lbls.append(int(label) if label is not None else 1)
+        return pts, lbls
+
     def save_masks(self, template_path: str, template_name: str, committed_masks: List[dict]) -> bool:
         """
         committed_masks format:
@@ -110,11 +146,10 @@ class SAMService:
         ]
         """
         logger.info(f"[SAM] Starting mask save for template '{template_name}' ({len(committed_masks)} mask(s))...")
-        session = self.get_session(template_name)
-        if session.image_bgr is None:
-            if not self.init_template(template_path, template_name):
-                logger.error(f"[SAM] Unable to load image for template '{template_name}'.")
-                return False
+        session = self._ensure_session(template_path, template_name)
+        if session is None:
+            logger.error(f"[SAM] Unable to load image for template '{template_name}'.")
+            return False
                 
         yaml_data = {"version": "1.0", "template_name": template_name, "masks": []}
         
@@ -125,33 +160,10 @@ class SAMService:
         ]
         
         for idx, mask_data in enumerate(committed_masks):
-            # Parse points robustly: handles [x, y], {"x": ..., "y": ..., "label": ...}, etc.
-            raw_pts = mask_data.get("points", [])
-            pts = []
-            lbls_from_pts = []
-            for p in raw_pts:
-                if isinstance(p, (list, tuple)) and len(p) >= 2 and p[0] is not None and p[1] is not None:
-                    pts.append([int(p[0]), int(p[1])])
-                    if len(p) >= 3 and p[2] is not None:
-                        lbls_from_pts.append(int(p[2]))
-                elif isinstance(p, dict) and "x" in p and "y" in p and p["x"] is not None and p["y"] is not None:
-                    pts.append([int(p["x"]), int(p["y"])])
-                    if "label" in p and p["label"] is not None:
-                        lbls_from_pts.append(int(p["label"]))
-            
-            raw_lbls = mask_data.get("labels", [])
-            lbls = []
-            for l in raw_lbls:
-                if l is not None:
-                    lbls.append(int(l))
-            
-            # If labels were not at top level, use labels extracted from points objects
-            if not lbls and lbls_from_pts:
-                lbls = lbls_from_pts
-            
-            # If labels length still doesn't match pts length, default remaining to 1 (foreground)
-            if len(lbls) < len(pts):
-                lbls.extend([1] * (len(pts) - len(lbls)))
+            pts, point_labels = self._parse_mask_points(mask_data)
+            # 顶层 labels 优先（前端与 yaml 都会带），缺失时退回点里内嵌的 label，不足的补前景
+            lbls = [int(l) for l in (mask_data.get("labels") or []) if l is not None] or point_labels
+            lbls = lbls[: len(pts)] + [1] * max(0, len(pts) - len(lbls))
             
             if not pts:
                 if "polygons" in mask_data and mask_data["polygons"]:
