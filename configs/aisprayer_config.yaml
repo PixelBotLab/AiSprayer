@@ -204,4 +204,13 @@ follow:
 interactive:
   sam:
     backend: "auto"             # 可选: auto (自动探测: RK3588走RKNN, PC有GPU走CUDA, 无GPU走ONNX), rknn, onnx, pt/cuda/cpu
+  detector:
+    # 进入交互分割时先用 wissight 检出衣物，把框当 MobileSAM 的初始 box prompt（检不到则回退手动点选）
+    enabled: true
+    sam_refine: false              # true: 检出的框交 MobileSAM 精修; false: 直接用 wissight 自己的实例 mask（不跑 MobileSAM）
+    backend: "auto"             # 可选: auto (RK3588 走 .rknn/NPU, 其他平台 .onnx, 只有权重时 .pt), rknn, onnx, pt
+    classes: ["trousers"]       # 当成目标的类别，空列表 = 不过滤；可选值见 core/vision/image2d/wissight_detector.py:CLASS_NAMES
+    conf: 0.25                  # 置信度阈值：实测 0.25 结果干净，降到 0.10 会混进 sling/shirt 等误类
+    iou: 0.7                    # NMS IoU 阈值
+    max_boxes: 5                # 回传给界面的最大候选框数（按面积降序，第一个当主体）
 

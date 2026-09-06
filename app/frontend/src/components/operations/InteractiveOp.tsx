@@ -92,6 +92,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const [savedMasks, setSavedMasks] = useState<MaskData[]>([]);
   const [showMasksOverlay, setShowMasksOverlay] = useState<boolean>(true);
   const [isSamInitializing, setIsSamInitializing] = useState<boolean>(false);
+  // wissight 检出的 box prompt：作为当前初稿的提示之一参与预测，可手动去掉
+  const [currentBox, setCurrentBox] = useState<number[] | null>(null);
+  const [isDetecting, setIsDetecting] = useState<boolean>(false);
 
   // ─── 4. Manual / Auto × Orig / POI path state ────────────────────────────
   const [activeState, setActiveState] = useState<PathStateType>('raw');
@@ -355,6 +358,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     setManualPathMode(false);
     setCurrentPoints([]);
     setCurrentPolygons([]);
+    setCurrentBox(null);
     setCommittedMasks([]);
     setCurrentManualPoints([]);
     setSelectedPathIdForEdit(null);
@@ -488,17 +492,15 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       setSegMode(false);
       setCurrentPoints([]);
       setCurrentPolygons([]);
+      setCurrentBox(null);
       return;
     }
     if (!activeTemplate || !hasImage) return;
     setSegMode(true);
     setCurrentPoints([]);
     setCurrentPolygons([]);
-    if (savedMasks.length > 0) {
-      setCommittedMasks([...savedMasks]);
-    } else {
-      setCommittedMasks([]);
-    }
+    setCurrentBox(null);
+    setCommittedMasks(savedMasks.length > 0 ? [...savedMasks] : []);
 
     setIsSamInitializing(true);
 
@@ -511,6 +513,50 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     } finally {
       setIsSamInitializing(false);
     }
+
+    // 图像编码完成后先检一次；检不到就维持原来的纯手动点选，不阻断流程
+    detectBox(false);
+  };
+
+  /**
+   * 跑一次 wissight 检测，命中则拿面积最大的框：开精修时把它当 box prompt 去预测，
+   * 关精修时直接用后端解出的实例 mask 当可编辑初稿。
+   * silent=false 时只在“什么都没检到”弹提示（检到时图上的虚线框本身就是反馈）。
+   */
+  const detectBox = async (silent = true) => {
+    if (!activeTemplate) return;
+    setIsDetecting(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/detect`, {
+        method: 'POST',
+      });
+      if (!res.ok) throw new Error(`Detect failed (${res.status})`);
+      const data = await res.json();
+      // 后端已按面积降序，[0] 即画面主体
+      const box: number[] | undefined = data.detections?.[0]?.box;
+      if (!box) {
+        if (!silent) showNotice('info', '未检出目标，请手动点选分割');
+        return;
+      }
+      setCurrentBox(box);
+      if (data.sam_refine === false && data.polygons?.length) {
+        setCurrentPolygons(data.polygons);
+      } else {
+        predictMask(currentPoints, box);
+      }
+    } catch (err: any) {
+      console.warn('Auto-detect error:', err);
+      if (!silent) showNotice('error', `自动检测失败: ${err.message}`);
+    } finally {
+      setIsDetecting(false);
+    }
+  };
+
+  /** 去掉 box 提示，回到只用点提示的预测（点也为空则清空初稿）。 */
+  const handleClearDetectedBox = () => {
+    setCurrentBox(null);
+    if (currentPoints.length > 0) predictMask(currentPoints, null);
+    else setCurrentPolygons([]);
   };
 
   const handleSegImageClick = async (e: MouseEvent<SVGSVGElement>) => {
@@ -536,8 +582,8 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     predictMask(newPoints);
   };
 
-  const predictMask = async (pts: Point[]) => {
-    if (!activeTemplate || pts.length === 0) {
+  const predictMask = async (pts: Point[], box: number[] | null = currentBox) => {
+    if (!activeTemplate || (pts.length === 0 && !box)) {
       setCurrentPolygons([]);
       return;
     }
@@ -548,6 +594,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         body: JSON.stringify({
           points: pts.map((p) => [p.x, p.y]),
           labels: pts.map((p) => p.label),
+          box,
         }),
       });
       if (!res.ok) throw new Error('Predict failed');
@@ -564,22 +611,25 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       id: committedMasks.length + 1,
       points: [...currentPoints],
       labels: currentPoints.map((p) => p.label),
+      box: currentBox || undefined,
       polygons: currentPolygons,
     };
     setCommittedMasks([...committedMasks, newMask]);
     setCurrentPoints([]);
     setCurrentPolygons([]);
+    setCurrentBox(null);
   };
 
   const handleSaveAllSegMasks = async () => {
     if (!activeTemplate) return;
     try {
       const masksToSave: MaskData[] = [...committedMasks];
-      if (currentPolygons.length > 0 && currentPoints.length > 0) {
+      if (currentPolygons.length > 0 && (currentPoints.length > 0 || currentBox)) {
         masksToSave.push({
           id: masksToSave.length + 1,
           points: [...currentPoints],
           labels: currentPoints.map((p) => p.label),
+          box: currentBox || undefined,
           polygons: currentPolygons,
         });
       }
@@ -598,6 +648,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       setCommittedMasks(masksToSave);
       setCurrentPoints([]);
       setCurrentPolygons([]);
+      setCurrentBox(null);
       setSavedMasks(masksToSave);
       setSegMode(false);
       await fetchTemplateFiles(activeTemplate);
@@ -1295,6 +1346,8 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
           committedMasks={committedMasks}
           currentPolygons={currentPolygons}
           currentPoints={currentPoints}
+          currentBox={currentBox}
+          isDetecting={isDetecting}
           manualPaths={manualPaths}
           currentManualPoints={currentManualPoints}
           selectedPathIdForEdit={selectedPathIdForEdit}
@@ -1344,24 +1397,29 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
             if (currentPoints.length === 0) return;
             const updated = currentPoints.slice(0, -1);
             setCurrentPoints(updated);
-            if (updated.length > 0) predictMask(updated);
+            // 还带着检测框时回到 box 初稿，而不是直接清空
+            if (updated.length > 0 || currentBox) predictMask(updated, currentBox);
             else setCurrentPolygons([]);
           }}
           onClearCurrentSegPoints={() => {
             setCurrentPoints([]);
-            setCurrentPolygons([]);
+            predictMask([], currentBox);
           }}
+          onDetectBox={() => detectBox(false)}
+          onClearDetectedBox={handleClearDetectedBox}
           onCommitCurrentSegMask={handleCommitCurrentSegMask}
           onSaveAllSegMasks={handleSaveAllSegMasks}
           onClearAllMasks={() => {
             setCommittedMasks([]);
             setCurrentPoints([]);
             setCurrentPolygons([]);
+            setCurrentBox(null);
           }}
           onExitSegMode={() => {
             setSegMode(false);
             setCurrentPoints([]);
             setCurrentPolygons([]);
+            setCurrentBox(null);
           }}
           onUndoManualPoint={() => {
             if (currentManualPoints.length === 0) return;

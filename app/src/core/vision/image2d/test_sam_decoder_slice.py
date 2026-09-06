@@ -12,6 +12,10 @@
 （无 orig_im_size、只 2 路输出且 iou 在前）—— `_run_onnx_decoder` 是按位置解包的，输出数量
 碰巧对上时就会静默地把 iou 当成 mask 用，所以必须按名字和顺序显式校验。
 
+还钉住 wissight box prompt 接入后的会话层语义（`MobileSAMSession.predict`）：box 必须
+展开成左上/右下两个角点 + labels [2, 3]，且带 box 时固定用稳定单 mask —— 实测 box-only
+出 1 个连通块，而人工点选同一目标会碎成 17 个。
+
 跑法：
     cd app/src && python3 -m core.vision.image2d.test_sam_decoder_slice
 """
@@ -28,6 +32,7 @@ import numpy as np
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 
 from core.vision.image2d.mobilesam_session import (  # noqa: E402
+    MobileSAMSession,
     _check_decoder_graph,
     _run_onnx_decoder,
 )
@@ -144,6 +149,58 @@ class TestGraphSignatureGuard(unittest.TestCase):
         dec = FakeDecoder(signature=RKNN_SRC_SIGNATURE)
         with self.assertRaisesRegex(RuntimeError, "not the expected MobileSAM decoder graph"):
             _check_decoder_graph(dec, Path("mobile_sam_decoder.onnx"))
+
+
+class FakePredictor:
+    """记录收到的 prompt，回一个 4x4 全 True 的 mask。"""
+
+    def __init__(self):
+        self.call = None
+
+    def predict(self, point_coords, point_labels, multimask_output):
+        self.call = (np.asarray(point_coords), np.asarray(point_labels), multimask_output)
+        n = 3 if multimask_output else 1
+        return np.ones((n, 4, 4), bool), np.linspace(0.3, 0.9, n), np.zeros((n, 4, 4))
+
+
+def session_with_box(box, points=(), labels=()):
+    pred = FakePredictor()
+    MobileSAMSession(pred).predict(list(points), list(labels), box=box)
+    return pred.call
+
+
+class TestSessionBoxPrompt(unittest.TestCase):
+    def test_box_becomes_two_corner_points(self):
+        coords, lbls, multimask = session_with_box([320.9, 113.0, 731.1, 627.0])
+        np.testing.assert_allclose(coords, [[320.9, 113.0], [731.1, 627.0]], rtol=1e-6)
+        np.testing.assert_array_equal(lbls, [2, 3])
+        # box-only 必须走稳定单 mask：3 个粒度候选里 argmax 会在精修时跳变
+        self.assertFalse(multimask)
+
+    def test_corner_order_is_normalized_and_box_alone_is_a_valid_prompt(self):
+        coords, _, _ = session_with_box([731.1, 627.0, 320.9, 113.0])
+        np.testing.assert_allclose(coords, [[320.9, 113.0], [731.1, 627.0]], rtol=1e-6)
+
+    def test_box_and_points_are_merged(self):
+        coords, lbls, multimask = session_with_box([10, 20, 30, 40], points=[(5, 5)], labels=[0])
+        np.testing.assert_allclose(coords, [[5, 5], [10, 20], [30, 40]], rtol=1e-6)
+        np.testing.assert_array_equal(lbls, [0, 2, 3])
+        self.assertFalse(multimask)
+
+    def test_single_point_without_box_still_uses_multimask(self):
+        _, _, multimask = session_with_box(None, points=[(5, 5)], labels=[1])
+        self.assertTrue(multimask)
+
+    def test_no_prompt_returns_none(self):
+        pred = FakePredictor()
+        mask, score = MobileSAMSession(pred).predict([], [])
+        self.assertIsNone(mask)
+        self.assertEqual(score, 0.0)
+        self.assertIsNone(pred.call)
+
+    def test_malformed_box_raises_instead_of_silently_ignoring(self):
+        with self.assertRaisesRegex(ValueError, "box must have 4 numbers"):
+            session_with_box([10, 20, 30])
 
 
 if __name__ == "__main__":

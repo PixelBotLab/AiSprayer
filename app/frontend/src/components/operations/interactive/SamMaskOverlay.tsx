@@ -18,6 +18,8 @@ interface SamMaskOverlayProps {
   committedMasks: MaskData[];
   currentPolygons: number[][][];
   currentPoints: Point[];
+  /** wissight 检出的 box prompt [x1,y1,x2,y2]，当前初稿由它衍生 */
+  currentBox?: number[] | null;
   natSize: { w: number; h: number };
   isReconstructing?: boolean;
   isAutoGenerating?: boolean;
@@ -34,6 +36,7 @@ export const SamMaskOverlay: React.FC<SamMaskOverlayProps> = ({
   committedMasks,
   currentPolygons,
   currentPoints,
+  currentBox,
   natSize,
   isReconstructing = false,
   isAutoGenerating = false,
@@ -259,6 +262,23 @@ export const SamMaskOverlay: React.FC<SamMaskOverlayProps> = ({
               'rgba(59, 130, 246, 0.45)',
               '#60a5fa'
             )}
+
+          {/* Detection box prompt: 与自动初稿同色系但更细，提醒用户这是可删的提示而非结果 */}
+          {currentBox && currentBox.length === 4 && (
+            <rect
+              x={Math.min(currentBox[0], currentBox[2])}
+              y={Math.min(currentBox[1], currentBox[3])}
+              width={Math.abs(currentBox[2] - currentBox[0])}
+              height={Math.abs(currentBox[3] - currentBox[1])}
+              fill="none"
+              stroke="#fbbf24"
+              strokeWidth={2}
+              strokeDasharray="10 6"
+              pointerEvents="none"
+            >
+              <animate attributeName="stroke-dashoffset" values="0;32" dur="1.6s" repeatCount="indefinite" />
+            </rect>
+          )}
 
           {/* Current user prompt points (Green = FG, Red = BG) */}
           {currentPoints.map((p, idx) => (

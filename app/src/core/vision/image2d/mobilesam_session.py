@@ -1,12 +1,22 @@
-import os
 import sys
-import platform
 import logging
 from pathlib import Path
-from typing import Tuple, Optional, List
+from typing import Tuple, Optional, List, Sequence
 
 import cv2
 import numpy as np
+
+from core.config import sprayer_config
+from core.vision.backend import (
+    REPO_ROOT,
+    is_rk3588,
+    load_rknn_runtime,
+    model_ready as _model_ready,
+    pick_backend,
+    size_mb as _size_mb,
+    torch_device as _torch_device,
+)
+
 try:
     import torch
     HAS_TORCH = True
@@ -22,74 +32,18 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# Adjust paths based on the project structure
-REPO_ROOT = Path(__file__).resolve().parents[5]
+# MobileSAM 相关模型与代码目录（项目根由 core.vision.backend 统一给出）
 MOBILESAM_DIR = REPO_ROOT / "third_party" / "MobileSAM"
 
 DEFAULT_MOBILESAM_WEIGHTS = REPO_ROOT / "models" / "mobile_sam.pt"
 
-# RKNN models (RK3588 NPU)
+# RKNN image encoder (RK3588 NPU)。decoder 没有 .rknn 版：转换脚本导的 decoder 图与运行时
+# 不兼容（无 orig_im_size、只 2 路输出），运行时固定用下面那份 ONNX decoder。
 DEFAULT_MOBILESAM_RKNN_ENCODER = REPO_ROOT / "models" / "mobile_sam_encoder.rknn"
-DEFAULT_MOBILESAM_RKNN_DECODER = REPO_ROOT / "models" / "mobile_sam_decoder.rknn"
 
 # ONNX models (Non-RK, x86, macOS, generic Linux)
 DEFAULT_MOBILESAM_ONNX_ENCODER = REPO_ROOT / "models" / "mobile_sam_encoder.onnx"
 DEFAULT_MOBILESAM_ONNX_DECODER = REPO_ROOT / "models" / "mobile_sam_decoder.onnx"
-
-
-def is_rk3588() -> bool:
-    """Detect if running on a Rockchip RK3588 platform."""
-    # 1. Check device tree model
-    dt_model_path = Path("/proc/device-tree/model")
-    if dt_model_path.exists():
-        try:
-            model_str = dt_model_path.read_text(errors="ignore").lower()
-            if "rk3588" in model_str or "orange pi 5" in model_str:
-                return True
-        except Exception:
-            pass
-
-    # 2. Check device tree compatible string
-    dt_compat_path = Path("/proc/device-tree/compatible")
-    if dt_compat_path.exists():
-        try:
-            compat_str = dt_compat_path.read_text(errors="ignore").lower()
-            if "rk3588" in compat_str:
-                return True
-        except Exception:
-            pass
-
-    # 3. Check architecture and NPU device node
-    if platform.machine() in ("aarch64", "arm64"):
-        if Path("/dev/rknpu").exists() or Path("/dev/mpp_service").exists():
-            return True
-
-    return False
-
-
-def get_configured_sam_backend() -> Optional[str]:
-    """Read backend configured in configs/aisprayer_config.yaml under interactive.sam.backend."""
-    cfg_file = REPO_ROOT / "configs" / "aisprayer_config.yaml"
-    if cfg_file.exists():
-        try:
-            import yaml
-            with open(cfg_file, "r", encoding="utf-8") as f:
-                data = yaml.safe_load(f) or {}
-                backend = data.get("interactive", {}).get("sam", {}).get("backend")
-                if backend and isinstance(backend, str) and backend.strip():
-                    return backend.strip().lower()
-        except Exception as e:
-            logger.debug(f"[MobileSAM] Could not read backend from {cfg_file}: {e}")
-    return None
-
-
-def _model_ready(path: Path) -> bool:
-    """模型文件存在、且不是未拉取的 Git LFS 指针文件。"""
-    return path.exists() and path.stat().st_size > 1024
-
-
-def _size_mb(path: Path) -> str:
-    return f"{path.stat().st_size / (1024 * 1024):.1f} MB"
 
 
 def _has_onnx_models() -> bool:
@@ -97,63 +51,20 @@ def _has_onnx_models() -> bool:
     return _model_ready(DEFAULT_MOBILESAM_ONNX_ENCODER) and _model_ready(DEFAULT_MOBILESAM_ONNX_DECODER)
 
 
-def _torch_device() -> Optional[str]:
-    """PyTorch 后端对应的设备名；torch 未安装（如 docker slim 镜像）时返回 None 交给自动探测。"""
-    if not HAS_TORCH:
-        return None
-    return "cuda" if torch.cuda.is_available() else "cpu"
-
-
-def resolve_device(requested: str | None = None) -> str:
-    """
-    Resolve inference device/backend:
-    1. Explicit requested device ('rknn', 'onnx', 'cuda', 'mps', 'cpu', 'pt')
-    2. Environment variable MOBILESAM_DEVICE or MOBILESAM_BACKEND
-    3. Configuration file (configs/aisprayer_config.yaml: interactive.sam.backend)
-    4. Auto-detection:
-       - On RK3588 with RKNN model: 'rknn'
-       - If CUDA available: 'cuda'
-       - Non-RK with ONNX models: 'onnx' (faster & lighter than PyTorch CPU)
-       - If MPS available: 'mps'
-       - Otherwise: 'cpu'
-    """
-    def _normalize(target: str | None) -> str | None:
-        if not target:
-            return None
-        t = target.lower().strip()
-        if t in ("pt", "pytorch", "torch"):
-            return _torch_device()
-        if t in ("auto", "default"):
-            return None
-        return t
-
-    norm = _normalize(requested)
-    if norm:
-        return norm
-
-    env_dev = os.getenv("MOBILESAM_DEVICE") or os.getenv("MOBILESAM_BACKEND")
-    norm = _normalize(env_dev)
-    if norm:
-        return norm
-
-    cfg_backend = get_configured_sam_backend()
-    norm = _normalize(cfg_backend)
-    if norm:
-        return norm
-
-    # Auto-detection:
-    # 1. On RK3588, default to RKNN
-    if is_rk3588() and DEFAULT_MOBILESAM_RKNN_ENCODER.exists():
+def _auto_backend() -> str:
+    """未指定后端时的探测顺序：NPU > CUDA > ONNX > MPS > CPU。"""
+    # 1. RK3588 上优先走 NPU
+    if is_rk3588() and _model_ready(DEFAULT_MOBILESAM_RKNN_ENCODER):
         return "rknn"
 
-    # 2. PyTorch CUDA if available
+    # 2. PyTorch CUDA
     if HAS_TORCH and torch.cuda.is_available():
         return "cuda"
 
-    # 3. Non-RK platform: prefer ONNX if onnx models exist and onnxruntime is available
+    # 3. 非 RK 平台：有 ONNX 模型就用它（比 PyTorch CPU 更快、更轻）
     if _has_onnx_models():
         try:
-            import onnxruntime
+            import onnxruntime  # noqa: F401
             return "onnx"
         except ImportError:
             pass
@@ -162,6 +73,21 @@ def resolve_device(requested: str | None = None) -> str:
         return "mps"
 
     return "cpu"
+
+
+def resolve_device(requested: str | None = None) -> str:
+    """解析 MobileSAM 推理后端。
+
+    优先级：显式入参 > 环境变量 MOBILESAM_DEVICE/MOBILESAM_BACKEND >
+    配置 interactive.sam.backend > _auto_backend() 自动探测。
+    'pt'/'pytorch' 会归一成具体 torch 设备，'auto' 等价于未填。
+    """
+    return pick_backend(
+        requested,
+        ("MOBILESAM_DEVICE", "MOBILESAM_BACKEND"),
+        sprayer_config.sam_backend,
+        _auto_backend,
+    )
 
 
 
@@ -400,7 +326,6 @@ class RKNNMobileSAMPredictor:
                 sys.path.insert(0, str(MOBILESAM_DIR))
 
             from mobile_sam import sam_model_registry, SamPredictor
-            from mobile_sam.utils.transforms import ResizeLongestSide
 
             logger.info(f"[MobileSAM-RKNN] Loading decoder weights from {ckpt}...")
             sam = sam_model_registry["vit_t"](checkpoint=ckpt)
@@ -421,40 +346,7 @@ class RKNNMobileSAMPredictor:
         self.input_size = None
 
     def _init_rknn(self):
-        # 1. Try RKNNLite (board aarch64 runtime)
-        try:
-            from rknnlite.api import RKNNLite
-            self.rknn = RKNNLite()
-            ret = self.rknn.load_rknn(self.rknn_encoder_path)
-            if ret != 0:
-                raise RuntimeError(f"RKNNLite.load_rknn failed, code: {ret}")
-            ret = self.rknn.init_runtime(core_mask=RKNNLite.NPU_CORE_AUTO)
-            if ret != 0:
-                raise RuntimeError(f"RKNNLite.init_runtime failed, code: {ret}")
-            logger.info(f"[MobileSAM-RKNN] RKNNLite NPU runtime initialized (AUTO cores).")
-            return
-        except ImportError:
-            pass
-
-        # 2. Try full RKNN Toolkit (e.g. simulation or test host)
-        try:
-            from rknn.api import RKNN
-            self.rknn = RKNN(verbose=False)
-            ret = self.rknn.load_rknn(self.rknn_encoder_path)
-            if ret != 0:
-                raise RuntimeError(f"RKNN.load_rknn failed, code: {ret}")
-            ret = self.rknn.init_runtime()
-            if ret != 0:
-                raise RuntimeError(f"RKNN.init_runtime failed, code: {ret}")
-            logger.info(f"[MobileSAM-RKNN] RKNN runtime initialized.")
-            return
-        except ImportError:
-            pass
-
-        raise RuntimeError(
-            "Neither 'rknnlite' nor 'rknn' Python module is available. "
-            "Install rknn-toolkit-lite2 on RK3588 (or rknn-toolkit2 on PC)."
-        )
+        self.rknn = load_rknn_runtime(self.rknn_encoder_path)
 
     def set_image(self, image: np.ndarray, image_format: str = "RGB") -> None:
         """
@@ -663,24 +555,37 @@ class MobileSAMSession:
         if self.predictor:
             self.predictor.set_image(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
 
-    def predict(self, points: list[tuple[int, int]], labels: list[int]) -> tuple[np.ndarray | None, float]:
+    def predict(
+        self,
+        points: list[tuple[int, int]],
+        labels: list[int],
+        box: Optional[Sequence[float]] = None,
+    ) -> tuple[np.ndarray | None, float]:
+        """点提示 + 可选 box 提示，返回 (mask, score)；无任何提示时返回 (None, 0.0)。
+
+        box 按 SAM 约定展开成左上/右下两个角点 + labels [2, 3]，和点提示合成同一份
+        输入：ONNX 图（_embed_points 里 label 2/3 → 对应的 corner embedding）与
+        PyTorch 回退路径拿到的提示完全一致，跨平台不会分叉。
         """
-        Returns:
-            mask (np.ndarray): Boolean mask array
-            score (float): Confidence score
-        """
-        if not self.predictor or not points:
+        if not self.predictor or (not points and box is None):
             return None, 0.0
 
-        coords = np.array(points, dtype=np.float32)
-        lbls = np.array(labels, dtype=np.int32)
-        # 只点一个前景点时输入是歧义的，SAM 建议在三个粒度候选里取最优；一旦加了补充点
-        # （尤其是背景点）就改用稳定单 mask，否则 mask 会在不同粒度之间跳变。
-        multimask = len(points) == 1
+        coords = list(points)
+        lbls = list(labels)
+        if box is not None:
+            if len(box) != 4:
+                raise ValueError(f"box must have 4 numbers (x1, y1, x2, y2), got {box!r}")
+            x1, y1, x2, y2 = (float(v) for v in box)
+            coords += [(min(x1, x2), min(y1, y2)), (max(x1, x2), max(y1, y2))]
+            lbls += [2, 3]
+
+        # 单点提示在输入上是歧义的，SAM 建议在三个粒度候选里取最优；一旦有了 box 或
+        # 补充点（尤其背景点）就改用稳定单 mask，否则 mask 会在不同粒度之间跳变。
+        multimask = box is None and len(coords) == 1
 
         masks, scores, _ = self.predictor.predict(
-            point_coords=coords,
-            point_labels=lbls,
+            point_coords=np.array(coords, dtype=np.float32),
+            point_labels=np.array(lbls, dtype=np.int32),
             multimask_output=multimask,
         )
 

@@ -18,6 +18,8 @@ import {
   AlertTriangle,
   AlertOctagon,
   Info,
+  ScanSearch,
+  SquareDashed,
 } from 'lucide-react';
 import type {
   MaskData,
@@ -35,7 +37,7 @@ import { PATH_PALETTE } from './types';
 import { PathStateSwitcher } from './PathStateSwitcher';
 import { SamMaskOverlay } from './SamMaskOverlay';
 import { PathSvgOverlay } from './PathSvgOverlay';
-import { TOOLBAR_TIP_CLASS } from './ToolbarTip';
+import { ToolbarTip, TOOLBAR_TIP_CLASS } from './ToolbarTip';
 
 interface InteractiveCanvasProps {
   imageUrl: string | null;
@@ -56,6 +58,9 @@ interface InteractiveCanvasProps {
   committedMasks: MaskData[];
   currentPolygons: number[][][];
   currentPoints: Point[];
+  /** wissight 检出的 box prompt，当前初稿由它衍生 */
+  currentBox?: number[] | null;
+  isDetecting?: boolean;
   manualPaths: ManualPathItem[];
   currentManualPoints: WaypointItem[];
   selectedPathIdForEdit: number | null;
@@ -89,6 +94,8 @@ interface InteractiveCanvasProps {
   onToggleManualPathsOverlay: () => void;
   onUndoSegPoint: () => void;
   onClearCurrentSegPoints: () => void;
+  onDetectBox: () => void;
+  onClearDetectedBox: () => void;
   onClearAllMasks: () => void;
   onCommitCurrentSegMask: () => void;
   onSaveAllSegMasks: () => void;
@@ -119,6 +126,8 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
   committedMasks,
   currentPolygons,
   currentPoints,
+  currentBox = null,
+  isDetecting = false,
   manualPaths,
   currentManualPoints,
   selectedPathIdForEdit,
@@ -152,6 +161,8 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
   onToggleManualPathsOverlay,
   onUndoSegPoint,
   onClearCurrentSegPoints,
+  onDetectBox,
+  onClearDetectedBox,
   onClearAllMasks,
   onCommitCurrentSegMask,
   onSaveAllSegMasks,
@@ -436,6 +447,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
                 committedMasks={committedMasks}
                 currentPolygons={currentPolygons}
                 currentPoints={currentPoints}
+                currentBox={currentBox}
                 natSize={natSize}
                 isReconstructing={isReconstructing}
                 isAutoGenerating={isAutoGenerating}
@@ -527,6 +539,30 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
             <span className="w-1.5 h-1.5 rounded-full bg-rose-400 inline-block ml-0.5" title="Right Click: Background" />
           </div>
 
+          {/* Auto Detect: 用 wissight 出框当初始 prompt */}
+          <div className="relative group flex items-center">
+            <button
+              onClick={onDetectBox}
+              disabled={isDetecting}
+              className="p-1 text-sky-300 hover:text-white hover:bg-sky-400/20 rounded-full disabled:opacity-40 transition-colors"
+            >
+              <ScanSearch size={12} className={isDetecting ? 'animate-pulse' : undefined} />
+            </button>
+            <ToolbarTip>Detect Box Prompt</ToolbarTip>
+          </div>
+
+          {/* Remove detected box: 只去掉提示，已点下的点保留 */}
+          <div className="relative group flex items-center">
+            <button
+              onClick={onClearDetectedBox}
+              disabled={!currentBox}
+              className="p-1 text-amber-300 hover:text-amber-200 hover:bg-amber-300/20 rounded-full disabled:opacity-30 transition-colors"
+            >
+              <SquareDashed size={12} />
+            </button>
+            <ToolbarTip>Remove Detected Box</ToolbarTip>
+          </div>
+
           {/* Undo Point */}
           <div className="relative group flex items-center">
             <button
@@ -536,11 +572,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
             >
               <Undo2 size={12} />
             </button>
-            <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
-                Undo Point
-              </div>
-            </div>
+            <ToolbarTip>Undo Point</ToolbarTip>
           </div>
 
           {/* Reset Current Points */}
@@ -552,11 +584,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
             >
               <RefreshCw size={12} />
             </button>
-            <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
-                Reset Points
-              </div>
-            </div>
+            <ToolbarTip>Reset Points</ToolbarTip>
           </div>
 
           {/* Commit Mask */}
@@ -568,11 +596,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
             >
               <Check size={12} />
             </button>
-            <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
-                Commit Current Mask
-              </div>
-            </div>
+            <ToolbarTip>Commit Current Mask</ToolbarTip>
           </div>
 
           <div className="w-px h-3 bg-white/10 mx-0.5" />
@@ -586,11 +610,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
             >
               <Trash2 size={12} />
             </button>
-            <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
-                Clear All Masks
-              </div>
-            </div>
+            <ToolbarTip>Clear All Masks</ToolbarTip>
           </div>
 
           {/* Save Masks to YAML */}
@@ -602,11 +622,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
             >
               <Save size={12} />
             </button>
-            <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
-                Save Masks to YAML
-              </div>
-            </div>
+            <ToolbarTip>Save Masks to YAML</ToolbarTip>
           </div>
 
           {/* Exit Seg Mode */}
@@ -617,11 +633,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
             >
               <X size={12} />
             </button>
-            <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
-                Exit Segmentation
-              </div>
-            </div>
+            <ToolbarTip>Exit Segmentation</ToolbarTip>
           </div>
         </div>
       )}

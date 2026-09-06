@@ -6,7 +6,9 @@ import logging
 import time
 from typing import List, Tuple, Optional
 
+from core.config import sprayer_config
 from core.vision.image2d.mobilesam_session import load_mobilesam, MobileSAMSession
+from core.vision.image2d.wissight_detector import get_detector
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +22,7 @@ class SAMService:
         self.loaded_template: Optional[str] = None
 
     def initialize(self):
-        """Loads the MobileSAM weights into predictor on server startup."""
+        """Loads the MobileSAM weights and the wissight detector on server startup."""
         if self.predictor is not None:
             return
         try:
@@ -34,6 +36,32 @@ class SAMService:
                 logger.error("MobileSAM initialization returned None.")
         except Exception as e:
             logger.error(f"Failed to initialize MobileSAM: {e}", exc_info=True)
+        self._warm_up_detector()
+
+    def _warm_up_detector(self):
+        """启动时就把 wissight 检测器加载完。
+
+        它是进程内单例，之前只在用户第一次点进分割模式时才构造：建会话的 1~2s 算在
+        用户头上，而且启动日志里完全看不到到底加载了哪个模型，所以在这里一并预热并打日志。
+        """
+        if not sprayer_config.detector_enabled:
+            logger.info("[Detect] Wissight detector disabled by config (interactive.detector.enabled=false).")
+            return
+        try:
+            t0 = time.time()
+            detector = get_detector()
+            if detector is None:
+                logger.warning(
+                    f"[Detect] Wissight detector unavailable in {time.time() - t0:.2f}s "
+                    f"(model missing or failed to load, see log above); segmentation stays manual."
+                )
+            else:
+                logger.info(
+                    f"[Detect] Wissight detector initialized successfully in {time.time() - t0:.2f}s "
+                    f"[{detector.backend_desc}], sam_refine={sprayer_config.detector_sam_refine}."
+                )
+        except Exception as e:
+            logger.error(f"Failed to initialize wissight detector: {e}", exc_info=True)
 
     def _ensure_session(self, template_path: str, template_name: str) -> Optional[MobileSAMSession]:
         """返回已编码 template_name 图像的会话；未 init 或已切到其他模板时重新加载图像。
@@ -83,14 +111,59 @@ class SAMService:
                 polygons.append(cnt.tolist())
         return polygons
 
+    def detect(self, template_path: str, template_name: str) -> dict:
+        """用 wissight 在已编码的模板图上自动检出目标。
+
+        `interactive.detector.sam_refine` 为 true（默认）时只回框，由界面再拿它当 box prompt
+        去调 /sam/predict；为 false 时后端直接解出实例 mask 并转成 polygons 一起回传，
+        界面拿到就是终稿，不再走 MobileSAM。
+
+        检测器不可用（模型缺失 / 配置关闭）时返回空列表而不是报错，界面据此
+        回退到纯手动点选。
+        """
+        refine = sprayer_config.detector_sam_refine
+        detector = get_detector()
+        if detector is None:
+            logger.info("[Detect] Wissight detector unavailable; fall back to manual clicking.")
+            return {"detections": [], "backend": None, "sam_refine": refine}
+
+        session = self._ensure_session(template_path, template_name)
+        if session is None or session.image_bgr is None:
+            raise RuntimeError(f"Failed to load image for template '{template_name}'")
+
+        dets = detector.detect(session.image_bgr, with_masks=not refine)
+        result = {
+            "detections": [d.to_dict() for d in dets],
+            "backend": detector.backend_desc,
+            "sam_refine": refine,
+        }
+        if refine:
+            return result
+
+        # 关精修：面积最大的那个实例 mask 即结果（dets 已按面积降序）
+        src = next((d for d in dets if d.mask is not None), None)
+        polygons = self._mask_to_polygons(src.mask > 0) if src is not None else []
+        result["polygons"] = polygons
+        result["score"] = float(src.score) if src is not None else 0.0
+        h, w = session.image_bgr.shape[:2]
+        area = 0.0 if src is None else float((src.mask > 0).mean())
+        logger.info(
+            f"[Detect] sam_refine off: using wissight instance mask on {w}x{h} -> "
+            f"{len(polygons)} polygon(s), coverage={area * 100:.1f}%"
+        )
+        if src is not None and not polygons:
+            logger.warning("[Detect] instance mask has no valid contour; nothing to show.")
+        return result
+
     def predict_action(
         self,
         template_name: str,
         points: List[List[int]],
         labels: List[int],
         template_path: str = "",
+        box: Optional[List[float]] = None,
     ) -> dict:
-        """Predict mask based on points and return polygons."""
+        """Predict mask based on points and/or a detection box, and return polygons."""
         session = self._ensure_session(template_path, template_name)
         if session is None:
             raise RuntimeError(f"Failed to load SAM session for template '{template_name}'")
@@ -102,7 +175,7 @@ class SAMService:
         n_bg = sum(1 for l in labels if l == 0)
         
         t0 = time.time()
-        mask, score = session.predict(points_tuples, labels)
+        mask, score = session.predict(points_tuples, labels, box=box)
         elapsed = time.time() - t0
         
         if mask is None:
@@ -111,7 +184,8 @@ class SAMService:
             
         polygons = self._mask_to_polygons(mask)
         logger.info(
-            f"[SAM] Prediction for '{template_name}': +fg={n_fg}, -bg={n_bg} -> "
+            f"[SAM] Prediction for '{template_name}': +fg={n_fg}, -bg={n_bg}, "
+            f"box={'-' if box is None else [round(float(v)) for v in box]} -> "
             f"score={score:.3f}, contours={len(polygons)} in {elapsed*1000:.1f}ms"
         )
         return {"polygons": polygons, "score": float(score)}
@@ -134,6 +208,26 @@ class SAMService:
             lbls.append(int(label) if label is not None else 1)
         return pts, lbls
 
+    @staticmethod
+    def _parse_box(mask_data: dict) -> Optional[Tuple[float, float, float, float]]:
+        """解析可选的检测框 (x1, y1, x2, y2)，并规范化成左上/右下顺序。"""
+        box = mask_data.get("box")
+        if not box or len(box) != 4:
+            return None
+        x1, y1, x2, y2 = (float(v) for v in box)
+        return (min(x1, x2), min(y1, y2), max(x1, x2), max(y1, y2))
+
+    @staticmethod
+    def _paint_polygons(image: np.ndarray, polygons: list, color: np.ndarray, alpha: float) -> None:
+        """把 polygons 半透明画进可视化图（in-place）。"""
+        tmp = np.zeros(image.shape[:2], dtype=np.uint8)
+        for poly in polygons:
+            arr = np.asarray(poly, dtype=np.int32)
+            if arr.ndim == 2 and len(arr) >= 3:
+                cv2.fillPoly(tmp, [arr], 255)
+        covered = tmp > 0
+        image[covered] = image[covered] * (1.0 - alpha) + color * alpha
+
     def save_masks(self, template_path: str, template_name: str, committed_masks: List[dict]) -> bool:
         """
         committed_masks format:
@@ -142,8 +236,11 @@ class SAMService:
                 "id": 1,
                 "points": [[x, y], ...],
                 "labels": [1, 0, ...],
+                "box": [x1, y1, x2, y2],   # 可选，wissight 检测框
             }, ...
         ]
+        落盘前会用点提示重跑一次预测，所以参与预测的 box 必须一起写进 yaml，否则页面
+        所见 ≠ 磁盘结果；没有点提示的条目（纯 box / 纯 polygons）则原样保留、不重跑。
         """
         logger.info(f"[SAM] Starting mask save for template '{template_name}' ({len(committed_masks)} mask(s))...")
         session = self._ensure_session(template_path, template_name)
@@ -164,37 +261,55 @@ class SAMService:
             # 顶层 labels 优先（前端与 yaml 都会带），缺失时退回点里内嵌的 label，不足的补前景
             lbls = [int(l) for l in (mask_data.get("labels") or []) if l is not None] or point_labels
             lbls = lbls[: len(pts)] + [1] * max(0, len(pts) - len(lbls))
-            
+            box = self._parse_box(mask_data)
+            color = np.array(colors[idx % len(colors)], dtype=np.float32)
+
             if not pts:
-                if "polygons" in mask_data and mask_data["polygons"]:
-                    yaml_data["masks"].append({
+                # 没有点提示就不重放：box-only 的 SAM 结果是幂等的（实测重放 polygons 完全
+                # 一致），而关精修时 polygons 来自 wissight 自己的 mask，重跑反而会把
+                # 页面所见换成另一个结果。手填/外部工具产出的 polygons 也走这里原样保留。
+                polygons = mask_data.get("polygons") or []
+                if polygons:
+                    self._paint_polygons(vis_image, polygons, color, alpha)
+                    entry = {
                         "id": idx + 1,
                         "points": [],
                         "labels": [],
                         "score": float(mask_data.get("score", 1.0)),
-                        "polygons": mask_data["polygons"]
-                    })
+                        "polygons": polygons,
+                    }
+                    if box is not None:
+                        entry["box"] = [round(v, 1) for v in box]
+                    yaml_data["masks"].append(entry)
+                    logger.info(
+                        f"[SAM] Mask #{idx+1} kept as-is (no point prompt): {len(polygons)} polygon(s)"
+                    )
                 continue
-                
+            
             pts_tuples = [(p[0], p[1]) for p in pts]
-            mask, score = session.predict(pts_tuples, lbls)
-            if mask is not None and mask.any():
-                color = np.array(colors[idx % len(colors)], dtype=np.float32)
-                vis_image[mask] = vis_image[mask] * (1.0 - alpha) + color * alpha
-                
-                polygons = self._mask_to_polygons(mask)
-                
-                yaml_data["masks"].append({
-                    "id": idx + 1,
-                    "points": pts,
-                    "labels": lbls,
-                    "score": float(score),
-                    "polygons": polygons
-                })
-                logger.info(
-                    f"[SAM] Mask #{idx+1} processed: {len(pts)} points ({lbls}), "
-                    f"score={score:.3f}, {len(polygons)} polygon(s)"
-                )
+            mask, score = session.predict(pts_tuples, lbls, box=box)
+            if mask is None or not mask.any():
+                logger.warning(f"[SAM] Mask #{idx+1} produced an empty mask, dropped from yaml.")
+                continue
+
+            vis_image[mask] = vis_image[mask] * (1.0 - alpha) + color * alpha
+            polygons = self._mask_to_polygons(mask)
+
+            entry = {
+                "id": idx + 1,
+                "points": pts,
+                "labels": lbls,
+                "score": float(score),
+                "polygons": polygons,
+            }
+            if box is not None:
+                entry["box"] = [round(v, 1) for v in box]
+            yaml_data["masks"].append(entry)
+            logger.info(
+                f"[SAM] Mask #{idx+1} processed: {len(pts)} points ({lbls}), "
+                f"box={'-' if box is None else [round(v) for v in box]}, "
+                f"score={score:.3f}, {len(polygons)} polygon(s)"
+            )
                 
         # Save visualization jpg
         output_jpg = os.path.join(template_path, "scan.masks.jpg")

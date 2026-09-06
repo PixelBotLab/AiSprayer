@@ -14,6 +14,8 @@ export interface MaskData {
   id?: number;
   points?: Point[];
   labels?: number[];
+  /** wissight 检出的框 [x1, y1, x2, y2]；参与过点提示预测的条目落盘时要带上它重跑 */
+  box?: number[];
   polygons: number[][][]; // Array of polygons, each is Array of [x, y]
   score?: number;
 }

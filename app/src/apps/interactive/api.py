@@ -1,6 +1,6 @@
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Optional
 import os
 import math
 import time
@@ -237,6 +237,8 @@ def capture_template_data(name: str):
 class PredictRequest(BaseModel):
     points: list[list[int]]
     labels: list[int]
+    # 可选：wissight 检出的框 (x1, y1, x2, y2)，与点提示合并成一个 mask
+    box: Optional[list[float]] = None
 
 class SaveMasksRequest(BaseModel):
     committed_masks: list[dict]
@@ -253,6 +255,24 @@ def init_sam(name: str):
         raise HTTPException(status_code=500, detail="Failed to initialize SAM for this template")
     return {"message": "SAM initialized successfully"}
 
+@router.post("/templates/{name}/detect")
+def detect_objects(name: str):
+    """用 wissight 检出衣物，把结果当作交互分割的自动初稿。
+
+    `interactive.detector.sam_refine` 开（默认）时只回框，界面再拿它调 /sam/predict 精修；
+    关时回传体里额外带 polygons（wissight 自己的实例 mask）。
+    检测器不可用时返回空 detections（而不是 5xx），界面自动回退到纯手动点选。
+    """
+    template_path = os.path.join(TEMPLATE_GROUP_DIR, name)
+    if not os.path.exists(template_path):
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    try:
+        return sam_service.detect(template_path, name)
+    except Exception as e:
+        logger.error(f"Auto-detection failed for template '{name}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/templates/{name}/sam/predict")
 def predict_sam(name: str, req: PredictRequest):
     template_path = os.path.join(TEMPLATE_GROUP_DIR, name)
@@ -260,7 +280,7 @@ def predict_sam(name: str, req: PredictRequest):
         raise HTTPException(status_code=404, detail="Template not found")
 
     try:
-        result = sam_service.predict_action(name, req.points, req.labels, template_path)
+        result = sam_service.predict_action(name, req.points, req.labels, template_path, box=req.box)
         return result
     except Exception as e:
         logger.error(f"Prediction failed for template '{name}': {e}", exc_info=True)

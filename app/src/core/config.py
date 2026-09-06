@@ -335,6 +335,61 @@ class SprayerConfig:
         val = spraying_cfg.get("grid_tol_z_deg") or opt_cfg.get("grid_tol_z_deg") or [-180.0, 180.0, 10.0]
         return tuple(float(v) for v in val)
 
+    # ─── 交互式分割与自动检测 (interactive.*) ────────────────────────────────
+    @property
+    def _interactive(self) -> dict:
+        return self.config_data.get("interactive", {}) or {}
+
+    @property
+    def sam_backend(self) -> str:
+        """MobileSAM 推理后端：auto | rknn | onnx | pt/cuda/cpu。"""
+        return str((self._interactive.get("sam", {}) or {}).get("backend", "auto") or "auto").strip()
+
+    @property
+    def _detector(self) -> dict:
+        return self._interactive.get("detector", {}) or {}
+
+    @property
+    def detector_enabled(self) -> bool:
+        """进入交互分割时是否先跑目标检测出框（false = 维持纯手动点选行为）。"""
+        return bool(self._detector.get("enabled", True))
+
+    @property
+    def detector_backend(self) -> str:
+        """Wissight 推理后端：auto | rknn | onnx | pt。"""
+        return str(self._detector.get("backend", "auto") or "auto").strip()
+
+    @property
+    def detector_classes(self) -> list[str]:
+        """允许当成 SAM prompt 的类别名；空列表 = 不按类别过滤。"""
+        classes = self._detector.get("classes", ["trousers"])
+        return [str(c).strip() for c in classes] if classes else []
+
+    @property
+    def detector_conf(self) -> float:
+        """检测置信度阈值。实测 0.25 时结果干净，降到 0.10 会混进误类别。"""
+        return float(self._detector.get("conf", 0.25))
+
+    @property
+    def detector_iou(self) -> float:
+        """NMS IoU 阈值。"""
+        return float(self._detector.get("iou", 0.7))
+
+    @property
+    def detector_max_boxes(self) -> int:
+        """接口最多回传几个候选框。"""
+        return int(self._detector.get("max_boxes", 5))
+
+    @property
+    def detector_sam_refine(self) -> bool:
+        """检到目标后是否再用 MobileSAM 精修。
+
+        true（默认）：检测框当 box prompt 交 MobileSAM，边缘更贴；
+        false：直接用 wissight 自己解出的实例 mask，不跑 MobileSAM（快，但 mask 只有
+        160×160 原型分辨率，边缘粗）。界面仍可手动点选，那是用户主动行为，不受此开关影响。
+        """
+        return bool(self._detector.get("sam_refine", True))
+
 
 # ─── 全局单例对象 (模块导入时完成初始化与加载) ──────────────────────────────────
 config = SprayerConfig()
