@@ -1,22 +1,33 @@
-import React, { useRef } from 'react';
-import { FolderPlus, Trash2, ChevronLeft, ChevronRight } from 'lucide-react';
+import React, { useRef, useState, useEffect } from 'react';
+import { FolderPlus, Trash2, ChevronLeft, ChevronRight, Check, X } from 'lucide-react';
 
 interface TemplateTopBarProps {
   templates: string[];
   activeTemplate: string | null;
   onSelectTemplate: (t: string) => void;
-  onOpenCreateTemplateModal: () => void;
-  onOpenDeleteTemplateModal: (t: string) => void;
+  onCreateTemplate: (name: string) => Promise<void> | void;
+  onDeleteTemplate: (t: string) => Promise<void> | void;
 }
 
 export const TemplateTopBar: React.FC<TemplateTopBarProps> = ({
   templates,
   activeTemplate,
   onSelectTemplate,
-  onOpenCreateTemplateModal,
-  onOpenDeleteTemplateModal,
+  onCreateTemplate,
+  onDeleteTemplate,
 }) => {
   const scrollRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [isCreating, setIsCreating] = useState(false);
+  const [newTemplateName, setNewTemplateName] = useState('');
+  const [deletingTemplate, setDeletingTemplate] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (isCreating && inputRef.current) {
+      inputRef.current.focus();
+      inputRef.current.select();
+    }
+  }, [isCreating]);
 
   const scrollTabs = (direction: 'left' | 'right') => {
     if (scrollRef.current) {
@@ -27,17 +38,67 @@ export const TemplateTopBar: React.FC<TemplateTopBarProps> = ({
     }
   };
 
+  const handleStartCreate = () => {
+    const now = new Date();
+    const pad = (n: number) => String(n).padStart(2, '0');
+    const defaultName = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+    setNewTemplateName(defaultName);
+    setIsCreating(true);
+  };
+
+  const handleCommitCreate = () => {
+    if (newTemplateName.trim()) {
+      onCreateTemplate(newTemplateName.trim());
+    }
+    setIsCreating(false);
+  };
+
+  const handleCancelCreate = () => {
+    setIsCreating(false);
+  };
+
   return (
     <div className="h-9 bg-slate-900 border-b border-slate-800 flex items-center px-2 justify-between select-none shrink-0 z-10 gap-1.5">
-      {/* Left Action: New Template Button */}
-      <button
-        onClick={onOpenCreateTemplateModal}
-        className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-sky-400 border border-slate-700 shrink-0 transition-colors flex items-center gap-1 text-xs font-medium px-2"
-        title="Create New Template"
-      >
-        <FolderPlus size={13} />
-        <span>New</span>
-      </button>
+      {/* Left Action: New Template Button / Inline Input */}
+      {isCreating ? (
+        <div className="flex items-center gap-1 bg-slate-800/90 border border-sky-500/50 rounded px-1.5 py-0.5 shrink-0 animate-in fade-in duration-150">
+          <input
+            ref={inputRef}
+            type="text"
+            value={newTemplateName}
+            onChange={(e) => setNewTemplateName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleCommitCreate();
+              if (e.key === 'Escape') handleCancelCreate();
+            }}
+            className="bg-transparent text-xs text-sky-200 outline-none w-36 font-mono"
+            placeholder="Template name"
+          />
+          <button
+            onClick={handleCommitCreate}
+            className="p-0.5 text-emerald-400 hover:text-emerald-300 transition-colors"
+            title="Confirm (Enter)"
+          >
+            <Check size={12} />
+          </button>
+          <button
+            onClick={handleCancelCreate}
+            className="p-0.5 text-slate-400 hover:text-slate-200 transition-colors"
+            title="Cancel (Esc)"
+          >
+            <X size={12} />
+          </button>
+        </div>
+      ) : (
+        <button
+          onClick={handleStartCreate}
+          className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-sky-400 border border-slate-700 shrink-0 transition-colors flex items-center gap-1 text-xs font-medium px-2"
+          title="Create New Template"
+        >
+          <FolderPlus size={13} />
+          <span>New</span>
+        </button>
+      )}
 
       <div className="h-4 w-[1px] bg-slate-800 shrink-0" />
 
@@ -57,6 +118,37 @@ export const TemplateTopBar: React.FC<TemplateTopBarProps> = ({
       >
         {templates.map((t) => {
           const isActive = activeTemplate === t;
+          const isConfirmingDelete = deletingTemplate === t;
+
+          if (isConfirmingDelete) {
+            return (
+              <div
+                key={t}
+                className="flex items-center gap-1 px-2 py-0.5 rounded-md text-xs bg-rose-950/80 border border-rose-500/60 text-rose-200 shrink-0 animate-in fade-in"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <span className="font-semibold text-[11px]">Delete?</span>
+                <button
+                  onClick={() => {
+                    onDeleteTemplate(t);
+                    setDeletingTemplate(null);
+                  }}
+                  className="px-1.5 py-0.2 bg-rose-600 hover:bg-rose-500 text-white rounded text-[10px] font-bold"
+                  title="Confirm Delete"
+                >
+                  Yes
+                </button>
+                <button
+                  onClick={() => setDeletingTemplate(null)}
+                  className="px-1.5 py-0.2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-[10px]"
+                  title="Cancel"
+                >
+                  No
+                </button>
+              </div>
+            );
+          }
+
           return (
             <div
               key={t}
@@ -71,7 +163,7 @@ export const TemplateTopBar: React.FC<TemplateTopBarProps> = ({
               <button
                 onClick={(e) => {
                   e.stopPropagation();
-                  onOpenDeleteTemplateModal(t);
+                  setDeletingTemplate(t);
                 }}
                 className="opacity-0 group-hover:opacity-100 hover:text-rose-400 p-0.5 rounded transition-opacity"
                 title="Delete Template"
@@ -94,3 +186,4 @@ export const TemplateTopBar: React.FC<TemplateTopBarProps> = ({
     </div>
   );
 };
+

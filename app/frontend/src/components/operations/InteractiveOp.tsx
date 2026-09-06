@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef, type MouseEvent } from 'react';
-import { CustomModal, type ModalConfig } from '../common/CustomModal';
 import { API_BASE, WS_BASE } from '../../config';
 import {
   Play,
@@ -18,6 +17,7 @@ import type {
   LiveNormalInfo,
   PathStateType,
   SimulationState,
+  CanvasNotice,
 } from './interactive/types';
 import { STATE_THEMES, pathSourceOf } from './interactive/types';
 import { computeNormalClientSide } from './interactive/normalComputation';
@@ -108,6 +108,10 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const [hoveredWaypoint, setHoveredWaypoint] = useState<WaypointItem | null>(null);
   const [highlightedPathId, setHighlightedPathId] = useState<number | null>(null);
   const [sessionData, setSessionData] = useState<SessionData | null>(null);
+
+  // Workflow dependencies
+  const hasMask = savedMasks.length > 0 || committedMasks.length > 0 || files.some((f) => f.name === 'scan.masks.yaml');
+  const hasMesh = files.some((f) => f.name === 'scan.mesh.ply' || f.name === 'scan.mesh.stl' || f.name.includes('mesh'));
   const [mousePixel, setMousePixel] = useState<{ u: number; v: number } | null>(null);
   const [liveNormal, setLiveNormal] = useState<LiveNormalInfo | null>(null);
 
@@ -123,6 +127,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   const [isCapturing, setIsCapturing] = useState<boolean>(false);
   const [isReconstructing, setIsReconstructing] = useState<boolean>(false);
   const [isAutoGenerating, setIsAutoGenerating] = useState<boolean>(false);
+  const [isCleaningFiles, setIsCleaningFiles] = useState<boolean>(false);
 
   // ─── 7. 3D/2D Synchronized Simulation Engine State (Feature 7) ───────────
   const [simulationState, setSimulationState] = useState<SimulationState | null>(null);
@@ -146,8 +151,33 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     stateType: 'raw',
   });
 
-  // ─── 8. Modal Dialog Config ─────────────────────────────────────────────
-  const [modalConfig, setModalConfig] = useState<ModalConfig | null>(null);
+  // ─── 8. In-Canvas Animated HUD Notification State ───────────────────────
+  const [canvasNotice, setCanvasNotice] = useState<CanvasNotice | null>(null);
+  const noticeTimeoutRef = useRef<any>(null);
+
+  const showNotice = (
+    type: 'success' | 'warning' | 'error' | 'info',
+    message: string,
+    title?: string,
+    duration = 3500
+  ) => {
+    if (noticeTimeoutRef.current) {
+      clearTimeout(noticeTimeoutRef.current);
+    }
+    const newId = Date.now();
+    setCanvasNotice({
+      id: newId,
+      type,
+      title,
+      message,
+      duration,
+    });
+    if (duration > 0) {
+      noticeTimeoutRef.current = setTimeout(() => {
+        setCanvasNotice((curr: CanvasNotice | null) => (curr?.id === newId ? null : curr));
+      }, duration);
+    }
+  };
 
   // ─── 9. Robot Real-Time State (via WebSocket) ──────────────────────────
   const [robotConnected, setRobotConnected] = useState<boolean>(false);
@@ -555,12 +585,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       }
 
       if (masksToSave.length === 0) {
-        setModalConfig({
-          isOpen: true,
-          title: 'Warning',
-          message: 'No segment masks to save.',
-          type: 'alert',
-        });
+        showNotice('warning', 'No masks to save');
         return;
       }
 
@@ -587,19 +612,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         console.warn('Failed to refresh template summary after save masks:', e);
       }
 
-      setModalConfig({
-        isOpen: true,
-        title: 'Success',
-        message: `Saved ${masksToSave.length} segment mask(s) successfully.`,
-        type: 'alert',
-      });
+      showNotice('success', `Saved ${masksToSave.length} mask(s)`);
     } catch (err: any) {
-      setModalConfig({
-        isOpen: true,
-        title: 'Error',
-        message: `Failed to save masks: ${err.message}`,
-        type: 'alert',
-      });
+      showNotice('error', `Save failed: ${err.message}`);
     }
   };
 
@@ -702,14 +717,11 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       setRawPaths(manualPaths);
       activatePathStateSnapshot('raw', manualPaths);
       setManualPathMode(false);
+      if (onPathsUpdated) onPathsUpdated();
       await fetchTemplateFiles(activeTemplate);
+      showNotice('success', `Saved ${manualPaths.length} path(s)`);
     } catch (err: any) {
-      setModalConfig({
-        isOpen: true,
-        title: 'Error',
-        message: `Failed to save paths: ${err.message}`,
-        type: 'alert',
-      });
+      showNotice('error', `Save failed: ${err.message}`);
     }
   };
 
@@ -737,13 +749,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       else setRawReport(data);
 
       await fetchTemplateFiles(activeTemplate);
+      showNotice('success', `Verified (${data.summary?.status || data.status || 'PASS'})`);
     } catch (err: any) {
-      setModalConfig({
-        isOpen: true,
-        title: 'Verification Error',
-        message: err.message,
-        type: 'alert',
-      });
+      showNotice('error', err.message);
     } finally {
       setIsVerifying(false);
     }
@@ -781,14 +789,11 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         activatePathStateSnapshot('poi', paths);
       }
 
+      if (onPathsUpdated) onPathsUpdated();
       await fetchTemplateFiles(activeTemplate);
+      showNotice('success', `POI optimized (${source === 'auto' ? 'AUTO-POI' : 'POI'})`);
     } catch (err: any) {
-      setModalConfig({
-        isOpen: true,
-        title: 'Optimization Error',
-        message: err.message,
-        type: 'alert',
-      });
+      showNotice('error', err.message);
     } finally {
       setIsOptimizing(false);
     }
@@ -801,14 +806,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     overrideReport?: VerificationReport | null
   ) => {
     if (followJoints) {
-      // 跟随正在驱动仿真臂：回放再写一遍就是两个写入者抢同一台臂。让用户显式停跟随，
-      // 而不是我们替他停 —— 那样相机那边的示教状态就成了页面上的一个意外。
-      setModalConfig({
-        isOpen: true,
-        title: 'Follow 正在驱动仿真臂',
-        message: '轨迹回放与相机跟随写的是同一台仿真臂。请先点 Follow 行的停止按钮，再回放轨迹。',
-        type: 'alert',
-      });
+      showNotice('warning', 'Please stop Follow first');
       return;
     }
     stopSimulation();
@@ -817,12 +815,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         : (stateType === 'auto_poi' ? autoPoiReport
           : (stateType === 'auto' ? autoReport : rawReport)));
     if (!rep?.path_reports || rep.path_reports.length === 0) {
-      setModalConfig({
-        isOpen: true,
-        title: 'Simulation Notice',
-        message: `No trajectory simulation steps found for ${stateType.toUpperCase()}. Please click "Verify & Sim" on the files panel first.`,
-        type: 'alert',
-      });
+      showNotice('info', `No trajectory for ${stateType.toUpperCase()}. Verify first.`);
       return;
     }
 
@@ -878,12 +871,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     });
 
     if (simSteps.length === 0) {
-      setModalConfig({
-        isOpen: true,
-        title: 'Simulation Notice',
-        message: `No interpolated trajectory steps available for ${stateType.toUpperCase()}.`,
-        type: 'alert',
-      });
+      showNotice('info', `No steps for ${stateType.toUpperCase()}`);
       return;
     }
 
@@ -1058,12 +1046,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     // Safety validation guard: Physical robot execution requires verified PASS
     const rep = targetState === 'poi' ? poiReport : (targetState === 'auto_poi' ? autoPoiReport : (targetState === 'auto' ? autoReport : rawReport));
     if (!rep || (rep.summary?.status !== 'PASS' && rep.status !== 'PASS')) {
-      setModalConfig({
-        isOpen: true,
-        title: 'Safety Guard: Verification Required',
-        message: `Cannot execute ${targetState.toUpperCase()} on the physical robot. The path has not passed 6-DOF kinematics verification. Please click "Verify" on the files panel first.`,
-        type: 'alert',
-      });
+      showNotice('warning', `Unverified: Verify ${targetState.toUpperCase()} first`);
       return;
     }
 
@@ -1123,13 +1106,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       });
       if (!res.ok) throw new Error('Capture failed');
       await handleSelectTemplate(activeTemplate);
+      showNotice('success', 'Camera captured');
     } catch (err: any) {
-      setModalConfig({
-        isOpen: true,
-        title: 'Capture Error',
-        message: err.message,
-        type: 'alert',
-      });
+      showNotice('error', err.message);
     } finally {
       setIsCapturing(false);
     }
@@ -1137,6 +1116,10 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
 
   const handleTriggerReconstruct = async () => {
     if (!activeTemplate) return;
+    if (!hasMask) {
+      showNotice('warning', 'Segment mask required to reconstruct 3D');
+      return;
+    }
     setIsReconstructing(true);
     try {
       const res = await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/reconstruct`, {
@@ -1145,19 +1128,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       if (!res.ok) throw new Error('Reconstruction failed');
       if (onMeshUpdated) onMeshUpdated();
       await handleSelectTemplate(activeTemplate);
-      setModalConfig({
-        isOpen: true,
-        title: 'Reconstruction Finished',
-        message: '3D surface mesh successfully generated and loaded into 3D viewer.',
-        type: 'alert',
-      });
+      showNotice('success', '3D mesh ready');
     } catch (err: any) {
-      setModalConfig({
-        isOpen: true,
-        title: 'Reconstruction Error',
-        message: err.message,
-        type: 'alert',
-      });
+      showNotice('error', err.message);
     } finally {
       setIsReconstructing(false);
     }
@@ -1165,6 +1138,14 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
 
   const runAutoPathGeneration = async () => {
     if (!activeTemplate) return;
+    if (!hasMesh) {
+      showNotice('warning', '3D mesh required to generate spray paths');
+      return;
+    }
+    if (!hasMask) {
+      showNotice('warning', 'Segment mask required to generate spray paths');
+      return;
+    }
     setIsAutoGenerating(true);
     try {
       const res = await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/auto_paths`, {
@@ -1181,19 +1162,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       setAutoPaths(generated);
       activatePathStateSnapshot('auto', generated);
       if (onPathsUpdated) onPathsUpdated();
-      setModalConfig({
-        isOpen: true,
-        title: 'Auto Waypoints Ready',
-        message: `Generated ${data.point_count ?? 0} waypoints (row ${data.row_spacing_mm ?? '?'} mm) and saved to scan.auto.path.yaml.`,
-        type: 'alert',
-      });
+      showNotice('success', `Generated ${data.point_count ?? 0} waypoints`);
     } catch (err: any) {
-      setModalConfig({
-        isOpen: true,
-        title: 'Auto Path Error',
-        message: err.message,
-        type: 'alert',
-      });
+      showNotice('error', err.message);
     } finally {
       setIsAutoGenerating(false);
     }
@@ -1206,46 +1177,48 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         method: 'DELETE',
       });
       if (!res.ok) throw new Error('Failed to delete file');
+      if (fileName.includes('mesh') || fileName.endsWith('.ply') || fileName.endsWith('.stl')) {
+        if (onMeshUpdated) onMeshUpdated();
+      }
+      if (fileName.includes('path')) {
+        if (onPathsUpdated) onPathsUpdated();
+      }
       await handleSelectTemplate(activeTemplate);
+      showNotice('success', `Deleted ${fileName}`);
     } catch (err: any) {
-      setModalConfig({
-        isOpen: true,
-        title: 'Error',
-        message: err.message,
-        type: 'alert',
+      showNotice('error', err.message);
+    }
+  };
+
+  const handleCleanTemplateFiles = async () => {
+    if (!activeTemplate) return;
+    setIsCleaningFiles(true);
+    try {
+      const res = await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/clean`, {
+        method: 'POST',
       });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Failed to clean template files');
+      }
+      const data = await res.json();
+      if (onMeshUpdated) onMeshUpdated();
+      if (onPathsUpdated) onPathsUpdated();
+      await handleSelectTemplate(activeTemplate);
+      const deletedCount = data.deleted ? data.deleted.length : 0;
+      showNotice('success', `Cleaned ${deletedCount} files`);
+    } catch (err: any) {
+      showNotice('error', err.message);
+    } finally {
+      setIsCleaningFiles(false);
     }
   };
 
   const handleTriggerAutoPath = () => {
     if (!activeTemplate) return;
-    const hasExisting = (autoPaths?.length || 0) > 0;
-    if (hasExisting) {
-      setModalConfig({
-        isOpen: true,
-        title: 'Overwrite Auto Paths?',
-        message: 'This will replace scan.auto.path.yaml and clear its POI result. Manual paths are left unchanged.',
-        type: 'confirm',
-        onConfirm: () => {
-          void runAutoPathGeneration();
-        },
-      });
-      return;
-    }
     void runAutoPathGeneration();
   };
 
-  // Helper to render SVG polygon path
-  const renderPolygons = (polygons: number[][][], fill: string, stroke?: string) => {
-    return (
-      <path
-        d={polygons.map((poly) => poly.map((pt, i) => `${i === 0 ? 'M' : 'L'} ${pt[0]} ${pt[1]}`).join(' ') + ' Z').join(' ')}
-        fill={fill}
-        stroke={stroke || 'none'}
-        strokeWidth={1.5}
-      />
-    );
-  };
 
   return (
     <div className="flex-1 flex flex-col h-full w-full bg-slate-950 overflow-hidden relative font-sans select-none">
@@ -1254,51 +1227,33 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         templates={templates}
         activeTemplate={activeTemplate}
         onSelectTemplate={handleSelectTemplate}
-        onOpenCreateTemplateModal={() => {
-          const now = new Date();
-          const pad = (n: number) => String(n).padStart(2, '0');
-          const defaultName = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-          setModalConfig({
-            isOpen: true,
-            title: 'Create New Template',
-            message: 'Enter name for the new template group:',
-            type: 'input',
-            defaultValue: defaultName,
-            onConfirm: async (name) => {
-              if (!name) return;
-              try {
-                const res = await fetch(`${API_BASE}/api/interactive/templates`, {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ name }),
-                });
-                if (!res.ok) throw new Error('Failed to create template');
-                await fetchTemplates(name);
-              } catch (err: any) {
-                alert(err.message);
-              }
-            },
-          });
+        onCreateTemplate={async (name) => {
+          if (!name.trim()) return;
+          try {
+            const res = await fetch(`${API_BASE}/api/interactive/templates`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ name: name.trim() }),
+            });
+            if (!res.ok) throw new Error('Failed to create template');
+            await fetchTemplates(name.trim());
+            showNotice('success', `Created ${name.trim()}`);
+          } catch (err: any) {
+            showNotice('error', err.message);
+          }
         }}
-        onOpenDeleteTemplateModal={(t) => {
-          setModalConfig({
-            isOpen: true,
-            title: 'Delete Template',
-            message: `Are you sure you want to delete template '${t}'? All associated files will be deleted permanently.`,
-            type: 'confirm',
-            onConfirm: async () => {
-              try {
-                const res = await fetch(`${API_BASE}/api/interactive/templates/${t}`, {
-                  method: 'DELETE',
-                });
-                if (!res.ok) throw new Error('Failed to delete template');
-                setActiveTemplate(null);
-                await fetchTemplates();
-              } catch (err: any) {
-                alert(err.message);
-              }
-            },
-          });
+        onDeleteTemplate={async (t) => {
+          try {
+            const res = await fetch(`${API_BASE}/api/interactive/templates/${t}`, {
+              method: 'DELETE',
+            });
+            if (!res.ok) throw new Error('Failed to delete template');
+            setActiveTemplate(null);
+            await fetchTemplates();
+            showNotice('success', `Deleted ${t}`);
+          } catch (err: any) {
+            showNotice('error', err.message);
+          }
         }}
       />
 
@@ -1308,6 +1263,13 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         <InteractiveCanvas
           imageUrl={imageUrl}
           isLoadingTemplate={isLoadingTemplate}
+          isCapturing={isCapturing}
+          isReconstructing={isReconstructing}
+          isAutoGenerating={isAutoGenerating}
+          isVerifying={isVerifying}
+          isOptimizing={isOptimizing}
+          canvasNotice={canvasNotice}
+          onDismissNotice={() => setCanvasNotice(null)}
           segMode={segMode}
           manualPathMode={manualPathMode}
           showMasksOverlay={showMasksOverlay}
@@ -1403,7 +1365,6 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
             setCurrentManualPoints([]);
             setSelectedPathIdForEdit(null);
           }}
-          renderPolygons={renderPolygons}
         />
 
         {/* 3D/2D Synchronized Simulation Floating Playback Control Bar (Feature 7) */}
@@ -1474,6 +1435,8 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
           {/* Top Horizontal Action Toolbar */}
           <InteractiveActionColumn
             hasImage={hasImage}
+            hasMask={hasMask}
+            hasMesh={hasMesh}
             activeTemplate={activeTemplate}
             isCapturing={isCapturing}
             isReconstructing={isReconstructing}
@@ -1502,6 +1465,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
             <TemplateFileList
               files={files}
               activeState={activeState}
+              templateName={activeTemplate}
+              onCleanGeneratedFiles={handleCleanTemplateFiles}
+              isCleaning={isCleaningFiles}
               onDeleteFile={handleDeleteFile}
               rawPaths={rawPaths}
               autoPaths={autoPaths}
@@ -1540,9 +1506,6 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
           />
         </div>
       </div>
-
-      {/* Global Dialog Modal */}
-      {modalConfig && <CustomModal config={modalConfig} onClose={() => setModalConfig(null)} />}
 
     </div>
   );

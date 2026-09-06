@@ -162,7 +162,7 @@ export const FollowPanel: React.FC<FollowPanelProps> = ({ isReplaying, onFollowJ
             pushRef.current(next.joints_deg && next.joints_deg.length === 6 ? next.joints_deg : null);
           }
         } catch (err) {
-          console.warn('follow_state 解析失败:', err);
+          console.warn('Failed to parse follow_state:', err);
         }
       };
       ws.onclose = () => {
@@ -199,13 +199,12 @@ export const FollowPanel: React.FC<FollowPanelProps> = ({ isReplaying, onFollowJ
       const data = await res.json().catch(() => ({} as any));
       if (!res.ok) {
         const detail = typeof data.detail === 'string' ? data.detail : `HTTP ${res.status}`;
-        setError(res.status === 503 ? `后端未就绪：${detail}` : detail);
+        setError(res.status === 503 ? `Backend not ready: ${detail}` : detail);
         return;
       }
       if (data.data) setState(data.data as FollowState);
     } catch (err) {
-      // 按钮点了没回音，必须在这儿留下话，否则用户只会觉得"这页面对后端没反应"。
-      setError(`请求失败：${err instanceof Error ? err.message : String(err)}`);
+      setError(`Request failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   }, [state?.joints_deg]);
 
@@ -237,25 +236,25 @@ export const FollowPanel: React.FC<FollowPanelProps> = ({ isReplaying, onFollowJ
 
   const dtMm = deltaTransMm(snap);
   const dRdeg = deltaRotDeg(snap);
-  const sigmaT = snap?.sigma_t_mm?.[2] ?? null;      // 沿光轴的重复性最关心，只报这一维
+  const sigmaT = snap?.sigma_t_mm?.[2] ?? null;
   const running = active && !!snap?.enabled;
   const heldByIk = !!state?.ik_failed;
   const holding = !!snap?.holding_last_pose || heldByIk;
 
   return (
     <div className="shrink-0 border-t border-slate-800 bg-slate-950/40 select-none">
-      {/* 按钮排：与文件列表表头同一套尺寸与配色 */}
+      {/* Button Row */}
       <div className="h-9 px-2.5 flex justify-between items-center">
         <div className="flex items-center gap-1.5 text-[11px] text-slate-300 font-medium min-w-0">
           <Radio size={13} className={running ? 'text-emerald-400' : 'text-slate-500'} />
           <span>Follow</span>
-          {!wsOpen && <span className="text-[9px] text-amber-400/80">后端未连接</span>}
+          {!wsOpen && <span className="text-[9px] text-amber-400/80">Disconnected</span>}
           {state && state.arm_mode !== 'sim' && (
             <span className="text-[9px] text-rose-400/80">mode:{state.arm_mode}</span>
           )}
         </div>
         <div className="flex items-center gap-1">
-          {/* ① 启动 */}
+          {/* Start */}
           <div className="relative group flex items-center justify-center">
             <button
               type="button"
@@ -269,12 +268,12 @@ export const FollowPanel: React.FC<FollowPanelProps> = ({ isReplaying, onFollowJ
             >
               {pending === 'start' ? <RefreshCw size={12} className="animate-spin text-emerald-400" /> : <Play size={11} />}
             </button>
-            {tip(isReplaying ? '轨迹回放正在驱动仿真臂：先停止回放'
-                : active ? '跟随已在运行'
-                : '启动：仿真臂回 home + 以当前相机视角示教')}
+            {tip(isReplaying ? 'Playback active: Stop playback first'
+                : active ? 'Follow is running'
+                : 'Start: Home arm + Teach from camera view')}
           </div>
 
-          {/* ② 调零 */}
+          {/* Zero */}
           <div className="relative group flex items-center justify-center">
             <button
               type="button"
@@ -288,12 +287,12 @@ export const FollowPanel: React.FC<FollowPanelProps> = ({ isReplaying, onFollowJ
             >
               {pending === 'zero' ? <RefreshCw size={12} className="animate-spin text-sky-400" /> : <Crosshair size={12} />}
             </button>
-            {tip('调零：重新示教，并把跟随基线换成机械臂当前位姿（增量归零）')}
+            {tip('Zero: Re-teach and reset follow baseline to current arm pose (Δ=0)')}
           </div>
 
           <div className="w-[1px] h-3 bg-slate-700 mx-0.5" />
 
-          {/* ③ 停止 */}
+          {/* Stop */}
           <div className="relative group flex items-center justify-center">
             <button
               type="button"
@@ -307,55 +306,53 @@ export const FollowPanel: React.FC<FollowPanelProps> = ({ isReplaying, onFollowJ
             >
               {pending === 'stop' ? <RefreshCw size={12} className="animate-spin text-rose-400" /> : <Square size={11} />}
             </button>
-            {tip('停止跟随：取流退回 hardware.camera，仿真臂交回真机状态')}
+            {tip('Stop: Revert camera stream & return arm to physical status')}
           </div>
         </div>
       </div>
 
-      {/* 实时读数：跟随量 + 解算质量。省略号交给 truncate，全文在 title 里。 */}
+      {/* Real-time Telemetry Display */}
       <div className="px-2.5 pb-1.5 flex flex-col gap-1">
         <div className="flex items-center gap-1.5 text-[10px] font-mono text-slate-400 overflow-hidden whitespace-nowrap">
           <span className={running ? 'text-emerald-300' : 'text-slate-500'}>
             {(snap?.status ?? 'idle')}{snap?.estimator && snap.estimator !== 'none' ? `·${snap.estimator}` : ''}
-            {/* "保持"必须显出来：臂停住和臂没动在画面上长得一样，处置却完全不同。 */}
-            {holding && <span className="text-amber-400/90"> ·保持</span>}
+            {holding && <span className="text-amber-400/90"> ·Hold</span>}
           </span>
           <span className="text-slate-600">|</span>
-          <span title="相机相对示教位的位移增量（基座系映射前）">Δt {fmt(dtMm)} mm</span>
-          <span title="旋转增量，由 delta_r 的 trace 反解">ΔR {fmt(dRdeg, 2)}°</span>
-          {/* 冻结时 ΔR 会停住不动，和"卡死"在画面上长得一样 —— 必须说清这是有意停的（平移仍在更新）。 */}
+          <span title="Camera displacement relative to taught pose (pre-base mapping)">Δt {fmt(dtMm)} mm</span>
+          <span title="Rotation increment from delta_r trace">ΔR {fmt(dRdeg, 2)}°</span>
           {snap?.rot_frozen && (
             <span
               className="text-sky-400/90"
-              title={`陀螺判定相机静止，旋转通道已冻结 ${fmt(snap.frozen_ms, 0)}ms（到上限会强制解冻）。平移照常更新。`}
+              title={`Gyro stationary, rotation channel frozen for ${fmt(snap.frozen_ms, 0)}ms. Translation updating.`}
             >
-              ·冻结 {fmt(snap.frozen_ms, 0)}ms
+              ·Frozen {fmt(snap.frozen_ms, 0)}ms
             </span>
           )}
           <span className="text-slate-600">|</span>
-          <span title="沿光轴的 1σ 重复性；— 表示本帧没有稠密解算">σz {fmt(sigmaT, 2)} mm</span>
-          <span title={`${snap?.fps ?? 0} fps, 帧 ${snap?.frames ?? 0}, 丢帧 ${snap?.dropped ?? 0}/拒收 ${snap?.rejected ?? 0}`}>
+          <span title="1σ repeatability along optical axis; — indicates no dense solution">σz {fmt(sigmaT, 2)} mm</span>
+          <span title={`${snap?.fps ?? 0} fps, frames ${snap?.frames ?? 0}, dropped ${snap?.dropped ?? 0}/rejected ${snap?.rejected ?? 0}`}>
             {fmt(snap?.fps, 0)}fps
           </span>
-          {snap?.rot_gated ? <span title={`离群门拦下 ${snap.rot_gated} 帧：视觉解算与陀螺角速度不一致`}>拒 {snap.rot_gated}</span> : null}
+          {snap?.rot_gated ? <span title={`Outlier gate rejected ${snap.rot_gated} frames: vision-gyro disagreement`}>Rej {snap.rot_gated}</span> : null}
         </div>
-        {/* 陀螺失效全是静默的：输出看起来正常，必须单独占一行红字。 */}
+
         {running && snap?.gyro && snap.gyro.time_ready === false && (
           <div className="text-[9px] truncate text-rose-400/90"
-               title="设备时间戳与主机时钟的偏移还没测出来：陀螺样本被全部丢弃，旋转通道只剩纯视觉解算。">
-            陀螺时钟未定标 · 旋转通道降级
+               title="Device timestamp offset uncalibrated: gyro samples discarded, using vision-only.">
+            Gyro Clock Uncalibrated · Rotation Degraded
           </div>
         )}
         {running && snap?.gyro && (snap.gyro.dead_frames ?? 0) > 0 && (
           <div className="text-[9px] truncate text-rose-400/90"
-               title={`缓冲 ${snap.gyro.buf ?? 0} 条样本，本帧窗口却积到 ${snap.gyro.samples ?? 0} 条：帧与陀螺不在同一时间域。`}>
-            陀螺窗口空转 {snap.gyro.dead_frames} 帧 · 缓冲 {snap.gyro.buf ?? 0} / 窗口 {snap.gyro.samples ?? 0}
+               title={`Buffer ${snap.gyro.buf ?? 0}, window ${snap.gyro.samples ?? 0}: Frames and gyro out of sync.`}>
+            Gyro Window Idle {snap.gyro.dead_frames} Frames · Buf {snap.gyro.buf ?? 0} / Win {snap.gyro.samples ?? 0}
           </div>
         )}
         {running && snap?.gyro && snap.gyro.time_ready && snap.gyro.extrinsics_loaded === false && (
           <div className="text-[9px] truncate text-amber-400/80"
-               title="T_cam_gyro 未从设备读到合法旋转，ω 还在设备系：零偏残差会随相机姿态变，静止门可能进不去。">
-            陀螺外参 Identity · 静止门可能失效
+               title="T_cam_gyro extrinsics Identity: stationary gate may fail.">
+            Gyro Extrinsics Identity · Gate May Fail
           </div>
         )}
         {(error || state?.last_error || snap?.reason) && (
@@ -363,22 +360,20 @@ export const FollowPanel: React.FC<FollowPanelProps> = ({ isReplaying, onFollowJ
             className={`text-[9px] truncate ${error || heldByIk ? 'text-amber-400/90' : 'text-slate-500'}`}
             title={error || state?.last_error || snap?.reason || ''}
           >
-            {error || (heldByIk ? 'IK 失败：保持上一目标' : (snap?.reason || state?.last_error))}
+            {error || (heldByIk ? 'IK Failed: Holding Last Target' : (snap?.reason || state?.last_error))}
           </div>
         )}
         {running && (
           <div className="text-[9px] text-slate-600 truncate" title={state?.r_cb_source || ''}>
             {`${snap?.capture_width ?? 0}x${snap?.capture_height ?? 0} ${snap?.align ?? ''}`}
             {snap?.teach_capture_width && snap.teach_capture_width !== snap.capture_width
-              ? ` (示教 ${snap.teach_capture_width}x${snap.teach_capture_height})` : ''}
-            {` · 基线 ${state?.arm_baseline_deg ? state.arm_baseline_deg.map((v) => v.toFixed(1)).join(',') : '—'}`}
-            {/* 轮询本身不算故障，但"配了推送却安静地退回轮询"是推送链路坏掉的唯一线索 ——
-                闭环最怕的是停在旧位姿上而页面看起来跟得好，所以这条必须显出来。 */}
+              ? ` (Teach ${snap.teach_capture_width}x${snap.teach_capture_height})` : ''}
+            {` · Baseline ${state?.arm_baseline_deg ? state.arm_baseline_deg.map((v) => v.toFixed(1)).join(',') : '—'}`}
             {state?.data_plane_mode === 'push'
-              ? <span title="位姿由相机服务经 SSE 推来，兜底轮询待命中"> · 推送</span>
+              ? <span title="Pose pushed via SSE from camera service; polling on standby"> · Push</span>
               : state?.data_plane_mode === 'poll'
                 ? <span className="text-amber-400/80"
-                        title={state.data_plane_reason || '位姿由后端轮询取得'}> · 轮询兜底</span>
+                        title={state.data_plane_reason || 'Pose acquired via backend polling'}> · Polling Fallback</span>
                 : null}
           </div>
         )}

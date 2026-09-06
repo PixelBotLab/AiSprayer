@@ -202,6 +202,11 @@ const RobotModel: React.FC<RobotModelProps> = ({
       surfaceMeshRef.current.geometry?.dispose();
       surfaceMeshRef.current = null;
     }
+    const existingMesh = baseLink.getObjectByName('reconstructed_surface_mesh');
+    if (existingMesh) {
+      if (existingMesh.parent) existingMesh.parent.remove(existingMesh);
+      if ((existingMesh as any).geometry) (existingMesh as any).geometry.dispose();
+    }
 
     if (!activeTemplate) {
       if (onMeshLoaded) onMeshLoaded(0);
@@ -230,6 +235,12 @@ const RobotModel: React.FC<RobotModelProps> = ({
       geom.computeVertexNormals();
       const count = geom.attributes.position ? geom.attributes.position.count : 0;
       
+      const oldMesh = baseLink.getObjectByName('reconstructed_surface_mesh');
+      if (oldMesh) {
+        if (oldMesh.parent) oldMesh.parent.remove(oldMesh);
+        if ((oldMesh as any).geometry) (oldMesh as any).geometry.dispose();
+      }
+
       const mesh = new Mesh(geom, surfaceMaterialRef.current!);
       mesh.name = "reconstructed_surface_mesh";
       mesh.visible = isMeshVisible;
@@ -270,6 +281,11 @@ const RobotModel: React.FC<RobotModelProps> = ({
         surfaceMeshRef.current.geometry?.dispose();
         surfaceMeshRef.current = null;
       }
+      const oldMesh = baseLink.getObjectByName('reconstructed_surface_mesh');
+      if (oldMesh) {
+        if (oldMesh.parent) oldMesh.parent.remove(oldMesh);
+        if ((oldMesh as any).geometry) (oldMesh as any).geometry.dispose();
+      }
     };
   }, [robot, activeTemplate, meshVersion]);
 
@@ -285,6 +301,10 @@ const RobotModel: React.FC<RobotModelProps> = ({
         pathsGroupRef.current.parent.remove(pathsGroupRef.current);
       }
       pathsGroupRef.current = null;
+    }
+    const existingPaths = baseLink.getObjectByName('manual_tcp_paths_group');
+    if (existingPaths && existingPaths.parent) {
+      existingPaths.parent.remove(existingPaths);
     }
 
     if (!activeTemplate) {
@@ -525,6 +545,10 @@ const RobotModel: React.FC<RobotModelProps> = ({
       if (pathsGroupRef.current && pathsGroupRef.current.parent) {
         pathsGroupRef.current.parent.remove(pathsGroupRef.current);
         pathsGroupRef.current = null;
+      }
+      const existingPaths = baseLink.getObjectByName('manual_tcp_paths_group');
+      if (existingPaths && existingPaths.parent) {
+        existingPaths.parent.remove(existingPaths);
       }
     };
   }, [robot, activeTemplate, pathsVersion, pathState, effectiveState]);

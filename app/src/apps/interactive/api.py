@@ -120,6 +120,69 @@ def delete_template_file(name: str, filename: str):
         logger.error(f"Failed to delete file '{filename}' in '{name}': {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+def is_raw_capture_file(filename: str) -> bool:
+    """
+    Check if a file belongs to original raw photo capture:
+    - Color image (e.g. scan.color.jpg, scan.jpg, scan.png)
+    - Depth map (e.g. scan.depth.png, scan.depth.npy, scan.depth.raw)
+    - Parameters (e.g. scan.params.yaml, scan.info.yaml, scan.params.json)
+    Masks, meshes, point clouds, paths, and verification reports are excluded.
+    """
+    lower = filename.lower()
+    # Generated artifacts must be cleaned
+    if any(k in lower for k in ["mask", "path", "mesh", "report"]):
+        return False
+    # Color photo
+    if lower in ("scan.jpg", "scan.jpeg", "scan.png"):
+        return True
+    if "color" in lower and any(lower.endswith(ext) for ext in [".jpg", ".jpeg", ".png", ".bmp", ".webp"]):
+        return True
+    # Depth photo / data
+    if "depth" in lower and any(lower.endswith(ext) for ext in [".png", ".npy", ".raw", ".tiff", ".bin", ".bmp"]):
+        return True
+    # Parameter files
+    if ("param" in lower or lower.startswith("scan.info.")) and any(lower.endswith(ext) for ext in [".yaml", ".yml", ".json"]):
+        return True
+    return False
+
+@router.post("/templates/{name}/clean")
+def clean_template_files(name: str):
+    """
+    Clean all generated files in the template directory,
+    preserving only raw photo capture files: color image, depth map, and parameters.
+    """
+    template_path = os.path.join(TEMPLATE_GROUP_DIR, name)
+    if not os.path.exists(template_path):
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    deleted_files = []
+    kept_files = []
+    try:
+        for item in sorted(os.listdir(template_path)):
+            item_path = os.path.join(template_path, item)
+            if is_raw_capture_file(item):
+                kept_files.append(item)
+            else:
+                if os.path.isfile(item_path) or os.path.islink(item_path):
+                    os.remove(item_path)
+                    deleted_files.append(item)
+                    logger.info(f"Cleaned template generated file: {item_path}")
+                elif os.path.isdir(item_path):
+                    shutil.rmtree(item_path)
+                    deleted_files.append(item + "/")
+                    logger.info(f"Cleaned template generated directory: {item_path}")
+
+        logger.info(f"Cleaned template '{name}': deleted {len(deleted_files)} items, kept {len(kept_files)} raw files.")
+        return {
+            "message": f"Template '{name}' cleaned successfully",
+            "template": name,
+            "deleted": deleted_files,
+            "kept": kept_files,
+        }
+    except Exception as e:
+        logger.error(f"Failed to clean template '{name}': {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/templates/{name}/capture")
 def capture_template_data(name: str):
     template_path = os.path.join(TEMPLATE_GROUP_DIR, name)

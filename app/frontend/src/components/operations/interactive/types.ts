@@ -227,4 +227,12 @@ export const PATH_PALETTE = [
   '#06b6d4', // Cyan
 ];
 
+export interface CanvasNotice {
+  id: number;
+  type: 'success' | 'warning' | 'error' | 'info';
+  title?: string;
+  message: string;
+  duration?: number;
+}
+
 

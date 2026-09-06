@@ -25,6 +25,9 @@ interface PathSvgOverlayProps {
   activeState?: PathStateType;
   simulationState?: SimulationState | null;
   sessionData?: SessionData | null;
+  isVerifying?: boolean;
+  isOptimizing?: boolean;
+  isAutoGenerating?: boolean;
   onSelectPathForEdit?: (pathId: number) => void;
   setHighlightedPathId: (id: number | null) => void;
   setHoveredWaypoint: (wp: WaypointItem | null) => void;
@@ -91,6 +94,9 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
   activeState = 'raw',
   simulationState = null,
   sessionData = null,
+  isVerifying = false,
+  isOptimizing = false,
+  isAutoGenerating = false,
   onSelectPathForEdit,
   setHighlightedPathId,
   setHoveredWaypoint,
@@ -103,7 +109,7 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
   return (
     <>
       {/* 1. VIEW/OVERLAY MODE: Render Manual TCP Paths on top of scan.jpg */}
-      {!manualPathMode && showManualPathsOverlay && manualPaths.length > 0 && (
+      {!manualPathMode && (showManualPathsOverlay || isVerifying || isOptimizing) && manualPaths.length > 0 && (
         <svg
           className="absolute inset-0 w-full h-full pointer-events-none select-none"
           viewBox={`0 0 ${natSize.w} ${natSize.h}`}
@@ -122,6 +128,16 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
             <marker id="view-tool-z-arrow" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto">
               <path d="M0,0.5 L0,4.5 L4.5,2.5 z" fill={theme.hex} />
             </marker>
+            <marker id="view-tool-z-arrow-purple" markerWidth="5" markerHeight="5" refX="4" refY="2.5" orient="auto">
+              <path d="M0,0.5 L0,4.5 L4.5,2.5 z" fill="#c084fc" />
+            </marker>
+            <filter id="path-energy-glow" x="-20%" y="-20%" width="140%" height="140%">
+              <feGaussianBlur stdDeviation="3" result="blur" />
+              <feMerge>
+                <feMergeNode in="blur" />
+                <feMergeNode in="SourceGraphic" />
+              </feMerge>
+            </filter>
           </defs>
 
           {manualPaths.map((path, pIdx) => {
@@ -203,6 +219,44 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
                         strokeDasharray={dashArray}
                         style={{ pointerEvents: 'none' }}
                       />
+
+                      {/* Dynamic Verification Laser Flow */}
+                      {isVerifying && (
+                        <line
+                          x1={prev.pixel[0]}
+                          y1={prev.pixel[1]}
+                          x2={p.pixel[0]}
+                          y2={p.pixel[1]}
+                          stroke="#38bdf8"
+                          strokeWidth={4}
+                          strokeDasharray="14 10"
+                          strokeLinecap="round"
+                          filter="url(#path-energy-glow)"
+                          opacity={0.95}
+                          style={{ pointerEvents: 'none' }}
+                        >
+                          <animate attributeName="stroke-dashoffset" values="0;-96" dur="0.65s" repeatCount="indefinite" />
+                        </line>
+                      )}
+
+                      {/* Dynamic POI Optimization Energy Stream */}
+                      {isOptimizing && (
+                        <line
+                          x1={prev.pixel[0]}
+                          y1={prev.pixel[1]}
+                          x2={p.pixel[0]}
+                          y2={p.pixel[1]}
+                          stroke="#c084fc"
+                          strokeWidth={4}
+                          strokeDasharray="14 10"
+                          strokeLinecap="round"
+                          filter="url(#path-energy-glow)"
+                          opacity={0.95}
+                          style={{ pointerEvents: 'none' }}
+                        >
+                          <animate attributeName="stroke-dashoffset" values="0;-96" dur="0.65s" repeatCount="indefinite" />
+                        </line>
+                      )}
                     </g>
                   );
                 })}
@@ -287,6 +341,19 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
                       }}
                     >
                       <line x1={u0} y1={v0 - 6} x2={u0} y2={v0} stroke={badgeColor} strokeWidth={2} />
+                      {/* Dynamic halo ring for start node */}
+                      {isVerifying && (
+                        <circle cx={u0} cy={v0 - 15} r={10.5} fill="none" stroke="#38bdf8" strokeWidth={2} style={{ pointerEvents: 'none' }}>
+                          <animate attributeName="r" values="10.5;18;10.5" dur="0.9s" repeatCount="indefinite" />
+                          <animate attributeName="opacity" values="1;0.1;1" dur="0.9s" repeatCount="indefinite" />
+                        </circle>
+                      )}
+                      {isOptimizing && (
+                        <circle cx={u0} cy={v0 - 15} r={10.5} fill="none" stroke="#c084fc" strokeWidth={2} style={{ pointerEvents: 'none' }}>
+                          <animate attributeName="r" values="10.5;18;10.5" dur="0.9s" repeatCount="indefinite" />
+                          <animate attributeName="opacity" values="1;0.1;1" dur="0.9s" repeatCount="indefinite" />
+                        </circle>
+                      )}
                       <circle cx={u0} cy={v0 - 15} r={10.5} fill={badgeColor} stroke="#ffffff" strokeWidth={1.5} filter="drop-shadow(0px 2px 4px rgba(0,0,0,0.75))" />
                       <text x={u0} y={v0 - 14.5} textAnchor="middle" dominantBaseline="central" fill="#ffffff" fontSize={9.5} fontWeight="bold" style={{ pointerEvents: 'none' }}>
                         {`P${pId}`}
@@ -359,6 +426,38 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
 
                       {/* TCP Point with Sequential Step Number Badge */}
                       <g transform={`translate(${tcpDrawU}, ${tcpDrawV})`}>
+                        {/* Dynamic Verification Waypoint Ripple */}
+                        {isVerifying && (
+                          <circle
+                            cx={0}
+                            cy={0}
+                            r={6.5}
+                            fill="none"
+                            stroke="#38bdf8"
+                            strokeWidth={2}
+                            style={{ pointerEvents: 'none' }}
+                          >
+                            <animate attributeName="r" values="6.5;14;6.5" dur="0.9s" repeatCount="indefinite" />
+                            <animate attributeName="opacity" values="1;0.1;1" dur="0.9s" repeatCount="indefinite" />
+                          </circle>
+                        )}
+
+                        {/* Dynamic POI Optimization Waypoint Ripple */}
+                        {isOptimizing && (
+                          <circle
+                            cx={0}
+                            cy={0}
+                            r={6.5}
+                            fill="none"
+                            stroke="#c084fc"
+                            strokeWidth={2}
+                            style={{ pointerEvents: 'none' }}
+                          >
+                            <animate attributeName="r" values="6.5;14;6.5" dur="0.9s" repeatCount="indefinite" />
+                            <animate attributeName="opacity" values="1;0.1;1" dur="0.9s" repeatCount="indefinite" />
+                          </circle>
+                        )}
+
                         <circle
                           cx={0}
                           cy={0}
@@ -381,6 +480,23 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
                           {pt.index || idx + 1}
                         </text>
                       </g>
+
+                      {/* Dynamic POI Optimization Tool-Z Vector Projection */}
+                      {isOptimizing && toolZ && (
+                        <line
+                          x1={toolZ[0]}
+                          y1={toolZ[1]}
+                          x2={toolZ[2]}
+                          y2={toolZ[3]}
+                          stroke="#c084fc"
+                          strokeWidth={3}
+                          markerEnd="url(#view-tool-z-arrow-purple)"
+                          filter="url(#path-energy-glow)"
+                          style={{ pointerEvents: 'none' }}
+                        >
+                          <animate attributeName="stroke-opacity" values="0.4;1;0.4" dur="0.75s" repeatCount="indefinite" />
+                        </line>
+                      )}
                     </g>
                   );
                 })}
@@ -421,21 +537,6 @@ export const PathSvgOverlay: React.FC<PathSvgOverlayProps> = ({
           )}
 
         </svg>
-      )}
-
-      {/* Mini Legend for Spraying ON (Solid blue) vs Transition OFF (Dashed amber) */}
-      {!manualPathMode && showManualPathsOverlay && manualPaths.length > 0 && (
-        <div className="absolute top-2 left-2 z-10 flex items-center gap-2.5 px-2.5 py-1 bg-slate-900/85 backdrop-blur-md rounded-md border border-slate-700/60 shadow-lg text-[10.5px] text-slate-300 pointer-events-none select-none">
-          <div className="flex items-center gap-1.5">
-            <span className="w-3.5 h-[2.5px] bg-[#0284c7] inline-block rounded-full"></span>
-            <span className="text-sky-300 font-semibold">纵列喷涂 (ON)</span>
-          </div>
-          <span className="text-slate-600">|</span>
-          <div className="flex items-center gap-1.5">
-            <span className="w-3.5 h-0 border-t-2 border-dashed border-[#f59e0b] inline-block"></span>
-            <span className="text-amber-300 font-semibold">列间转移 (OFF)</span>
-          </div>
-        </div>
       )}
 
       {/* 2. MANUAL TCP EDIT MODE */}

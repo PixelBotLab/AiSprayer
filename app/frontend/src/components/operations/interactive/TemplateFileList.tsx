@@ -21,6 +21,9 @@ import type { FileItem, PathStateType, ManualPathItem, VerificationReport } from
 interface TemplateFileListProps {
   files: FileItem[];
   activeState: PathStateType;
+  templateName?: string | null;
+  onCleanGeneratedFiles?: () => Promise<void> | void;
+  isCleaning?: boolean;
   rawPaths?: ManualPathItem[];
   autoPaths?: ManualPathItem[];
   autoPoiPaths?: ManualPathItem[];
@@ -43,6 +46,9 @@ interface TemplateFileListProps {
 export const TemplateFileList: React.FC<TemplateFileListProps> = ({
   files,
   activeState,
+  templateName,
+  onCleanGeneratedFiles,
+  isCleaning = false,
   rawPaths = [],
   autoPaths = [],
   autoPoiPaths = [],
@@ -63,15 +69,21 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
 }) => {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; fileName: string; state?: PathStateType } | null>(null);
   const [selectedFile, setSelectedFile] = useState<string | null>(null);
+  const [confirmClean, setConfirmClean] = useState(false);
 
   // Close menus on outside click
   useEffect(() => {
     const handleOutside = () => {
       setContextMenu(null);
+      setConfirmClean(false);
     };
     window.addEventListener('click', handleOutside);
     return () => window.removeEventListener('click', handleOutside);
   }, []);
+
+  useEffect(() => {
+    setConfirmClean(false);
+  }, [templateName, files]);
 
   useEffect(() => {
     if (selectedFile && !files.some((f) => f.name === selectedFile)) {
@@ -207,6 +219,19 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
     (f) => !f.name.endsWith('.report.json') && !f.name.endsWith('.report.yaml')
   );
 
+  const isRawCapture = (filename: string): boolean => {
+    const lower = filename.toLowerCase();
+    if (['mask', 'path', 'mesh', 'report'].some((k) => lower.includes(k))) return false;
+    if (['scan.jpg', 'scan.jpeg', 'scan.png'].includes(lower)) return true;
+    if (lower.includes('color') && ['.jpg', '.jpeg', '.png', '.bmp', '.webp'].some((ext) => lower.endsWith(ext))) return true;
+    if (lower.includes('depth') && ['.png', '.npy', '.raw', '.tiff', '.bin', '.bmp'].some((ext) => lower.endsWith(ext))) return true;
+    if ((lower.includes('param') || lower.startsWith('scan.info.')) && ['.yaml', '.yml', '.json'].some((ext) => lower.endsWith(ext))) return true;
+    return false;
+  };
+
+  const hasCleanableFiles = validFiles.some((f) => !isRawCapture(f.name));
+  const canClean = Boolean(templateName && hasCleanableFiles && !isCleaning);
+
   const fileCategories = [
     {
       id: 'paths',
@@ -222,7 +247,7 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
       icon: Camera,
       iconColor: 'text-blue-400',
       badgeColor: 'bg-blue-500/10 text-blue-400 border-blue-500/30',
-      files: validFiles.filter((f) => ['scan.color.jpg', 'scan.jpg', 'scan.depth.png', 'scan.depth.npy', 'scan.depth.bin', 'scan.params.yaml'].includes(f.name)),
+      files: validFiles.filter((f) => isRawCapture(f.name)),
     },
     {
       id: 'segment',
@@ -230,7 +255,7 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
       icon: Layers,
       iconColor: 'text-emerald-400',
       badgeColor: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30',
-      files: validFiles.filter((f) => ['scan.masks.yaml', 'scan.masks.jpg'].includes(f.name)),
+      files: validFiles.filter((f) => f.name.startsWith('scan.masks')),
     },
     {
       id: 'reconstruct',
@@ -249,7 +274,8 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
       files: validFiles.filter(
         (f) =>
           !f.name.includes('path') &&
-          !['scan.color.jpg', 'scan.jpg', 'scan.depth.png', 'scan.depth.npy', 'scan.depth.bin', 'scan.params.yaml', 'scan.masks.yaml', 'scan.masks.jpg'].includes(f.name) &&
+          !isRawCapture(f.name) &&
+          !f.name.startsWith('scan.masks') &&
           !f.name.startsWith('scan.mesh') &&
           !f.name.includes('.ply') &&
           !f.name.includes('.stl')
@@ -355,6 +381,85 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
                 {execTooltip}
               </div>
             </div>
+          </div>
+
+          <div className="w-[1px] h-3 bg-slate-700 mx-0.5" />
+
+          {/* Button 5: Clean Generated Files */}
+          <div className="relative group flex items-center justify-center">
+            <button
+              type="button"
+              disabled={!canClean}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (canClean) setConfirmClean((prev) => !prev);
+              }}
+              className={`w-6 h-6 rounded flex items-center justify-center transition-all ${
+                !canClean
+                  ? 'text-slate-600 cursor-not-allowed opacity-40'
+                  : isCleaning
+                  ? 'bg-rose-500/20 text-rose-400'
+                  : confirmClean
+                  ? 'bg-rose-600 text-white shadow-lg shadow-rose-600/30'
+                  : 'text-rose-400 hover:bg-rose-500/20 hover:text-rose-300'
+              }`}
+            >
+              {isCleaning ? (
+                <RefreshCw size={11} className="animate-spin text-rose-400" />
+              ) : (
+                <Trash2 size={11} />
+              )}
+            </button>
+            {!confirmClean && (
+              <div className="absolute top-full mt-2 right-0 hidden group-hover:flex flex-col items-end pointer-events-none z-50">
+                <div className="bg-slate-950/80 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
+                  {!templateName
+                    ? 'Select a template to clean files'
+                    : !hasCleanableFiles
+                    ? 'No generated files to clean'
+                    : 'Clean Generated Files (Keep Photo & Params)'}
+                </div>
+              </div>
+            )}
+
+            {/* Inline Confirmation Card (no modal dialog) */}
+            {confirmClean && (
+              <div
+                className="absolute right-0 top-full mt-1.5 z-50 bg-slate-900/95 backdrop-blur-md border border-rose-500/40 rounded-lg p-2.5 shadow-2xl flex flex-col gap-2 min-w-[210px] animate-in fade-in zoom-in-95 duration-150"
+                onClick={(e) => e.stopPropagation()}
+              >
+                <div className="flex items-start gap-1.5 text-rose-300 text-[11px] font-medium leading-tight">
+                  <AlertTriangle size={13} className="shrink-0 mt-0.5 text-rose-400" />
+                  <span>Clean generated files?</span>
+                </div>
+                <div className="text-[10px] text-slate-400 leading-relaxed">
+                  Deletes all generated masks, 3D meshes, and paths. Raw photo (color, depth, params) will be kept.
+                </div>
+                <div className="flex items-center justify-end gap-1.5 pt-1 border-t border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => setConfirmClean(false)}
+                    className="px-2 py-0.5 rounded text-[10px] text-slate-400 hover:text-slate-200 hover:bg-slate-800 transition-colors"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isCleaning}
+                    onClick={async () => {
+                      setConfirmClean(false);
+                      if (onCleanGeneratedFiles) {
+                        await onCleanGeneratedFiles();
+                      }
+                    }}
+                    className="px-2.5 py-0.5 rounded text-[10px] font-semibold bg-rose-600 hover:bg-rose-500 text-white flex items-center gap-1 shadow-sm transition-colors"
+                  >
+                    {isCleaning ? <RefreshCw size={10} className="animate-spin" /> : <Trash2 size={10} />}
+                    <span>Clean</span>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           <span className="bg-slate-800 text-slate-400 text-[9px] font-mono px-1.5 py-0.5 rounded border border-slate-700 ml-0.5">

@@ -97,12 +97,17 @@ echo "=========================================="
 # Trap SIGINT, SIGTERM, and EXIT to kill background processes
 cleanup() {
     trap - SIGINT SIGTERM EXIT
+    # 静音 bash 异步管道在终止时向 stderr 输出的作业信号报告（如 Killed: 9, Interrupt: 2, Terminated: 15）
+    exec 2>/dev/null
     echo ""
     echo "Stopping AiSprayer..."
     
     # 1. Graceful termination
     [ -n "$BACKEND_PID" ] && kill -TERM "$BACKEND_PID" 2>/dev/null
     [ -n "$FRONTEND_PID" ] && kill -TERM "$FRONTEND_PID" 2>/dev/null
+    pkill -TERM -f "main.py" 2>/dev/null
+    pkill -TERM -f "vite" 2>/dev/null
+    pkill -TERM -f "orbbec_camera_service" 2>/dev/null
     
     # 2. Forceful termination after brief pause
     sleep 0.5

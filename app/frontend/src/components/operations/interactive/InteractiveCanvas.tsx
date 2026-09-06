@@ -11,6 +11,13 @@ import {
   Check,
   Save,
   X,
+  Camera,
+  Boxes,
+  Sparkles,
+  CheckCircle2,
+  AlertTriangle,
+  AlertOctagon,
+  Info,
 } from 'lucide-react';
 import type {
   MaskData,
@@ -22,6 +29,7 @@ import type {
   PathStateType,
   SimulationState,
   SessionData,
+  CanvasNotice,
 } from './types';
 import { PATH_PALETTE } from './types';
 import { PathStateSwitcher } from './PathStateSwitcher';
@@ -32,7 +40,15 @@ import { TOOLBAR_TIP_CLASS } from './ToolbarTip';
 interface InteractiveCanvasProps {
   imageUrl: string | null;
   isLoadingTemplate: boolean;
+  isCapturing?: boolean;
+  isReconstructing?: boolean;
+  isAutoGenerating?: boolean;
+  isVerifying?: boolean;
+  isOptimizing?: boolean;
+  canvasNotice?: CanvasNotice | null;
+  onDismissNotice?: () => void;
   segMode: boolean;
+
   manualPathMode: boolean;
   showMasksOverlay: boolean;
   showManualPathsOverlay: boolean;
@@ -83,12 +99,19 @@ interface InteractiveCanvasProps {
   onSaveManualPaths: () => void;
   onDeleteCurrentPath: () => void;
   onExitManualPathMode: () => void;
-  renderPolygons: (polygons: number[][][], fill: string, stroke?: string) => React.ReactNode;
+  renderPolygons?: (polygons: number[][][], fill: string, stroke?: string) => React.ReactNode;
 }
 
 export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
   imageUrl,
   isLoadingTemplate,
+  isCapturing = false,
+  isReconstructing = false,
+  isAutoGenerating = false,
+  isVerifying = false,
+  isOptimizing = false,
+  canvasNotice = null,
+  onDismissNotice,
   segMode,
   manualPathMode,
   showMasksOverlay,
@@ -247,19 +270,25 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
         <div className="w-[1px] h-2.5 bg-white/10 mx-0.5" />
         <button
           onClick={onToggleMasksOverlay}
+          disabled={savedMasks.length === 0 && committedMasks.length === 0}
           className={`p-1 rounded transition-colors ${
-            showMasksOverlay ? 'bg-sky-500/25 text-sky-300' : 'text-slate-500 hover:text-slate-300'
+            savedMasks.length === 0 && committedMasks.length === 0
+              ? 'text-slate-700 cursor-not-allowed'
+              : showMasksOverlay ? 'bg-sky-500/25 text-sky-300' : 'text-slate-500 hover:text-slate-300'
           }`}
-          title="Toggle Mask Overlay"
+          title={savedMasks.length === 0 && committedMasks.length === 0 ? 'No masks available' : 'Toggle Mask Overlay'}
         >
           {showMasksOverlay ? <Eye size={11} /> : <EyeOff size={11} />}
         </button>
         <button
           onClick={onToggleManualPathsOverlay}
+          disabled={manualPaths.length === 0}
           className={`p-1 rounded transition-colors ${
-            showManualPathsOverlay ? 'bg-amber-500/25 text-amber-300' : 'text-slate-500 hover:text-slate-300'
+            manualPaths.length === 0
+              ? 'text-slate-700 cursor-not-allowed'
+              : showManualPathsOverlay ? 'bg-amber-500/25 text-amber-300' : 'text-slate-500 hover:text-slate-300'
           }`}
-          title="Toggle Manual Paths Overlay"
+          title={manualPaths.length === 0 ? 'No paths available' : 'Toggle Manual Paths Overlay'}
         >
           <Route size={11} />
         </button>
@@ -278,10 +307,102 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
       {/* 2. Atomic Loading Barrier Overlay */}
       {isLoadingTemplate && (
         <div className="absolute inset-0 bg-slate-950/60 backdrop-blur-[2px] flex items-center justify-center z-40 transition-opacity pointer-events-none">
-          <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-slate-900/90 border border-slate-700 text-slate-300 text-xs shadow-xl">
-            <RefreshCw size={14} className="animate-spin text-sky-400" />
-            <span>Loading Template...</span>
+          <div className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-900/90 border border-slate-700 text-slate-300 text-[11px] shadow-lg">
+            <RefreshCw size={12} className="animate-spin text-sky-400" />
+            <span>Loading...</span>
           </div>
+        </div>
+      )}
+
+      {/* Action Animation Overlays in Main Canvas (Ultra-compact HUD badges) */}
+      {/* Camera Capture Effect */}
+      {isCapturing && (
+        <div className="absolute inset-0 z-40 pointer-events-none overflow-hidden select-none">
+          <div className="absolute inset-0 bg-white/25 animate-camera-shutter-flash" />
+          <div className="absolute inset-x-0 h-0.5 bg-gradient-to-r from-transparent via-cyan-400 to-transparent shadow-[0_0_12px_#38bdf8] animate-canvas-scanline" />
+          <div className="absolute top-2 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-900/90 border border-cyan-500/40 backdrop-blur-md shadow-lg text-cyan-300 text-[11px] font-medium animate-pulse">
+            <Camera size={12} className="animate-spin text-cyan-400" />
+            <span>Capturing...</span>
+          </div>
+        </div>
+      )}
+
+      {/* 3D Mesh Reconstruction Effect */}
+      {isReconstructing && (
+        <div className="absolute inset-0 z-40 pointer-events-none overflow-hidden select-none">
+          <div className="absolute inset-0 animate-cyber-grid opacity-40" />
+          <div className="absolute inset-x-0 h-0.5 bg-gradient-to-r from-transparent via-emerald-400 to-transparent shadow-[0_0_12px_#34d399] animate-canvas-scanline" />
+          <div className="absolute top-2 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-900/90 border border-emerald-500/40 backdrop-blur-md shadow-lg text-emerald-300 text-[11px] font-medium">
+            <Boxes size={12} className="animate-bounce text-emerald-400" />
+            <span>Reconstructing 3D...</span>
+          </div>
+        </div>
+      )}
+
+      {/* Auto Path Generation Effect */}
+      {isAutoGenerating && (
+        <div className="absolute inset-0 z-40 pointer-events-none overflow-hidden select-none">
+          <div className="absolute inset-x-0 h-0.5 bg-gradient-to-r from-transparent via-amber-400 to-transparent shadow-[0_0_12px_#fbbf24] animate-canvas-scanline" />
+          <div className="absolute top-2 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-900/90 border border-amber-500/40 backdrop-blur-md shadow-lg text-amber-300 text-[11px] font-medium">
+            <Sparkles size={12} className="animate-spin text-amber-400" />
+            <span>Generating paths...</span>
+          </div>
+        </div>
+      )}
+
+      {/* Kinematics Verification Effect */}
+      {isVerifying && (
+        <div className="absolute inset-0 z-40 pointer-events-none overflow-hidden select-none">
+          <div className="absolute inset-x-0 h-0.5 bg-gradient-to-r from-transparent via-sky-400 to-transparent shadow-[0_0_12px_#38bdf8] animate-canvas-scanline" />
+          <div className="absolute top-2 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-900/90 border border-sky-500/40 backdrop-blur-md shadow-lg text-sky-300 text-[11px] font-medium">
+            <RefreshCw size={12} className="animate-spin text-sky-400" />
+            <span>Verifying kinematics...</span>
+          </div>
+        </div>
+      )}
+
+      {/* POI Optimization Effect */}
+      {isOptimizing && (
+        <div className="absolute inset-0 z-40 pointer-events-none overflow-hidden select-none">
+          <div className="absolute inset-x-0 h-0.5 bg-gradient-to-r from-transparent via-purple-400 to-transparent shadow-[0_0_12px_#c084fc] animate-canvas-scanline" />
+          <div className="absolute top-2 left-1/2 -translate-x-1/2 flex items-center gap-1.5 px-3 py-1 rounded-full bg-slate-900/90 border border-purple-500/40 backdrop-blur-md shadow-lg text-purple-300 text-[11px] font-medium">
+            <Sparkles size={12} className="animate-spin text-purple-400" />
+            <span>Optimizing POI...</span>
+          </div>
+        </div>
+      )}
+
+      {/* Floating In-Canvas HUD Notification (Compact Pill) */}
+      {canvasNotice && (
+        <div
+          className={`absolute top-2 left-1/2 -translate-x-1/2 z-50 pointer-events-auto flex items-center gap-1.5 px-3 py-1 rounded-full border backdrop-blur-md shadow-lg animate-hud-slide-in select-none max-w-[80%] transition-all ${
+            canvasNotice.type === 'success'
+              ? 'bg-slate-900/90 border-emerald-500/40 text-emerald-300'
+              : canvasNotice.type === 'error'
+              ? 'bg-slate-900/90 border-rose-500/40 text-rose-300'
+              : canvasNotice.type === 'warning'
+              ? 'bg-slate-900/90 border-amber-500/40 text-amber-300'
+              : 'bg-slate-900/90 border-sky-500/40 text-sky-300'
+          }`}
+        >
+          <div className="shrink-0">
+            {canvasNotice.type === 'success' && <CheckCircle2 size={12} className="text-emerald-400" />}
+            {canvasNotice.type === 'error' && <AlertOctagon size={12} className="text-rose-400" />}
+            {canvasNotice.type === 'warning' && <AlertTriangle size={12} className="text-amber-400" />}
+            {canvasNotice.type === 'info' && <Info size={12} className="text-sky-400" />}
+          </div>
+          <span className="truncate max-w-[320px] text-[11px] font-medium leading-none text-slate-200">
+            {canvasNotice.message}
+          </span>
+          {onDismissNotice && (
+            <button
+              onClick={onDismissNotice}
+              className="shrink-0 p-0.5 text-slate-400 hover:text-white rounded-full hover:bg-white/10 transition-colors ml-0.5"
+              title="Dismiss"
+            >
+              <X size={11} />
+            </button>
+          )}
         </div>
       )}
 
@@ -318,6 +439,10 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
                 currentPolygons={currentPolygons}
                 currentPoints={currentPoints}
                 natSize={natSize}
+                isReconstructing={isReconstructing}
+                isAutoGenerating={isAutoGenerating}
+                isVerifying={isVerifying}
+                isOptimizing={isOptimizing}
                 onSegImageClick={onSegImageClick}
                 onSegContextMenu={onSegContextMenu}
                 renderPolygons={renderPolygons}
@@ -339,6 +464,9 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
                 activeState={activeState}
                 simulationState={simulationState}
                 sessionData={sessionData}
+                isVerifying={isVerifying}
+                isOptimizing={isOptimizing}
+                isAutoGenerating={isAutoGenerating}
                 onSelectPathForEdit={onSelectPathForEdit}
                 setHighlightedPathId={setHighlightedPathId}
                 setHoveredWaypoint={setHoveredWaypoint}
