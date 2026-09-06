@@ -36,45 +36,88 @@ RECON_MAX_ATTEMPTS = 3
 RECON_SUBPROCESS_TIMEOUT_S = 60.0
 
 
-def _reconstruction_worker(log_queue: mp.Queue, res_conn, template_path: str, template_name: str):
-    """Subprocess worker: runs the whole Poisson reconstruction in an isolated process."""
+def _persistent_worker_entry(work_conn, log_queue: mp.Queue):
+    """
+    Subprocess worker: runs in a persistent isolated process.
+    Pre-imports open3d, trimesh, and PoissonReconstructor once during startup.
+    Handles multiple reconstruction requests sequentially over the work_conn pipe.
+    """
     try:
         root_logger = logging.getLogger()
         root_logger.setLevel(logging.INFO)
         root_logger.handlers = [QueueHandler(log_queue)]
 
-        result = InteractiveReconstructionService()._reconstruct_surface_impl(template_path, template_name)
-        res_conn.send({"success": True, "result": result})
+        # Override single-thread limits inherited from main server process
+        # so Open3D & Poisson solvers run multi-threaded
+        for _name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+            os.environ[_name] = "4"
+
+        # Pre-import heavy dependencies to eliminate cold-start lag
+        import open3d as o3d  # noqa: F401
+        import trimesh  # noqa: F401
+        from core.vision.reconstruction import PoissonReconstructor  # noqa: F401
+
+        svc = InteractiveReconstructionService()
+
+        while True:
+            try:
+                msg = work_conn.recv()
+            except (EOFError, KeyboardInterrupt):
+                break
+
+            if not msg or msg.get("action") == "stop":
+                break
+
+            if msg.get("action") == "reconstruct":
+                template_path = msg.get("template_path")
+                template_name = msg.get("template_name")
+                try:
+                    result = svc._reconstruct_surface_impl(template_path, template_name)
+                    work_conn.send({"success": True, "result": result})
+                except Exception as e:
+                    work_conn.send({
+                        "success": False,
+                        "error": str(e),
+                        "exc_type": type(e).__name__,
+                        "traceback": traceback.format_exc(),
+                    })
     except Exception as e:
-        res_conn.send({
-            "success": False,
-            "error": str(e),
-            "exc_type": type(e).__name__,
-            "traceback": traceback.format_exc(),
-        })
+        try:
+            work_conn.send({
+                "success": False,
+                "error": f"Worker crashed: {e}",
+                "exc_type": type(e).__name__,
+                "traceback": traceback.format_exc(),
+            })
+        except Exception:
+            pass
     finally:
-        log_queue.put(None)
+        try:
+            log_queue.put(None)
+        except Exception:
+            pass
 
 
-def _drain_log_queue(log_queue: mp.Queue, proc: mp.Process):
-    """Forwards the worker's log records into this process's handlers (same as the POI optimizer worker)."""
-    while True:
+def _drain_persistent_log_queue(log_queue: mp.Queue, stop_event: threading.Event):
+    """Forwards log records from the persistent worker queue into the parent logger."""
+    while not stop_event.is_set():
         try:
             record = log_queue.get(timeout=0.1)
             if record is None:
                 break
             logging.getLogger(record.name).handle(record)
         except queue.Empty:
-            if not proc.is_alive():
-                while True:
-                    try:
-                        record = log_queue.get_nowait()
-                        if record is None:
-                            break
-                        logging.getLogger(record.name).handle(record)
-                    except queue.Empty:
-                        break
+            continue
+
+    # Drain any remaining logs
+    while True:
+        try:
+            record = log_queue.get_nowait()
+            if record is None:
                 break
+            logging.getLogger(record.name).handle(record)
+        except queue.Empty:
+            break
 
 
 def _reraise_worker_error(res: dict):
@@ -90,77 +133,167 @@ def _reraise_worker_error(res: dict):
     raise RuntimeError(f"Reconstruction worker error: {err}")
 
 
+class ReconstructionWorkerManager:
+    """
+    Manages a persistent, pre-warmed worker process for Poisson surface reconstruction.
+
+    Protects the main FastAPI server from Open3D Poisson segfaults / race-conditions on ARM64
+    while eliminating the ~6.2s cold import penalty on every reconstruction request.
+    """
+    def __init__(self, timeout_s: float = RECON_SUBPROCESS_TIMEOUT_S, max_attempts: int = RECON_MAX_ATTEMPTS):
+        self.timeout_s = timeout_s
+        self.max_attempts = max_attempts
+        self._lock = threading.Lock()
+        self._proc: mp.Process | None = None
+        self._parent_conn = None
+        self._log_queue: mp.Queue | None = None
+        self._log_thread: threading.Thread | None = None
+        self._stop_event: threading.Event | None = None
+
+    def _start_worker(self):
+        """Starts a new persistent worker process."""
+        self._terminate_worker()
+        ctx = mp.get_context("spawn")
+        self._log_queue = ctx.Queue()
+        self._parent_conn, child_conn = ctx.Pipe(duplex=True)
+        self._stop_event = threading.Event()
+
+        self._proc = ctx.Process(
+            target=_persistent_worker_entry,
+            args=(child_conn, self._log_queue),
+            daemon=True
+        )
+        self._proc.start()
+        child_conn.close()
+
+        self._log_thread = threading.Thread(
+            target=_drain_persistent_log_queue,
+            args=(self._log_queue, self._stop_event),
+            daemon=True
+        )
+        self._log_thread.start()
+        logger.info(f"🚀 [ReconstructionWorker] Persistent worker process launched (PID: {self._proc.pid}).")
+
+    def _ensure_worker(self):
+        """Ensures the worker process is running."""
+        if self._proc is None or not self._proc.is_alive():
+            self._start_worker()
+
+    def warmup(self):
+        """Pre-warms the worker in the background on startup."""
+        with self._lock:
+            self._ensure_worker()
+
+    def _terminate_worker(self):
+        """Terminates the current worker process and cleans up resources."""
+        if self._stop_event:
+            self._stop_event.set()
+
+        if self._parent_conn:
+            try:
+                self._parent_conn.send({"action": "stop"})
+            except Exception:
+                pass
+
+        if self._proc and self._proc.is_alive():
+            self._proc.join(timeout=1.5)
+            if self._proc.is_alive():
+                self._proc.terminate()
+                self._proc.join(timeout=1.0)
+            if self._proc.is_alive():
+                self._proc.kill()
+                self._proc.join()
+
+        if self._parent_conn:
+            try:
+                self._parent_conn.close()
+            except Exception:
+                pass
+            self._parent_conn = None
+
+        if self._log_thread and self._log_thread.is_alive():
+            self._log_thread.join(timeout=2.0)
+            self._log_thread = None
+
+        self._proc = None
+        self._log_queue = None
+        self._stop_event = None
+
+    def shutdown(self):
+        """Clean shutdown of worker process."""
+        with self._lock:
+            logger.info("🛑 [ReconstructionWorker] Shutting down persistent worker process...")
+            self._terminate_worker()
+
+    def execute(self, template_path: str, template_name: str) -> dict:
+        """
+        Executes reconstruction through the persistent warm worker.
+        If the worker hangs or segfaults (Open3D RK3588 bug), restarts and retries automatically.
+        """
+        with self._lock:
+            last_reason = "unknown"
+            for attempt in range(1, self.max_attempts + 1):
+                self._ensure_worker()
+                t0 = time.time()
+
+                try:
+                    self._parent_conn.send({
+                        "action": "reconstruct",
+                        "template_path": template_path,
+                        "template_name": template_name,
+                    })
+                except (BrokenPipeError, OSError, EOFError) as e:
+                    logger.warning(f"⚠️ [ReconstructionWorker] Pipe broken on send: {e}. Restarting worker...")
+                    self._terminate_worker()
+                    continue
+
+                res = None
+                timed_out = False
+                try:
+                    if self._parent_conn.poll(self.timeout_s):
+                        try:
+                            res = self._parent_conn.recv()
+                        except (EOFError, OSError):
+                            pass
+                    else:
+                        timed_out = True
+                except (EOFError, OSError, ValueError):
+                    timed_out = True
+
+                elapsed = time.time() - t0
+
+                if timed_out or res is None:
+                    exitcode = getattr(self._proc, "exitcode", None)
+                    last_reason = (f"hung and timed out after {elapsed:.0f}s" if timed_out
+                                   else f"process died/segfaulted without result (exit code {exitcode})")
+                    logger.error(
+                        f"⚠️ [Reconstruction] Attempt {attempt}/{self.max_attempts} {last_reason}"
+                        f"{'' if attempt >= self.max_attempts else ', restarting worker and retrying...'}"
+                    )
+                    self._terminate_worker()
+                    continue
+
+                if not res.get("success"):
+                    _reraise_worker_error(res)
+                return res["result"]
+
+            raise RuntimeError(
+                f"Surface reconstruction failed {self.max_attempts} times for template '{template_name}' "
+                f"(last attempt: {last_reason})."
+            )
+
+
+_worker_manager = ReconstructionWorkerManager()
+
+
 def run_reconstruction_subprocess(
     template_path: str,
     template_name: str,
     max_attempts: int = RECON_MAX_ATTEMPTS,
     timeout_s: float = RECON_SUBPROCESS_TIMEOUT_S,
 ) -> dict:
-    """
-    Spawns an isolated worker process for Poisson reconstruction, retrying on crash/hang.
-
-    竞态是偶发的, 重跑一次通常就过; 确定性错误(缺文件/掩码为空)则原样抛出, 不浪费重试。
-    """
-    last_reason = "unknown"
-    for attempt in range(1, max_attempts + 1):
-        ctx = mp.get_context("spawn")
-        log_queue = ctx.Queue()
-        parent_conn, child_conn = ctx.Pipe(duplex=False)
-
-        proc = ctx.Process(
-            target=_reconstruction_worker,
-            args=(log_queue, child_conn, template_path, template_name),
-        )
-        t0 = time.time()
-        proc.start()
-        # 必须关掉父进程手里的写端: 否则子进程崩溃时管道仍有写入者,
-        # parent_conn.poll() 永远等不到 EOF, 只能白白挂满整个超时才发现
-        child_conn.close()
-        log_thread = threading.Thread(target=_drain_log_queue, args=(log_queue, proc), daemon=True)
-        log_thread.start()
-
-        res = None
-        timed_out = False
-        try:
-            if parent_conn.poll(timeout_s):
-                try:
-                    res = parent_conn.recv()
-                except (EOFError, OSError):
-                    pass            # 管道已关: 子进程死了但没留下结果
-            else:
-                timed_out = True    # 等满超时 = Poisson 挂死
-        except (EOFError, OSError, ValueError):
-            timed_out = True
-
-        if timed_out and proc.is_alive():
-            proc.terminate()        # 已判定挂死, 立刻杀, 不再白等下面的 join
-
-        log_thread.join(timeout=3.0)
-        proc.join(timeout=5.0)
-        if proc.is_alive():
-            proc.kill()             # SIGTERM 杀不掉(卡在 C++ 里)时兜底
-            proc.join()
-        parent_conn.close()
-
-        elapsed = time.time() - t0
-
-        if res is not None:
-            if not res.get("success"):
-                _reraise_worker_error(res)
-            return res["result"]
-
-        # 没拿到结果 = 被信号打死(段错误)或超时挂死, 两者都是竞态的表现, 重试
-        last_reason = (f"hung and was killed after {elapsed:.0f}s" if timed_out
-                       else f"died without returning a result (exit code {proc.exitcode})")
-        logger.error(
-            f"⚠️ [Reconstruction] 第 {attempt}/{max_attempts} 次尝试{last_reason}"
-            f"{'' if attempt >= max_attempts else ', 自动重试...'}"
-        )
-
-    raise RuntimeError(
-        f"Surface reconstruction failed {max_attempts} times for template '{template_name}' "
-        f"(last attempt: {last_reason}). open3d Poisson 在多线程下偶发崩溃/挂死, 请重试。"
-    )
+    """Legacy helper: delegates to the persistent worker manager."""
+    return _worker_manager.execute(template_path, template_name)
 
 
 class InteractiveReconstructionService:
@@ -261,23 +394,29 @@ class InteractiveReconstructionService:
 
         return combined_mask > 0
 
+    def warmup(self):
+        """Pre-warms the worker in the background on service startup."""
+        _worker_manager.warmup()
+
+    def shutdown(self):
+        """Terminates the persistent worker process on service shutdown."""
+        _worker_manager.shutdown()
+
     def reconstruct_surface(self, template_path: str, template_name: str) -> dict:
         """
-        Public entry: runs Poisson surface reconstruction inside an isolated subprocess.
-
-        真实工作在 _reconstruct_surface_impl 里, 由 run_reconstruction_subprocess 派生的子进程执行,
-        以免 open3d Poisson 偶发的段错误/挂死拖垮整个后端。
+        Public entry: runs Poisson surface reconstruction inside an isolated, persistent warm worker process.
         """
-        return run_reconstruction_subprocess(template_path, template_name)
+        return _worker_manager.execute(template_path, template_name)
 
     def _reconstruct_surface_impl(self, template_path: str, template_name: str) -> dict:
         """
         Executes Poisson surface reconstruction using depth data, masks, and calibration.
-        Runs inside the spawned worker process — do not call it directly from the API layer.
+        Runs inside the worker process — do not call it directly from the API layer.
         """
-        logger.info(f"==================================================")
+        t_start = time.perf_counter()
+        logger.info("==================================================")
         logger.info(f"🚀 Starting Surface Reconstruction for template: '{template_name}'")
-        logger.info(f"==================================================")
+        logger.info("==================================================")
 
         # 1. Check required files
         depth_png_path = os.path.join(template_path, "scan.depth.png")
@@ -342,6 +481,10 @@ class InteractiveReconstructionService:
 
         # 5. Rasterize Masks from scan.masks.yaml
         unified_mask_2d = self.rasterize_masks(masks_path, height=h, width=w)
+        t_mask = time.perf_counter()
+        t_load_and_mask_s = round(t_mask - t_start, 3)
+        active_pixel_count = int(np.count_nonzero(unified_mask_2d))
+        logger.info(f"⏱️ [Reconstruct Step 1] Depth, calib & masks loaded in {t_load_and_mask_s:.2f}s ({active_pixel_count} mask pixels)")
 
         # 6. Initialize Reconstructor
         reconstructor = PoissonReconstructor(
@@ -356,7 +499,8 @@ class InteractiveReconstructionService:
             density_threshold=0.15,
             voxel_size=0.003,
             normal_radius=0.03,
-            smooth_iterations=20
+            smooth_iterations=20,
+            n_threads=4
         )
 
         intrinsics = k_matrix_to_intrinsics(intrinsics_k)
@@ -382,10 +526,17 @@ class InteractiveReconstructionService:
         
         # 7. Convert Depth to 2.5D Camera Point Cloud
         raw_point_cloud = depth_to_point_cloud(depth_image, intrinsics)
+        t_pcd = time.perf_counter()
+        t_inpaint_and_pcd_s = round(t_pcd - t_mask, 3)
+        active_points = int(np.count_nonzero(combined_mask))
+        logger.info(f"⏱️ [Reconstruct Step 2] Inpaint & PCD extraction in {t_inpaint_and_pcd_s:.2f}s ({active_points} valid points)")
 
         # 8. Perform 3D Poisson Reconstruction
         logger.info("Executing Poisson surface reconstruction and base coordinate alignment...")
         mesh: trimesh.Trimesh = reconstructor.reconstruct_mesh(raw_point_cloud, combined_mask)
+        t_mesh = time.perf_counter()
+        t_poisson_mesh_s = round(t_mesh - t_pcd, 3)
+        logger.info(f"⏱️ [Reconstruct Step 3] Poisson mesh & Taubin smoothing in {t_poisson_mesh_s:.2f}s ({len(mesh.vertices)} vertices, {len(mesh.faces)} faces)")
 
         # 9. Save output mesh files
         ply_path = os.path.join(template_path, "scan.mesh.ply")
@@ -396,8 +547,12 @@ class InteractiveReconstructionService:
 
         mesh.export(stl_path)
         logger.info(f"Saved reconstructed STL mesh: {stl_path}")
+        t_export = time.perf_counter()
+        t_export_s = round(t_export - t_mesh, 3)
+        t_total_compute_s = round(t_export - t_start, 3)
 
-        logger.info(f"✅ Surface reconstruction successfully finished for template '{template_name}'.")
+        logger.info(f"⏱️ [Reconstruct Step 4] Mesh files exported in {t_export_s:.2f}s")
+        logger.info(f"✅ Surface reconstruction successfully finished in {t_total_compute_s:.2f}s for template '{template_name}'.")
 
         return {
             "status": "success",
@@ -406,7 +561,15 @@ class InteractiveReconstructionService:
             "vertices": len(mesh.vertices),
             "faces": len(mesh.faces),
             "is_watertight": bool(mesh.is_watertight),
-            "files": ["scan.mesh.ply", "scan.mesh.stl"]
+            "files": ["scan.mesh.ply", "scan.mesh.stl"],
+            "elapsed_seconds": t_total_compute_s,
+            "timings": {
+                "load_and_mask_s": t_load_and_mask_s,
+                "inpaint_and_pcd_s": t_inpaint_and_pcd_s,
+                "poisson_mesh_s": t_poisson_mesh_s,
+                "export_files_s": t_export_s,
+                "total_compute_s": t_total_compute_s,
+            }
         }
 
 reconstruction_service = InteractiveReconstructionService()

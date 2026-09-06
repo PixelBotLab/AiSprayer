@@ -99,7 +99,6 @@ interface InteractiveCanvasProps {
   onSaveManualPaths: () => void;
   onDeleteCurrentPath: () => void;
   onExitManualPathMode: () => void;
-  renderPolygons?: (polygons: number[][][], fill: string, stroke?: string) => React.ReactNode;
 }
 
 export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
@@ -163,7 +162,6 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
   onSaveManualPaths,
   onDeleteCurrentPath,
   onExitManualPathMode,
-  renderPolygons,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const panStartRef = useRef({ startX: 0, startY: 0, initialX: 0, initialY: 0 });
@@ -445,7 +443,6 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
                 isOptimizing={isOptimizing}
                 onSegImageClick={onSegImageClick}
                 onSegContextMenu={onSegContextMenu}
-                renderPolygons={renderPolygons}
               />
 
               {/* 2D Path SVG Overlay */}

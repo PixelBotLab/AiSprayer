@@ -59,6 +59,7 @@ class PoissonReconstructor:
                  mask_erode_px: int = 1, flying_pixel_max_grad: float = 50.0,
                  mask_alpha: float = 0.25, poisson_depth: int = 9, density_threshold: float = 0.05,
                  voxel_size: float = 0.003, normal_radius: float = 0.03, smooth_iterations: int = 20,
+                 n_threads: int = 4,
                  **kwargs):
         """
         :param T_camera_to_base: 4x4 手眼标定矩阵 (numpy 数组或二维列表)
@@ -71,6 +72,7 @@ class PoissonReconstructor:
         :param mask_alpha: 掩码叠加到彩色图时的不透明度 (0~1)
         :param poisson_depth: 泊松重建八叉树深度，越大越精细
         :param density_threshold: 泊松重建密度阈值百分比，用于剔除低密度区域（开洞边界）
+        :param n_threads: 泊松重建多线程并行数，默认 4
         """
         self.T_camera_to_base = np.array(T_camera_to_base)
         self.intrinsics_k = np.array(intrinsics_k) if intrinsics_k is not None else None
@@ -85,6 +87,7 @@ class PoissonReconstructor:
         self.voxel_size = voxel_size
         self.normal_radius = normal_radius
         self.smooth_iterations = smooth_iterations
+        self.n_threads = n_threads
 
     @staticmethod
     def _erode_mask(mask_2d, erode_px):
@@ -206,29 +209,18 @@ class PoissonReconstructor:
         pcd.orient_normals_towards_camera_location(camera_location=np.array([0.0, 0.0, 0.0]))
 
         # =========================================================
-        # 3. 泊松表面重建
+        # 3. 泊松表面重建 (多线程并行加速)
         # =========================================================
-        print(f"🚀 正在通过 Poisson 泊松重建生成网格 (depth={self.poisson_depth})...")
+        n_threads = self.n_threads if self.n_threads > 0 else min(4, os.cpu_count() or 4)
+        print(f"🚀 正在通过 Poisson 泊松重建生成网格 (depth={self.poisson_depth}, threads={n_threads})...")
         o3d_mesh, densities = o3d.geometry.TriangleMesh.create_from_point_cloud_poisson(
-            pcd, depth=self.poisson_depth
+            pcd, depth=self.poisson_depth, n_threads=n_threads
         )
 
         # 剔除低密度顶点以打开边界 (泊松默认生成封闭曲面)
         densities = np.asarray(densities)
         density_val = np.quantile(densities, self.density_threshold)
         vertices_to_remove = densities < density_val
-        
-        # 【关键重叠修复】：严苛的距离裁剪
-        # 泊松重建会在边界处生成圆滑的“裙边”或者背面闭合曲面，
-        # 导致原本在 2D 掩码切分开的两条裤腿在 3D 空间再次膨胀，并在裆部发生物理重叠。
-        # 这里强制计算网格所有顶点到原始点云 (pcd) 的绝对物理距离，
-        # 将偏离超过 2 倍体素大小（如 6mm）的“虚假外壳”和“膨胀裙边”彻底裁剪掉！
-        #mesh_pcd = o3d.geometry.PointCloud()
-        #mesh_pcd.points = o3d_mesh.vertices
-        #dists = np.asarray(mesh_pcd.compute_point_cloud_distance(pcd))
-        #distance_threshold = self.voxel_size * 2.0
-        #vertices_to_remove = vertices_to_remove | (dists > distance_threshold)
-        
         o3d_mesh.remove_vertices_by_mask(vertices_to_remove)
 
         # 可选的后处理平滑 (Taubin 平滑不会显著导致收缩)

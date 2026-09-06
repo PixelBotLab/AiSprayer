@@ -1120,16 +1120,33 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       showNotice('warning', 'Segment mask required to reconstruct 3D');
       return;
     }
+    const startTime = performance.now();
+    console.log(`[3D Reconstruction] Clicked reconstruct button for template '${activeTemplate}' at ${new Date().toISOString()}`);
     setIsReconstructing(true);
     try {
       const res = await fetch(`${API_BASE}/api/interactive/templates/${activeTemplate}/reconstruct`, {
         method: 'POST',
       });
-      if (!res.ok) throw new Error('Reconstruction failed');
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(typeof data.detail === 'string' ? data.detail : 'Reconstruction failed');
+      }
+      const elapsedSec = ((performance.now() - startTime) / 1000).toFixed(2);
+      console.log(`[3D Reconstruction] Completed successfully in ${elapsedSec}s for template '${activeTemplate}'. Mesh:`, {
+        vertices: data.vertices,
+        faces: data.faces,
+        is_watertight: data.is_watertight,
+        backend_elapsed_seconds: data.elapsed_seconds,
+        timings: data.timings,
+      });
+
+      // Refresh template files to update hasMesh without full-screen flash or RGB image re-download
+      await fetchTemplateFiles(activeTemplate);
       if (onMeshUpdated) onMeshUpdated();
-      await handleSelectTemplate(activeTemplate);
-      showNotice('success', '3D mesh ready');
+      showNotice('success', `3D mesh ready (${elapsedSec}s)`);
     } catch (err: any) {
+      const elapsedSec = ((performance.now() - startTime) / 1000).toFixed(2);
+      console.error(`[3D Reconstruction] Failed after ${elapsedSec}s:`, err);
       showNotice('error', err.message);
     } finally {
       setIsReconstructing(false);

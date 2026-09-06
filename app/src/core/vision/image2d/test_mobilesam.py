@@ -19,8 +19,10 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-import torch
-from mobilesam_session import resolve_device, load_mobilesam, MobileSAMSession
+try:
+    from core.vision.image2d.mobilesam_session import resolve_device, load_mobilesam, MobileSAMSession
+except ImportError:
+    from mobilesam_session import resolve_device, load_mobilesam, MobileSAMSession
 
 WINDOW_NAME = "MobileSAM click"
 

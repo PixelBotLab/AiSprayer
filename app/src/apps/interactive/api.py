@@ -297,8 +297,15 @@ def reconstruct_surface(name: str):
     if not os.path.exists(template_path):
         raise HTTPException(status_code=404, detail="Template not found")
         
+    t_start = time.perf_counter()
+    logger.info(f"⏱️ [3D Reconstruction] Received request for template '{name}' at {time.strftime('%Y-%m-%d %H:%M:%S')}")
     try:
         result = reconstruction_service.reconstruct_surface(template_path, name)
+        elapsed_sec = time.perf_counter() - t_start
+        logger.info(
+            f"✅ [3D Reconstruction] Finished for template '{name}' in {elapsed_sec:.2f}s "
+            f"(vertices: {result.get('vertices')}, faces: {result.get('faces')})"
+        )
         return result
     except FileNotFoundError as e:
         logger.warning(f"Reconstruction file missing for '{name}': {e}")
@@ -307,7 +314,7 @@ def reconstruct_surface(name: str):
         logger.warning(f"Reconstruction validation error for '{name}': {e}")
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.warning(f"Reconstruction failed for template '{name}': {e}")
+        logger.warning(f"Reconstruction failed for template '{name}' after {time.perf_counter() - t_start:.2f}s: {e}")
         raise HTTPException(status_code=500, detail=f"Reconstruction error: {str(e)}")
 
 

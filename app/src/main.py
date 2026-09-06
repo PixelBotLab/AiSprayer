@@ -95,9 +95,13 @@ async def lifespan(app: FastAPI):
     from apps.interactive.sam_service import sam_service
     sam_service.initialize()
     
+    from apps.interactive.reconstruction_service import reconstruction_service
+    reconstruction_service.warmup()
+    
     yield
     # Shutdown: Clean up hardware resources
     logger.info("Shutting down background services...")
+    reconstruction_service.shutdown()
     camera_service.stop_stream()
     robot_service.disconnect()
 

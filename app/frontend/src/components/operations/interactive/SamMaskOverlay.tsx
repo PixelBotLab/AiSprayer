@@ -25,7 +25,6 @@ interface SamMaskOverlayProps {
   isOptimizing?: boolean;
   onSegImageClick?: (e: MouseEvent<SVGSVGElement>) => void;
   onSegContextMenu?: (e: MouseEvent<SVGSVGElement>) => void;
-  renderPolygons?: (polygons: number[][][], fill: string, stroke?: string) => React.ReactNode;
 }
 
 export const SamMaskOverlay: React.FC<SamMaskOverlayProps> = ({
@@ -42,18 +41,16 @@ export const SamMaskOverlay: React.FC<SamMaskOverlayProps> = ({
   isOptimizing = false,
   onSegImageClick,
   onSegContextMenu,
-  renderPolygons,
 }) => {
-  const defaultRenderPolygons = (polygons: number[][][], fill: string, stroke?: string) => (
+  const renderPolygons = (polygons: number[][][], fill: string, stroke: string = 'none') => (
     <path
       d={polygonsToSvgPath(polygons)}
       fill={fill}
-      stroke={stroke || 'none'}
+      stroke={stroke}
       strokeWidth={1.5}
     />
   );
 
-  const drawPoly = renderPolygons || defaultRenderPolygons;
   const activeMasks = savedMasks.length > 0 ? savedMasks : committedMasks;
   const isAnyDynamicAction = isReconstructing || isAutoGenerating || isVerifying || isOptimizing;
 
@@ -69,7 +66,7 @@ export const SamMaskOverlay: React.FC<SamMaskOverlayProps> = ({
             const colorScheme = MASK_COLORS[idx % MASK_COLORS.length];
             return (
               <g key={idx}>
-                {drawPoly(m.polygons, colorScheme.fill, colorScheme.stroke)}
+                {renderPolygons(m.polygons, colorScheme.fill, colorScheme.stroke)}
               </g>
             );
           })}
@@ -250,14 +247,14 @@ export const SamMaskOverlay: React.FC<SamMaskOverlayProps> = ({
             const colorScheme = MASK_COLORS[idx % MASK_COLORS.length];
             return (
               <g key={idx}>
-                {drawPoly(m.polygons, colorScheme.fill, colorScheme.stroke)}
+                {renderPolygons(m.polygons, colorScheme.fill, colorScheme.stroke)}
               </g>
             );
           })}
 
           {/* Current active predicted mask */}
           {currentPolygons.length > 0 &&
-            drawPoly(
+            renderPolygons(
               currentPolygons,
               'rgba(59, 130, 246, 0.45)',
               '#60a5fa'
