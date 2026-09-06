@@ -224,6 +224,52 @@ class RobotService:
     def set_tool_number(self, tool_num: int) -> tuple[bool, str]:
         return self.set_tool(tool_num)
 
+    @property
+    def do_index(self) -> int:
+        """从配置中获取喷涂/触发 DO 编号 (默认 1)"""
+        if self._config:
+            return getattr(self._config, "robot_do_index", 1)
+        return 1
+
+    def set_do(self, index: Optional[int] = None, status: int = 1) -> tuple[bool, str]:
+        """
+        设置机械臂数字输出端口 (DO) 状态。
+        :param index: DO 端口编号 (1-based, 例如 1 代表 DO1; 若为 None 则从配置中读取)
+        :param status: 1 代表高电平(开)，0 代表低电平(关)
+        """
+        eff_index = index if index is not None else self.do_index
+        if not self._driver or not self._is_connected:
+            msg = "set_do: Robot is not connected"
+            logger.error(msg)
+            return False, msg
+        try:
+            if hasattr(self._driver, "set_do"):
+                ok = self._driver.set_do(eff_index, status)
+                if ok:
+                    logger.info(f"set_do: Successfully set DO({eff_index}, {status})")
+                    return True, ""
+                return False, f"Failed to set DO({eff_index}, {status})"
+            return False, "Driver does not support set_do"
+        except Exception as e:
+            msg = f"set_do: Error setting DO({eff_index}, {status}): {e}"
+            logger.error(msg)
+            return False, msg
+
+    def get_do(self, index: Optional[int] = None) -> tuple[Optional[int], str]:
+        """获取机械臂数字输出端口 (DO) 状态 (若未传入 index 则从配置中读取)"""
+        eff_index = index if index is not None else self.do_index
+        if not self._driver or not self._is_connected:
+            return None, "Robot is not connected"
+        try:
+            if hasattr(self._driver, "get_do"):
+                val = self._driver.get_do(eff_index)
+                return val, ""
+            return None, "Driver does not support get_do"
+        except Exception as e:
+            return None, str(e)
+
+
+
     def move_to_pose(self, pose: List[float], speed: float = 10.0, acc: float = 10.0, tool_num: Optional[int] = None) -> tuple[bool, str]:
         if not self._driver or not self._is_connected:
             msg = "move_to_pose: Robot is not connected"

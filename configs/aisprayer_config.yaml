@@ -38,6 +38,7 @@ hardware:
     robot_urdf: "app/urdf/cr5_robot_with_my_tools.urdf" # cr5_robot.urdf/cr5_robot_with_gun.urdf
     robot_tcp_id: 1             # 机械臂末端工具坐标系ID: 默认 0 (法兰/工具0), 配置为 1 则是 gripper_tip_link (夹爪), 2 是 laser_head_link (激光头)
     robot_tcp: "gripper_tip_link"  # 对应的 URDF TCP 节点名称 (laser_head_link / gripper_tip_link)
+    do_index: 1                 # 机械臂数字输出端口编号 (DO index, 1-16, 用于喷涂或工具开/关控制)
 
 # 2. 标定算法配置 (Calibration)
 calib:

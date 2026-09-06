@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "app/src"))
 
 from apps.robot.models import (
     ConnectRobotReq, GlobalSpeedReq, HomeReq, JogContinuousReq, JogReq,
-    SpeedReq,
+    SetDoReq, SpeedReq,
 )
 from apps.robot.services.robot_service import robot_service
 from services.setting_service import SettingService
@@ -151,6 +151,17 @@ def robot_clear_error():
     if not success:
         raise HTTPException(status_code=400, detail=err)
     return {"status": "success"}
+
+
+@robot_router.post("/set_do")
+def robot_set_do(req: SetDoReq):
+    eff_index = req.index if req.index is not None else robot_service.do_index
+    success, msg = robot_service.set_do(eff_index, req.status)
+    if not success:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"status": "ok", "index": eff_index, "do_status": req.status}
+
+
 
 
 @robot_router.websocket("/ws")

@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
+from typing import Optional
 from pydantic import BaseModel
+
 
 
 class ConnectRobotReq(BaseModel):
@@ -35,3 +37,10 @@ class SpeedReq(BaseModel):
 
 class GlobalSpeedReq(BaseModel):
     factor: int
+
+
+class SetDoReq(BaseModel):
+    index: Optional[int] = None  # DO 端子编号 (1-16), 若未传入则使用配置文件中的设置
+    status: int = 1              # 1: 开, 0: 关
+
+

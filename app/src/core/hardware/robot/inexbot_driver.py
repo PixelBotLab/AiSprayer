@@ -1199,4 +1199,10 @@ class InexbotDriver(BaseRobotDriver):
 
         logger.error("[wait_queue_done] timeout")
         return False
-        
+
+    def set_do(self, index: int, status: int) -> bool:
+        logger.info(f"InexbotDriver set_do({index}, {status}) stub called")
+        return True
+
+    def get_do(self, index: int) -> Optional[int]:
+        return None

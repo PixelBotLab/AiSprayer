@@ -273,6 +273,23 @@ class BaseRobotDriver(ABC):
         """Clear error/alarm state on the robot controller"""
         return True
 
+    def set_do(self, index: int, status: int) -> bool:
+        """
+        设置机械臂数字输出 (DO) 端口状态。
+        :param index: DO 端口编号 (1-based, 取值 1..16)
+        :param status: 1: 有信号(高电平/开), 0: 无信号(低电平/关)
+        :return: 是否设置成功
+        """
+        return True
+
+    def get_do(self, index: int) -> Optional[int]:
+        """
+        获取机械臂数字输出 (DO) 端口状态。
+        :param index: DO 端口编号 (1-based, 取值 1..16)
+        :return: 0 或 1，获取失败时返回 None
+        """
+        return None
+
     def get_feedback_diagnostics(self) -> dict:
         """获取机械臂实时诊断与动力学反馈数据（笛卡尔位姿、关节速度、负载重量、报警状态、DO 状态等）"""
         return {
@@ -284,3 +301,4 @@ class BaseRobotDriver(ABC):
             "digital_outputs": [0]*16,
             "digital_output_bits": 0,
         }
+

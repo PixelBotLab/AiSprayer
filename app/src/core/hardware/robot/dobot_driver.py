@@ -565,6 +565,10 @@ class DobotDriver(BaseRobotDriver):
         try:
             r = self.dashboard.EmergencyStop()
             logger.info(f"EmergencyStop: {r}")
+            try:
+                self.set_do(1, 0)
+            except Exception:
+                pass
             return True
         except Exception as e:
             logger.error(f"Error emergency stopping robot: {e}")
@@ -651,3 +655,37 @@ class DobotDriver(BaseRobotDriver):
         except DobotApiError as e:
             logger.error(f"Sync failed: {e}")
             return False
+
+    def set_do(self, index: int, status: int) -> bool:
+        """
+        设置机械臂数字输出端口 (DO) 状态。
+        :param index: DO 端子编号 (1-16)
+        :param status: 1 有信号(开)，0 无信号(关)
+        :return: 是否设置成功
+        """
+        if not self._connected or not self.dashboard:
+            logger.warning("Dobot not connected or dashboard unavailable, cannot set DO")
+            return False
+        try:
+            r = self.dashboard.DOExecute(index, status)
+            logger.info(f"DOExecute({index}, {status}): {r}")
+            resp = parse_response(r)
+            if resp.ok:
+                return True
+            logger.warning(f"DOExecute({index}, {status}) returned error {resp.error_id}, falling back to DO({index}, {status})")
+            r_queue = self.dashboard.DO(index, status)
+            logger.info(f"DO({index}, {status}): {r_queue}")
+            return parse_response(r_queue).ok
+        except Exception as e:
+            logger.error(f"Failed to set DO({index}, {status}): {e}")
+            return False
+
+    def get_do(self, index: int) -> Optional[int]:
+        """
+        获取指定数字输出端口状态 (1-based, 1..16)。
+        """
+        if 1 <= index <= 16:
+            do_bits = int(getattr(self, "_cached_digital_output_bits", 0))
+            return (do_bits >> (index - 1)) & 1
+        return None
+

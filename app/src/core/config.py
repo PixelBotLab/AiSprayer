@@ -208,6 +208,27 @@ class SprayerConfig:
         return "laser_head_link"
 
     @property
+    def robot_do_index(self) -> int:
+        """
+        机械臂喷涂/工具触发数字输出端口 (DO) 编号 (1-based, 范围 1-16, 默认 1)。
+        优先读取 hardware.robot.do_index，其次 spraying.do_index 或 spraying.spray_do_index。
+        """
+        robot_cfg = self.config_data.get("hardware", {}).get("robot", {})
+        if "do_index" in robot_cfg:
+            try:
+                return int(robot_cfg.get("do_index", 1))
+            except (ValueError, TypeError):
+                pass
+        spray_cfg = self.config_data.get("spraying", {})
+        for key in ["do_index", "spray_do_index"]:
+            if key in spray_cfg:
+                try:
+                    return int(spray_cfg.get(key, 1))
+                except (ValueError, TypeError):
+                    pass
+        return 1
+
+    @property
     def calib_board_cols(self) -> int:
         return int(self.config_data.get("calib", {}).get("board", {}).get("cols", 9))
 

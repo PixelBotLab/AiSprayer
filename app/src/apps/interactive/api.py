@@ -750,6 +750,7 @@ class ExecuteYamlPathRequest(BaseModel):
     speed_j: Optional[float] = None # % (关节速度百分比)
     acc_j: Optional[float] = None   # % (关节加速度百分比)
     cp_ratio: Optional[int] = 100
+    do_index: Optional[int] = None  # 喷涂开关 DO 端口编号 (若未指定则从配置文件读取)
     # Backward compatibility fields
     speed: Optional[float] = None
     acc: Optional[float] = None
@@ -847,11 +848,12 @@ def execute_yaml_path(name: str, req: ExecuteYamlPathRequest):
     speed_j = req.speed_j if req.speed_j is not None else curr_speed_j
     acc_j = req.acc_j if req.acc_j is not None else curr_acc_j
 
-    # 0. 自动根据配置文件中的 robot_tcp_id 设置机械臂工具坐标系 (0=默认, 1=gripper_tip_link, 2=laser_head_link)
+    # 0. 自动根据配置文件中的 robot_tcp_id 设置机械臂工具坐标系，并读取喷涂 DO 端子编号
     sprayer_config.reload()
     target_tool_id = sprayer_config.robot_tcp_id
     target_tcp_name = sprayer_config.robot_tcp
-    logger.info(f"execute_yaml_path: Automatically configuring robot tool to ID={target_tool_id} (TCP={target_tcp_name})...")
+    target_do_index = req.do_index if req.do_index is not None else sprayer_config.robot_do_index
+    logger.info(f"execute_yaml_path: Automatically configuring robot tool to ID={target_tool_id} (TCP={target_tcp_name}), DO index={target_do_index}...")
     tool_ok, tool_err = robot_service.set_tool(target_tool_id)
     if not tool_ok:
         logger.warning(f"execute_yaml_path: Warning when setting robot tool to ID {target_tool_id}: {tool_err}")
@@ -877,70 +879,88 @@ def execute_yaml_path(name: str, req: ExecuteYamlPathRequest):
     total_waypoints_all = len(all_poses_flat)
     waypoints_done = 0
 
-    for p_idx, path in enumerate(target_paths):
-        pts = path.get("points", [])
-        poses = []
-        for pt in pts:
-            tcp = pt.get("tcp_pose_base")
-            if tcp:
-                poses.append({
-                    "x": float(tcp.get("x", 0.0)),
-                    "y": float(tcp.get("y", 0.0)),
-                    "z": float(tcp.get("z", 0.0)),
-                    "rx": float(tcp.get("rx", 0.0)),
-                    "ry": float(tcp.get("ry", 0.0)),
-                    "rz": float(tcp.get("rz", 0.0)),
-                    "is_radians": False, # YAML 中姿态角度为 deg
-                })
-        if poses:
-            path_title = path.get("name", f"Path {p_idx + 1}")
-            executed_names.append(path_title)
+    try:
+        for p_idx, path in enumerate(target_paths):
+            pts = path.get("points", [])
+            poses = []
+            for pt in pts:
+                tcp = pt.get("tcp_pose_base")
+                if tcp:
+                    poses.append({
+                        "x": float(tcp.get("x", 0.0)),
+                        "y": float(tcp.get("y", 0.0)),
+                        "z": float(tcp.get("z", 0.0)),
+                        "rx": float(tcp.get("rx", 0.0)),
+                        "ry": float(tcp.get("ry", 0.0)),
+                        "rz": float(tcp.get("rz", 0.0)),
+                        "is_radians": False, # YAML 中姿态角度为 deg
+                    })
+            if poses:
+                path_title = path.get("name", f"Path {p_idx + 1}")
+                executed_names.append(path_title)
 
-            # 2. 第 1 条有效 path 的第 1 个 waypoint，使用 move_j 快速安全过渡过去 (使用关节参数)
-            if not has_moved_j_to_start:
-                first_pt = poses[0]
-                first_pose = [
-                    first_pt["x"],
-                    first_pt["y"],
-                    first_pt["z"],
-                    math.radians(first_pt["rx"]),
-                    math.radians(first_pt["ry"]),
-                    math.radians(first_pt["rz"])
-                ]
-                logger.info(f"execute_yaml_path: MovJ to 1st waypoint of {path_title} -> {first_pt} (speed_j={speed_j}%, acc_j={acc_j}%, tool={target_tool_id})")
-                j_ok, j_err = robot_service.move_to_pose_j(first_pose, speed=speed_j, acc=acc_j, tool_num=target_tool_id)
-                if not j_ok:
-                    raise HTTPException(status_code=500, detail=f"Failed to MovJ to start waypoint of {path_title}: {j_err}")
-                has_moved_j_to_start = True
-                logger.info(f"execute_yaml_path: Robot has moved to 1st waypoint of {path_title}.")
+                # 2. 第 1 条有效 path 的第 1 个 waypoint，使用 move_j 快速安全过渡过去 (使用关节参数)
+                if not has_moved_j_to_start:
+                    first_pt = poses[0]
+                    first_pose = [
+                        first_pt["x"],
+                        first_pt["y"],
+                        first_pt["z"],
+                        math.radians(first_pt["rx"]),
+                        math.radians(first_pt["ry"]),
+                        math.radians(first_pt["rz"])
+                    ]
+                    logger.info(f"execute_yaml_path: MovJ to 1st waypoint of {path_title} -> {first_pt} (speed_j={speed_j}%, acc_j={acc_j}%, tool={target_tool_id})")
+                    j_ok, j_err = robot_service.move_to_pose_j(first_pose, speed=speed_j, acc=acc_j, tool_num=target_tool_id)
+                    if not j_ok:
+                        raise HTTPException(status_code=500, detail=f"Failed to MovJ to start waypoint of {path_title}: {j_err}")
+                    has_moved_j_to_start = True
+                    logger.info(f"execute_yaml_path: Robot has moved to 1st waypoint of {path_title}.")
 
-            # 3. 批量发送 waypoints：第 1 条 path 的第 1 个 waypoint 已经通过 MovJ 到达，跳过
-            #    后续 path 从第 1 个 waypoint 开始（没有做 MovJ 过渡）
-            exec_poses = poses[1:] if p_idx == 0 else poses
-            logger.info(f"execute_yaml_path: Executing {len(exec_poses)}/{len(poses)} waypoints on {path_title} "
-                        f"(skip 1st: {p_idx == 0}, speed_l={speed_l} mm/s, acc_l={acc_l}%, cp={req.cp_ratio}, tool={target_tool_id})")
-            
-            batch_ok, batch_err = True, ""
-            if exec_poses:
-                batch_ok, batch_err = robot_service.move_l_queue(
-                    exec_poses,
-                    speed=speed_l,
-                    acc=acc_l,
-                    cp_ratio=req.cp_ratio if req.cp_ratio is not None else 100,
-                    wait=True,
-                    tool_num=target_tool_id
+                    # 在到达路径起点、开始轨迹执行前开启机械臂 DO (开喷)
+                    logger.info(f"execute_yaml_path: Setting robot DO (index {target_do_index}) to ON (1) before path trajectory execution...")
+                    do_ok, do_err = robot_service.set_do(target_do_index, 1)
+                    if not do_ok:
+                        logger.warning(f"execute_yaml_path: Warning when setting DO({target_do_index}, 1): {do_err}")
+                    time.sleep(0.1)
+
+                # 3. 批量发送 waypoints：第 1 条 path 的第 1 个 waypoint 已经通过 MovJ 到达，跳过
+                #    后续 path 从第 1 个 waypoint 开始（没有做 MovJ 过渡）
+                exec_poses = poses[1:] if p_idx == 0 else poses
+                logger.info(f"execute_yaml_path: Executing {len(exec_poses)}/{len(poses)} waypoints on {path_title} "
+                            f"(skip 1st: {p_idx == 0}, speed_l={speed_l} mm/s, acc_l={acc_l}%, cp={req.cp_ratio}, tool={target_tool_id})")
+                
+                batch_ok, batch_err = True, ""
+                if exec_poses:
+                    batch_ok, batch_err = robot_service.move_l_queue(
+                        exec_poses,
+                        speed=speed_l,
+                        acc=acc_l,
+                        cp_ratio=req.cp_ratio if req.cp_ratio is not None else 100,
+                        wait=True,
+                        tool_num=target_tool_id
+                    )
+                if not batch_ok:
+                    raise HTTPException(status_code=500, detail=f"Execution error on {path_title}: {batch_err}")
+                waypoints_done += len(poses)
+                total_executed_pts += len(poses)
+                # 批量执行完成后广播一次路径进度
+                robot_service.broadcast_exec_progress(
+                    current_waypoint=waypoints_done,
+                    total_waypoints=total_waypoints_all,
+                    path_idx=p_idx,
+                    total_paths=len(target_paths)
                 )
-            if not batch_ok:
-                raise HTTPException(status_code=500, detail=f"Execution error on {path_title}: {batch_err}")
-            waypoints_done += len(poses)
-            total_executed_pts += len(poses)
-            # 批量执行完成后广播一次路径进度
-            robot_service.broadcast_exec_progress(
-                current_waypoint=waypoints_done,
-                total_waypoints=total_waypoints_all,
-                path_idx=p_idx,
-                total_paths=len(target_paths)
-            )
+    finally:
+        # 执行完成或异常中断时，强制关闭机械臂 DO (关喷)
+        logger.info(f"execute_yaml_path: Setting robot DO (index {target_do_index}) to OFF (0) after path trajectory execution...")
+        try:
+            off_ok, off_err = robot_service.set_do(target_do_index, 0)
+            if not off_ok:
+                logger.warning(f"execute_yaml_path: Warning when setting DO({target_do_index}, 0): {off_err}")
+            time.sleep(0.05)
+        except Exception as e:
+            logger.error(f"execute_yaml_path: Exception while turning off DO({target_do_index}, 0): {e}")
 
     logger.info(f"execute_yaml_path: Returning robot to Home position after trajectory (speed_j={speed_j}%, acc_j={acc_j}%)...")
     home_ok, home_err = robot_service.go_home(speed=speed_j, acc=acc_j)
