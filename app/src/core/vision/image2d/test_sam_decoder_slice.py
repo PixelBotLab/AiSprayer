@@ -8,6 +8,10 @@
 不同粒度之间跳变，表现为"右键点背景反而让 mask 变大"（真实事故回归，见 backend 日志
 `+fg=1, -bg=N -> contours` 从 2 涨到 20）。
 
+顺带钉住另一件事：`_check_decoder_graph` 必须拒掉 tools/convert_mobilesam_to_rknn.py 导出的那种图
+（无 orig_im_size、只 2 路输出且 iou 在前）—— `_run_onnx_decoder` 是按位置解包的，输出数量
+碰巧对上时就会静默地把 iou 当成 mask 用，所以必须按名字和顺序显式校验。
+
 跑法：
     cd app/src && python3 -m core.vision.image2d.test_sam_decoder_slice
 """
@@ -17,19 +21,50 @@ import os
 import sys
 import unittest
 
+from pathlib import Path
+
 import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..")))
 
-from core.vision.image2d.mobilesam_session import _run_onnx_decoder  # noqa: E402
+from core.vision.image2d.mobilesam_session import (  # noqa: E402
+    _check_decoder_graph,
+    _run_onnx_decoder,
+)
+
+
+class _NodeInfo:
+    """只带 name 的张量描述，足够模拟 ort 的 get_inputs/get_outputs。"""
+
+    def __init__(self, name: str):
+        self.name = name
+
+
+# tools/convert_mobilesam_to_rknn.py 导出的那套（不兼容）签名，用于验证加载时会被拒
+RKNN_SRC_SIGNATURE = (
+    ["image_embeddings", "point_coords", "point_labels", "mask_input", "has_mask_input"],
+    ["iou_predictions", "low_res_masks"],
+)
 
 
 class FakeDecoder:
     """伪造 decoder 图：4 路 mask 面积依次 4/16/36/64 像素，iou 最大的是第 3 路。"""
 
-    def __init__(self, heads: int = 4):
+    def __init__(self, heads: int = 4, signature=None):
         self.heads = heads
+        self.signature = signature
         self.feed = None
+
+    def get_inputs(self):
+        names = self.signature[0] if self.signature else [
+            "image_embeddings", "point_coords", "point_labels",
+            "mask_input", "has_mask_input", "orig_im_size",
+        ]
+        return [_NodeInfo(n) for n in names]
+
+    def get_outputs(self):
+        names = self.signature[1] if self.signature else ["masks", "iou_predictions", "low_res_masks"]
+        return [_NodeInfo(n) for n in names]
 
     def run(self, _output_names, feed):
         self.feed = feed
@@ -97,6 +132,18 @@ class TestMultimaskSlicing(unittest.TestCase):
         np.testing.assert_allclose(dec.feed["orig_im_size"], [100.0, 200.0])
         self.assertEqual(dec.feed["point_coords"].dtype, np.float32)
         self.assertEqual(dec.feed["has_mask_input"].sum(), 0.0)
+
+
+class TestGraphSignatureGuard(unittest.TestCase):
+    """拿错 decoder 文件时必须加载失败，而不是按位置解包后静默错位。"""
+
+    def test_runtime_graph_is_accepted(self):
+        _check_decoder_graph(FakeDecoder(), Path("mobile_sam_decoder.onnx"))
+
+    def test_rknn_export_graph_is_rejected(self):
+        dec = FakeDecoder(signature=RKNN_SRC_SIGNATURE)
+        with self.assertRaisesRegex(RuntimeError, "not the expected MobileSAM decoder graph"):
+            _check_decoder_graph(dec, Path("mobile_sam_decoder.onnx"))
 
 
 if __name__ == "__main__":

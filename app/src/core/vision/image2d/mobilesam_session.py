@@ -178,6 +178,29 @@ def _resize_and_pad(image: np.ndarray, img_size: int) -> Tuple[np.ndarray, Tuple
     return padded, (orig_h, orig_w), (new_h, new_w)
 
 
+# 运行时 decoder 期望的图签名：由 third_party/MobileSAM/scripts/export_onnx_model.py（SamOnnxModel）
+# 导出 —— 多一个 orig_im_size 输入、在图内把 mask 上采样回原图、按 (masks, iou_predictions,
+# low_res_masks) 顺序输出 3 路。tools/convert_mobilesam_to_rknn.py 导的是另一套签名（无
+# orig_im_size、只 2 路且 iou 在前），_run_onnx_decoder 是按位置解包的，拿错文件会静默错位，
+# 所以加载时就拒绝。
+_DECODER_INPUTS = {
+    "image_embeddings", "point_coords", "point_labels", "mask_input", "has_mask_input", "orig_im_size",
+}
+_DECODER_OUTPUTS = ["masks", "iou_predictions", "low_res_masks"]
+
+
+def _check_decoder_graph(session, model_path: Path) -> None:
+    """校验 ONNX decoder 的图签名；不匹配则抛错，由 load_mobilesam 回落到其他后端。"""
+    ins = {i.name for i in session.get_inputs()}
+    outs = [o.name for o in session.get_outputs()]
+    if ins != _DECODER_INPUTS or outs != _DECODER_OUTPUTS:
+        raise RuntimeError(
+            f"{model_path.name} is not the expected MobileSAM decoder graph "
+            f"(got inputs={sorted(ins)}, outputs={outs}). "
+            f"Re-export it with third_party/MobileSAM/scripts/export_onnx_model.py."
+        )
+
+
 def _run_onnx_decoder(
     decoder_session,
     features: np.ndarray,
@@ -251,6 +274,7 @@ class ONNXMobileSAMPredictor:
         logger.info(f"[MobileSAM-ONNX] Loading ONNX models with providers: {providers}")
         self.encoder_session = ort.InferenceSession(encoder_path, providers=providers)
         self.decoder_session = ort.InferenceSession(decoder_path, providers=providers)
+        _check_decoder_graph(self.decoder_session, Path(decoder_path))
 
         self.encoder_path = str(encoder_path)
         self.decoder_path = str(decoder_path)
@@ -349,6 +373,7 @@ class RKNNMobileSAMPredictor:
                 try:
                     import onnxruntime as ort
                     self.decoder_session = ort.InferenceSession(str(dec_p), providers=["CPUExecutionProvider"])
+                    _check_decoder_graph(self.decoder_session, dec_p)
                     self.use_onnx_decoder = True
                     self.backend_desc = (
                         f"RKNN (Rockchip RK3588 NPU) + ONNX Decoder | "

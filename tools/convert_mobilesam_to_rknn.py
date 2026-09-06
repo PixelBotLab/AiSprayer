@@ -11,6 +11,17 @@ MobileSAM consists of two main stages:
    - Input: Image embeddings (1, 256, 64, 64), point prompts, mask input
    - Output: iou_predictions (1, 4), low_res_masks (1, 4, 256, 256)
    - RKNN target: mobile_sam_decoder.rknn (FP16)
+
+IMPORTANT - the decoder graph produced here is NOT the one the runtime uses.
+`core/vision/image2d/mobilesam_session.py` expects the graph exported by
+third_party/MobileSAM/scripts/export_onnx_model.py (SamOnnxModel), which takes an extra
+`orig_im_size` input, upsamples the masks to the original resolution inside the graph and
+returns 3 outputs (masks, iou_predictions, low_res_masks). The wrapper below calls
+`mask_decoder.predict_masks()` (bypassing `MaskDecoder.forward`), so it emits 4 heads and no
+`orig_im_size` - incompatible signatures. Therefore this script writes its decoder ONNX as a
+throwaway intermediate next to the RKNN output name, never as `models/mobile_sam_decoder.onnx`,
+which would break the running app. The 4-head slicing is done on the caller side
+(_run_onnx_decoder), and a graph signature check rejects the wrong file at load time.
 """
 
 import os
@@ -243,7 +254,9 @@ def main():
     update_symlink(encoder_rknn_filename, out_dir / "mobile_sam_encoder.rknn")
 
     # 3 & 4: Export and Convert Mask Decoder
-    decoder_onnx = str(out_dir / "mobile_sam_decoder.onnx")
+    # NOTE: deliberately NOT named mobile_sam_decoder.onnx - that file belongs to the runtime
+    # (exported by third_party/MobileSAM/scripts/export_onnx_model.py) and must not be overwritten.
+    decoder_onnx = str(out_dir / f"mobile_sam_decoder_{args.target}_rknn_src.onnx")
     export_decoder_onnx(sam, decoder_onnx, opset=args.opset)
 
     decoder_rknn_filename = f"mobile_sam_decoder_{args.target}_fp16.rknn"
