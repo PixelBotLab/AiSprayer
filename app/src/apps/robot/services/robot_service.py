@@ -5,13 +5,13 @@ import os
 import sys
 import threading
 import time
-from typing import Any, Callable, List, Optional, Union
+from typing import Any, Callable, List, Optional
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "app/src"))
 
 from core.config import SprayerConfig
-from core.hardware.robot.base_driver import BaseRobotDriver, PoseLike, RobotPose
+from core.hardware.robot.base_driver import BaseRobotDriver, RobotPose, is_spraying_on
 from core.hardware.robot.factory import get_robot
 
 logger = logging.getLogger(__name__)
@@ -50,10 +50,6 @@ class RobotService:
         return self._config
 
     @property
-    def is_connected_prop(self) -> bool:
-        return self._is_connected
-
-    @property
     def global_speed_factor(self) -> int:
         return self._global_speed_factor
 
@@ -64,7 +60,7 @@ class RobotService:
         self._global_speed_factor = factor
 
         # Apply to connected robot if available
-        if self._is_connected and self._driver and hasattr(self._driver, "set_global_speed"):
+        if self._is_connected and self._driver:
             try:
                 self._driver.set_global_speed(factor)
                 logger.info(f"Dynamically updated robot set_global_speed to {factor}")
@@ -120,12 +116,10 @@ class RobotService:
                 # Enforce global_speed_factor speed and configured tool on real robot upon connection
                 try:
                     tool_id = self._config.robot_tcp_id
-                    if hasattr(self._driver, "set_tool_number"):
-                        self._driver.set_tool_number(tool_id)
-                        logger.info(f"robot {robot_type} initialized tool to {tool_id} (target_tcp={self._config.robot_tcp})")
-                    if hasattr(self._driver, "set_global_speed"):
-                        self._driver.set_global_speed(self._global_speed_factor)
-                        logger.info(f"robot {robot_type} set_global_speed to {self._global_speed_factor}")
+                    self._driver.set_tool_number(tool_id)
+                    logger.info(f"robot {robot_type} initialized tool to {tool_id} (target_tcp={self._config.robot_tcp})")
+                    self._driver.set_global_speed(self._global_speed_factor)
+                    logger.info(f"robot {robot_type} set_global_speed to {self._global_speed_factor}")
                 except Exception as e:
                     logger.warning(f"Failed to set initial speed/tool after connect: {e}")
 
@@ -209,66 +203,52 @@ class RobotService:
             logger.error(msg)
             return False, msg
         try:
-            if hasattr(self._driver, "set_tool_number"):
-                ok = self._driver.set_tool_number(tool_num)
-                if ok:
-                    logger.info(f"set_tool: Successfully set robot tool to {tool_num}")
-                    return True, ""
-                return False, f"Failed to set robot tool to {tool_num}"
-            return True, ""
+            if self._driver.set_tool_number(tool_num):
+                logger.info(f"set_tool: Successfully set robot tool to {tool_num}")
+                return True, ""
+            return False, f"Failed to set robot tool to {tool_num}"
         except Exception as e:
             msg = f"set_tool: Error setting robot tool to {tool_num}: {e}"
             logger.error(msg)
             return False, msg
 
-    def set_tool_number(self, tool_num: int) -> tuple[bool, str]:
-        return self.set_tool(tool_num)
+    @property
+    def tool_num(self) -> int:
+        """当前生效的工具坐标系编号 (优先取驱动层实际值，否则回退到配置值)"""
+        tool = getattr(self._driver, "tool_num", None) if self._driver else None
+        return int(tool) if tool is not None else self._config.robot_tcp_id
 
     @property
-    def do_index(self) -> int:
-        """从配置中获取喷涂/触发 DO 编号 (默认 1)"""
-        if self._config:
-            return getattr(self._config, "robot_do_index", 1)
-        return 1
+    def spray_do_index(self) -> int:
+        """喷涂开关 DO 端口编号 (来自配置 hardware.robot.spray_do_index)"""
+        return self._config.spray_do_index
 
-    def set_do(self, index: Optional[int] = None, status: int = 1) -> tuple[bool, str]:
+    def set_do(self, index: Optional[int] = None, status: int = 1, immediate: bool = True) -> tuple[bool, str]:
         """
         设置机械臂数字输出端口 (DO) 状态。
-        :param index: DO 端口编号 (1-based, 例如 1 代表 DO1; 若为 None 则从配置中读取)
+        :param index: DO 端口编号 (1-based, 例如 1 代表 DO1; 若为 None 则从配置中读取喷涂 DO)
         :param status: 1 代表高电平(开)，0 代表低电平(关)
+        :param immediate: True 为立即指令 (无视队列立即生效), False 为队列指令 (排入算法队列与运动指令按序执行)。
+                          手动开关与停机关喷均需立即生效，因此默认 True; 仅轨迹段内同步切换时传 False。
         """
-        eff_index = index if index is not None else self.do_index
+        eff_index = index if index is not None else self.spray_do_index
+        if not 1 <= int(eff_index) <= 16:
+            msg = f"set_do: 非法的 DO 编号 {eff_index} (有效范围 1-16)"
+            logger.error(msg)
+            return False, msg
         if not self._driver or not self._is_connected:
             msg = "set_do: Robot is not connected"
             logger.error(msg)
             return False, msg
         try:
-            if hasattr(self._driver, "set_do"):
-                ok = self._driver.set_do(eff_index, status)
-                if ok:
-                    logger.info(f"set_do: Successfully set DO({eff_index}, {status})")
-                    return True, ""
-                return False, f"Failed to set DO({eff_index}, {status})"
-            return False, "Driver does not support set_do"
+            if self._driver.set_do(int(eff_index), int(status), immediate=immediate):
+                logger.info(f"set_do: Successfully set DO({eff_index}, {status}, immediate={immediate})")
+                return True, ""
+            return False, f"Failed to set DO({eff_index}, {status})"
         except Exception as e:
             msg = f"set_do: Error setting DO({eff_index}, {status}): {e}"
             logger.error(msg)
             return False, msg
-
-    def get_do(self, index: Optional[int] = None) -> tuple[Optional[int], str]:
-        """获取机械臂数字输出端口 (DO) 状态 (若未传入 index 则从配置中读取)"""
-        eff_index = index if index is not None else self.do_index
-        if not self._driver or not self._is_connected:
-            return None, "Robot is not connected"
-        try:
-            if hasattr(self._driver, "get_do"):
-                val = self._driver.get_do(eff_index)
-                return val, ""
-            return None, "Driver does not support get_do"
-        except Exception as e:
-            return None, str(e)
-
-
 
     def move_to_pose(self, pose: List[float], speed: float = 10.0, acc: float = 10.0, tool_num: Optional[int] = None) -> tuple[bool, str]:
         if not self._driver or not self._is_connected:
@@ -276,11 +256,11 @@ class RobotService:
             logger.error(msg)
             return False, msg
 
-        eff_tool = tool_num if tool_num is not None else self._config.robot_tcp_id
+        eff_tool = tool_num if tool_num is not None else self.tool_num
         pose_val, _ = self.get_current_pose()
         logger.info(f"move_to_pose: from pose:{_fmt(pose_val)}, to pose:{_fmt(pose)}, speed:{speed:.2f}, acc:{acc:.2f}, tool:{eff_tool}")
         try:
-            self._driver.move_l(pose, velocity_mm=speed, acc=acc, tool_num=eff_tool)
+            self._driver.move_l(pose, velocity=speed, acc=acc, tool_num=eff_tool)
             new_pose_val, _ = self.get_current_pose()
             logger.info(f"move_to_pose: Success moving to pose, actual pose:{_fmt(new_pose_val)}")
             return True, ""
@@ -296,7 +276,7 @@ class RobotService:
             logger.error(msg)
             return False, msg
 
-        eff_tool = tool_num if tool_num is not None else self._config.robot_tcp_id
+        eff_tool = tool_num if tool_num is not None else self.tool_num
         # SpeedJ 接收 0-100 的百分比，需要把 deg/s 转换
         max_jnt = self.max_joint_speed_deg_s[0] if self.max_joint_speed_deg_s else 180.0
         ratio_j = max(1, min(100, int((speed / max_jnt) * 100)))
@@ -315,71 +295,80 @@ class RobotService:
             logger.error(msg)
             return False, msg
 
-    def move_l_queue(
+    @staticmethod
+    def _to_robot_poses(poses: List[Any]) -> List[RobotPose]:
+        """将路点列表统一转换为 RobotPose，支持 RobotPose, dict (含 x, y, z, rx, ry, rz), 或 list/tuple。"""
+        converted: List[RobotPose] = []
+        for p in poses:
+            if isinstance(p, RobotPose):
+                converted.append(p)
+            elif isinstance(p, dict):
+                converted.append(RobotPose.from_dict(p))
+            elif isinstance(p, (list, tuple)) and len(p) >= 6:
+                converted.append(RobotPose.from_list(list(p)))
+        return converted
+
+    def move_l_segments(
         self,
-        poses: List[Any],
+        segments: List[dict],
         speed: Optional[float] = None,
         acc: Optional[float] = None,
-        cp_ratio: int = 98,
-        wait: bool = True,
-        tool_num: Optional[int] = None
+        cp_ratio: int = 50,
+        spray_do_index: Optional[int] = None,
+        tool_num: Optional[int] = None,
     ) -> tuple[bool, str]:
         """
-        通过驱动层 move_l_queue 批量执行笛卡尔连续轨迹路点 (Waypoints)。
-        :param poses: 路点列表，支持 RobotPose, dict (含 x, y, z, rx, ry, rz), 或 list/tuple
-        :param speed: 笛卡尔线速度 (mm/s)，为空则使用当前设定值
-        :param acc: 加速度百分比 (1~100)
-        :param cp_ratio: 平滑过渡比例 (1~100)
-        :param wait: 是否等待整条队列执行完毕
-        :param tool_num: 工具坐标系编号 (为空则默认使用配置的 robot_tcp_id)
+        分段执行连续笛卡尔直线轨迹 (MoveL)，由驱动层按各段 spraying 状态在段边界同步切换喷涂 DO。
+        :param segments: 分段列表 [{"spraying": bool|"on"/"off", "poses": [RobotPose | dict | [x,y,z,rx,ry,rz], ...]}]
+        :param speed: 目标线速度 (mm/s)，为空则使用当前设定值
+        :param acc: 加速度 (%)
+        :param cp_ratio: 平滑过渡比例 (0-100)
+        :param spray_do_index: 喷涂 DO 端口编号 (None 时从配置读取)
+        :param tool_num: 工具坐标系编号 (None 时使用当前工具)
         """
         if not self._driver or not self._is_connected:
-            msg = "move_l_queue: Robot is not connected"
+            msg = "move_l_segments: Robot is not connected"
             logger.error(msg)
             return False, msg
 
-        if not poses:
-            return True, ""
+        eff_tool = tool_num if tool_num is not None else self.tool_num
+        eff_do = int(spray_do_index if spray_do_index is not None else self.spray_do_index)
+        if not 1 <= eff_do <= 16:
+            msg = f"move_l_segments: 非法的喷涂 DO 编号 {eff_do} (有效范围 1-16)"
+            logger.error(msg)
+            return False, msg
 
-        eff_tool = tool_num if tool_num is not None else self._config.robot_tcp_id
         speed_val = float(speed) if speed is not None else float(self._speed_l)
         acc_val = float(acc) if acc is not None else float(self._acc_l)
 
-        converted_poses: List[RobotPose] = []
-        for p in poses:
-            if isinstance(p, RobotPose):
-                converted_poses.append(p)
-            elif isinstance(p, dict):
-                x = float(p.get("x", 0.0))
-                y = float(p.get("y", 0.0))
-                z = float(p.get("z", 0.0))
-                rx = float(p.get("rx", p.get("a", 0.0)))
-                ry = float(p.get("ry", p.get("b", 0.0)))
-                rz = float(p.get("rz", p.get("c", 0.0)))
-                if not p.get("is_radians", False):
-                    rx = math.radians(rx)
-                    ry = math.radians(ry)
-                    rz = math.radians(rz)
-                converted_poses.append(RobotPose(x, y, z, rx, ry, rz))
-            elif isinstance(p, (list, tuple)) and len(p) >= 6:
-                converted_poses.append(RobotPose.from_list(list(p)))
+        # 统一转换各段位姿为 RobotPose，并将 spraying 规范为 bool (兼容 "on"/"off" 字符串)
+        norm_segments = [
+            {"spraying": is_spraying_on(seg.get("spraying")), "poses": self._to_robot_poses(seg.get("poses", []))}
+            for seg in segments
+        ]
+        total_pts = sum(len(s["poses"]) for s in norm_segments)
+        if total_pts == 0:
+            logger.warning("move_l_segments: 无可执行位姿，已跳过")
+            return True, ""
 
-        logger.info(f"move_l_queue: executing {len(converted_poses)} waypoints, speed:{speed_val} mm/s, acc:{acc_val}%, cp_ratio:{cp_ratio}, tool:{eff_tool}")
+        logger.info(f"move_l_segments: executing {len(norm_segments)} segments ({total_pts} points), "
+                    f"speed:{speed_val} mm/s, acc:{acc_val}%, cp:{cp_ratio}, DO:{eff_do}, tool:{eff_tool}")
         try:
-            res = self._driver.move_l_queue(
-                converted_poses,
-                velocity_mm=speed_val,
+            res = self._driver.move_l_segments(
+                norm_segments,
+                velocity=speed_val,
                 acc=acc_val,
-                wait=wait,
+                dec=acc_val,
+                tool_num=eff_tool,
                 cp_ratio=cp_ratio,
-                tool_num=eff_tool
+                spray_do_index=eff_do,
             )
             if res == 0:
-                logger.info(f"move_l_queue: Successfully executed {len(converted_poses)} waypoints (tool={eff_tool}).")
+                logger.info(f"move_l_segments: Successfully executed {len(norm_segments)} segments.")
                 return True, ""
-            return False, f"move_l_queue returned error code: {res}"
+            return False, f"move_l_segments returned error code: {res}"
         except Exception as e:
-            msg = f"move_l_queue error: {e}"
+            msg = f"move_l_segments error: {e}"
             logger.error(msg)
             return False, msg
 
@@ -573,8 +562,8 @@ class RobotService:
         logger.info("Status polling stopped.")
 
     def get_feedback_diagnostics(self) -> dict:
-        """获取机械臂驱动层的实时动力学与诊断数据"""
-        if self._driver and hasattr(self._driver, "get_feedback_diagnostics"):
+        """获取机械臂驱动层的实时动力学与诊断数据 (未连接时返回全零默认值)"""
+        if self._driver:
             try:
                 return self._driver.get_feedback_diagnostics()
             except Exception as e:
@@ -665,17 +654,7 @@ class RobotService:
             return False, "Robot is not connected"
         logger.info("clearing error...")
         try:
-            if hasattr(self._driver, "clear_error"):
-                self._driver.clear_error()
-                return True, ""
-            elif hasattr(self._driver, "dashboard"):
-                r = self._driver.dashboard.ClearError()
-                logger.info(f"ClearError: {r}")
-                # Dobot V3 protocol requires calling EnableRobot again to reopen the motion queue after an alarm is cleared.
-                time.sleep(0.5)
-                r2 = self._driver.dashboard.EnableRobot()
-                logger.info(f"EnableRobot after clear: {r2}")
-                return True, r
+            self._driver.clear_error()
             return True, ""
         except Exception as e:
             return False, str(e)
@@ -685,6 +664,10 @@ class RobotService:
             return False, "Robot is not connected"
         logger.info("estoping robot...")
         success = self._driver.estop()
+        # 急停后算法队列会被挂起，必须用立即指令把喷涂 DO 归零，避免持续出料
+        off_ok, off_err = self.set_do(self.spray_do_index, 0, immediate=True)
+        if not off_ok:
+            logger.warning(f"estop: 关闭喷涂 DO 失败: {off_err}")
         return success, "" if success else "Failed to estop robot"
 
 

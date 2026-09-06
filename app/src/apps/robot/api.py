@@ -4,7 +4,6 @@ import json
 import logging
 import os
 import sys
-from typing import Optional
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
@@ -155,13 +154,11 @@ def robot_clear_error():
 
 @robot_router.post("/set_do")
 def robot_set_do(req: SetDoReq):
-    eff_index = req.index if req.index is not None else robot_service.do_index
-    success, msg = robot_service.set_do(eff_index, req.status)
+    eff_index = req.index if req.index is not None else robot_service.spray_do_index
+    success, msg = robot_service.set_do(eff_index, req.status, immediate=req.immediate)
     if not success:
         raise HTTPException(status_code=400, detail=msg)
-    return {"status": "ok", "index": eff_index, "do_status": req.status}
-
-
+    return {"status": "ok", "index": eff_index, "do_status": req.status, "immediate": req.immediate}
 
 
 @robot_router.websocket("/ws")

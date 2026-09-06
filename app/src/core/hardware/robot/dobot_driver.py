@@ -28,7 +28,7 @@ class DobotDriver(BaseRobotDriver):
         # 30004 real-time data cache
         self._cached_joint: Optional[List[float]] = None   # degrees
         self._cached_pose: Optional[List[float]] = None    # mm, degrees (tool_vector_actual)
-        self._cached_tcp_speed_actual: Optional[List[float]] = None # mm/s, deg/s (TCP_speed_actual)
+        self._cached_tcp_speed_actual: Optional[List[float]] = None # 前三分量 m/s, 后三分量 rad/s (单位换算见 get_feedback_diagnostics)
         self._cached_qd_actual: Optional[List[float]] = None        # deg/s (qd_actual)
         self._cached_load: float = 0.0                             # kg (load)
         self._cached_error_status: int = 0                         # int (error_status)
@@ -118,7 +118,6 @@ class DobotDriver(BaseRobotDriver):
         while not self._stop_feedback and self._connected:
             try:
                 data = self.feedback.feedBackData()
-                timeouts = 0
                 if data is not None and len(data) > 0:
                     d = data[0]
                     # q_actual: joint angles in degrees
@@ -173,10 +172,10 @@ class DobotDriver(BaseRobotDriver):
     def get_feedback_diagnostics(self) -> dict:
         """获取实时动力学与诊断反馈数据 (TCP 笛卡尔实际速度, 实际关节速度, 负载重量, 报警状态, DO 状态等)"""
         tcp_spd = self._cached_tcp_speed_actual or [0.0]*6
-        # 计算 TCP 线速度合量 (mm/s)，取 Vx/Vy/Vz 欧几里得范数
-        import math as _math
-        tcp_speed_mm_s = _math.sqrt(sum(v**2 for v in tcp_spd[:3])) * 1000
-        do_bits = int(getattr(self, "_cached_digital_output_bits", 0))
+        # 计算 TCP 线速度合量：控制器反馈的 Vx/Vy/Vz 为 m/s (与前端 HUD 约定一致)，
+        # 取欧几里得范数后 x 1000 换算为 mm/s
+        tcp_speed_mm_s = math.sqrt(sum(v**2 for v in tcp_spd[:3])) * 1000
+        do_bits = self._cached_digital_output_bits
         digital_outputs = [(do_bits >> i) & 1 for i in range(16)]
         return {
             "tcp_speed_actual": tcp_spd,
@@ -337,7 +336,7 @@ class DobotDriver(BaseRobotDriver):
             logger.info(f"MovJ({x:.2f},{y:.2f},{z:.2f},{rx_deg:.2f},{ry_deg:.2f},{rz_deg:.2f},tool={tool},speedJ={velocity},accJ={acc}): {r}")
             resp = parse_response(r)
             if not resp.ok:
-                return resp.id
+                return resp.error_id
         except DobotApiError as e:
             logger.error(f"MovJ failed: {e}")
             return -1
@@ -358,7 +357,7 @@ class DobotDriver(BaseRobotDriver):
             logger.info(f"JointMovJ({[round(v,2) for v in j]},speed={velocity},acc={acc}): {r}")
             resp = parse_response(r)
             if not resp.ok:
-                return resp.id
+                return resp.error_id
         except DobotApiError as e:
             logger.error(f"JointMovJ failed: {e}")
             return -1
@@ -367,7 +366,8 @@ class DobotDriver(BaseRobotDriver):
             self._wait_motion_done()
         return 0
 
-    def move_l(self, pose: PoseLike, velocity_mm: float = 10.0, acc: float = 20.0, dec: float = 20.0, tool_num: Optional[int] = None, wait: bool = True) -> int:
+    def move_l(self, pose: PoseLike, velocity: float = 10.0, acc: float = 20.0, dec: float = 20.0, tool_num: Optional[int] = None, wait: bool = True) -> int:
+        """单段直线运动 (MoveL)，velocity 为笛卡尔线速度 mm/s。"""
         if not self._connected or not self.move:
             return -2
         lst = _to_list(pose)
@@ -377,18 +377,18 @@ class DobotDriver(BaseRobotDriver):
         
         try:
             if self.dashboard:
-                r = self.dashboard.TCPSpeed(velocity_mm)
-                logger.debug(f"TCPSpeed({velocity_mm}): {r}")
+                r = self.dashboard.TCPSpeed(velocity)
+                logger.debug(f"TCPSpeed({velocity}): {r}")
                 #r = self.dashboard.AccL(int(acc))
                 #logger.debug(f"AccL({int(acc)}): {r}")
             # Fix -0.0 bug
             x, y, z = x + 0.0, y + 0.0, z + 0.0
             rx_deg, ry_deg, rz_deg = rx_deg + 0.0, ry_deg + 0.0, rz_deg + 0.0
-            r = self.move.MovL(x, y, z, rx_deg, ry_deg, rz_deg, tool=tool, speedL=velocity_mm, accL=acc)
-            logger.info(f"MovL({x:.2f},{y:.2f},{z:.2f},{rx_deg:.2f},{ry_deg:.2f},{rz_deg:.2f},tool={tool},speedL={velocity_mm},accL={acc}): {r}")
+            r = self.move.MovL(x, y, z, rx_deg, ry_deg, rz_deg, tool=tool, speedL=velocity, accL=acc)
+            logger.info(f"MovL({x:.2f},{y:.2f},{z:.2f},{rx_deg:.2f},{ry_deg:.2f},{rz_deg:.2f},tool={tool},speedL={velocity},accL={acc}): {r}")
             resp = parse_response(r)
             if not resp.ok:
-                return resp.id
+                return resp.error_id
         except DobotApiError as e:
             logger.error(f"MovL failed: {e}")
             return -1
@@ -427,7 +427,7 @@ class DobotDriver(BaseRobotDriver):
                 resp = parse_response(r)
                 if not resp.ok:
                     logger.error(f"MovJ queue rejected: {r}")
-                    return resp.id
+                    return resp.error_id
                 
             logger.info(f"Sent {len(poses)} MovJ commands sequentially via move.MovJ (tool={tool})")
                 
@@ -443,7 +443,7 @@ class DobotDriver(BaseRobotDriver):
     def move_l_queue(
         self, 
         poses: List[PoseLike], 
-        velocity_mm: float = 10.0, 
+        velocity: float = 10.0, 
         acc: float = 20.0, 
         dec: float = 20.0,
         tool_num: Optional[int] = None,
@@ -458,8 +458,8 @@ class DobotDriver(BaseRobotDriver):
             if self.dashboard:
                 r = self.dashboard.CP(cp_ratio)
                 logger.debug(f"CP({cp_ratio}): {r}")
-                r = self.dashboard.TCPSpeed(velocity_mm)
-                logger.debug(f"TCPSpeed({velocity_mm}): {r}")
+                r = self.dashboard.TCPSpeed(velocity)
+                logger.debug(f"TCPSpeed({velocity}): {r}")
             for pose in poses:
                 lst = _to_list(pose)
                 x, y, z = lst[0] + 0.0, lst[1] + 0.0, lst[2] + 0.0
@@ -565,10 +565,8 @@ class DobotDriver(BaseRobotDriver):
         try:
             r = self.dashboard.EmergencyStop()
             logger.info(f"EmergencyStop: {r}")
-            try:
-                self.set_do(1, 0)
-            except Exception:
-                pass
+            # 注: 急停后算法队列会被挂起，队列形式的 DO 指令不会再生效，
+            # 关闭喷涂 DO 由 RobotService.estop() 统一使用立即指令完成。
             return True
         except Exception as e:
             logger.error(f"Error emergency stopping robot: {e}")
@@ -634,6 +632,7 @@ class DobotDriver(BaseRobotDriver):
         try:
             r = self.dashboard.ClearError()
             logger.info(f"ClearError: {r}")
+            # Dobot V3 protocol requires calling EnableRobot again to reopen the motion queue after an alarm is cleared.
             time.sleep(0.5)
             r2 = self.dashboard.EnableRobot()
             logger.info(f"EnableRobot after clear: {r2}")
@@ -656,36 +655,32 @@ class DobotDriver(BaseRobotDriver):
             logger.error(f"Sync failed: {e}")
             return False
 
-    def set_do(self, index: int, status: int) -> bool:
+    def set_do(self, index: int, status: int, immediate: bool = False) -> bool:
         """
         设置机械臂数字输出端口 (DO) 状态。
         :param index: DO 端子编号 (1-16)
         :param status: 1 有信号(开)，0 无信号(关)
+        :param immediate: True 为立即指令 (DOExecute, 忽略队列立刻执行),
+                          False 为队列指令 (DO, 进入后台算法队列排队执行)
         :return: 是否设置成功
         """
         if not self._connected or not self.dashboard:
             logger.warning("Dobot not connected or dashboard unavailable, cannot set DO")
             return False
-        try:
-            r = self.dashboard.DOExecute(index, status)
-            logger.info(f"DOExecute({index}, {status}): {r}")
-            resp = parse_response(r)
-            if resp.ok:
-                return True
-            logger.warning(f"DOExecute({index}, {status}) returned error {resp.error_id}, falling back to DO({index}, {status})")
-            r_queue = self.dashboard.DO(index, status)
-            logger.info(f"DO({index}, {status}): {r_queue}")
-            return parse_response(r_queue).ok
-        except Exception as e:
-            logger.error(f"Failed to set DO({index}, {status}): {e}")
-            return False
-
-    def get_do(self, index: int) -> Optional[int]:
-        """
-        获取指定数字输出端口状态 (1-based, 1..16)。
-        """
-        if 1 <= index <= 16:
-            do_bits = int(getattr(self, "_cached_digital_output_bits", 0))
-            return (do_bits >> (index - 1)) & 1
-        return None
+        # 不同控制器固件对两类指令的支持情况不一致，主用指令被拒时回退到另一条
+        calls = (
+            (("DOExecute", self.dashboard.DOExecute), ("DO", self.dashboard.DO))
+            if immediate else
+            (("DO", self.dashboard.DO), ("DOExecute", self.dashboard.DOExecute))
+        )
+        for name, send in calls:
+            try:
+                r = send(index, status)
+                logger.info(f"{name}({index}, {status}): {r}")
+                if parse_response(r).ok:
+                    return True
+                logger.warning(f"{name}({index}, {status}) 被拒, 回退尝试另一种 DO 指令")
+            except Exception as e:
+                logger.error(f"{name}({index}, {status}) 发送失败: {e}")
+        return False
 

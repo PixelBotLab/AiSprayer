@@ -14,7 +14,6 @@ class TestRobotService(unittest.TestCase):
 
     def test_initial_properties(self):
         self.assertFalse(self.service.is_connected())
-        self.assertFalse(self.service.is_connected_prop)
         self.assertEqual(self.service.global_speed_factor, self.config.global_speed_factor)
         self.assertEqual(self.service.max_tcp_speed_mm_s, self.config.max_tcp_speed_mm_s)
         self.assertEqual(self.service.max_joint_speed_deg_s, self.config.max_joint_speed_deg_s)

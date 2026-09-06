@@ -208,25 +208,21 @@ class SprayerConfig:
         return "laser_head_link"
 
     @property
-    def robot_do_index(self) -> int:
+    def spray_do_index(self) -> int:
         """
-        机械臂喷涂/工具触发数字输出端口 (DO) 编号 (1-based, 范围 1-16, 默认 1)。
-        优先读取 hardware.robot.do_index，其次 spraying.do_index 或 spraying.spray_do_index。
+        机械臂喷涂开关数字输出端口 (DO) 编号 (1-based, 取值范围 1-16, 默认 1)。
+        读取 hardware.robot.spray_do_index，配置缺失或非法 (超出 1-16) 时回退默认值 1。
         """
         robot_cfg = self.config_data.get("hardware", {}).get("robot", {})
-        if "do_index" in robot_cfg:
-            try:
-                return int(robot_cfg.get("do_index", 1))
-            except (ValueError, TypeError):
-                pass
-        spray_cfg = self.config_data.get("spraying", {})
-        for key in ["do_index", "spray_do_index"]:
-            if key in spray_cfg:
-                try:
-                    return int(spray_cfg.get(key, 1))
-                except (ValueError, TypeError):
-                    pass
-        return 1
+        try:
+            index = int(robot_cfg.get("spray_do_index", 1))
+        except (ValueError, TypeError):
+            logger.warning(f"非法的 hardware.robot.spray_do_index 配置 {robot_cfg.get('spray_do_index')!r}, 回退使用默认 DO1")
+            return 1
+        if not 1 <= index <= 16:
+            logger.warning(f"hardware.robot.spray_do_index={index} 超出 DO 取值范围 [1,16], 回退使用默认 DO1")
+            return 1
+        return index
 
     @property
     def calib_board_cols(self) -> int:

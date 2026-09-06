@@ -40,7 +40,6 @@ class GlobalSpeedReq(BaseModel):
 
 
 class SetDoReq(BaseModel):
-    index: Optional[int] = None  # DO 端子编号 (1-16), 若未传入则使用配置文件中的设置
-    status: int = 1              # 1: 开, 0: 关
-
-
+    index: Optional[int] = None      # DO 端子编号 (1-16), 若未传入则从配置读取喷涂 DO
+    status: int = 1                  # 1: 开, 0: 关
+    immediate: bool = True           # True 为立即指令(手动开关需立即生效), False 为队列指令

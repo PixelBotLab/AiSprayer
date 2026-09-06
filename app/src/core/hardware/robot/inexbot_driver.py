@@ -18,9 +18,8 @@ is_reachable：调用 get_pos_reachable；旧版 SDK 曾触发 25566，当前版
 import time
 import math
 import logging
-import sys
 import threading
-from typing import Optional, List, Union
+from typing import Optional, List
 
 from .inexbot_v24_03_py38 import nrc_interface as nrc
 from .base_driver import BaseRobotDriver, RobotPose, PoseLike, _to_list
@@ -1199,10 +1198,3 @@ class InexbotDriver(BaseRobotDriver):
 
         logger.error("[wait_queue_done] timeout")
         return False
-
-    def set_do(self, index: int, status: int) -> bool:
-        logger.info(f"InexbotDriver set_do({index}, {status}) stub called")
-        return True
-
-    def get_do(self, index: int) -> Optional[int]:
-        return None

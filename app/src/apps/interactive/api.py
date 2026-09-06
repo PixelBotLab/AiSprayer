@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 import os
 import math
 import time
@@ -10,6 +10,7 @@ import cv2
 import numpy as np
 import yaml
 from core.config import sprayer_config
+from core.hardware.robot.base_driver import RobotPose, is_spraying_on
 from apps.camera.services.camera_service import camera_service
 from apps.robot.services.robot_service import robot_service
 from apps.interactive.sam_service import sam_service
@@ -738,7 +739,35 @@ def get_template_summary(name: str):
     }
 
 
-# ─── Real Robot Path Waypoint Execution (move_l_queue) ───────────────────────
+# ─── Real Robot Path Waypoint Execution (move_l_segments) ─────────────────────
+
+def _is_point_spraying(pt: dict) -> bool:
+    """
+    判断航点是否处于喷涂开启状态：
+    1. 优先读取显式 spraying 字段 (生成器写入 "on"/"off"，也兼容 bool)
+    2. 无该字段时按 is_jump 推断 (is_jump=True 表示空走转移段，不喷涂)
+    3. 两者都没有则默认开启
+    """
+    val = pt.get("spraying")
+    if val is None:
+        return not bool(pt.get("is_jump", False))
+    return is_spraying_on(val)
+
+
+def _group_points_into_segments(points_data: List[dict]) -> List[dict]:
+    """
+    按相邻航点的 spraying 状态进行游程合并 (Run-Length Encoding)。
+    连续相同 spraying 状态的航点合并为同一段，使 DO 开关只在状态转换边界触发一次。
+    输入项格式: {"pose": dict, "spraying": bool}，返回格式: [{"spraying": bool, "poses": [pose_dict, ...]}, ...]
+    """
+    segments: List[dict] = []
+    for item in points_data:
+        if segments and segments[-1]["spraying"] == item["spraying"]:
+            segments[-1]["poses"].append(item["pose"])
+        else:
+            segments.append({"spraying": item["spraying"], "poses": [item["pose"]]})
+    return segments
+
 
 class ExecuteYamlPathRequest(BaseModel):
     file_name: str
@@ -750,7 +779,7 @@ class ExecuteYamlPathRequest(BaseModel):
     speed_j: Optional[float] = None # % (关节速度百分比)
     acc_j: Optional[float] = None   # % (关节加速度百分比)
     cp_ratio: Optional[int] = 100
-    do_index: Optional[int] = None  # 喷涂开关 DO 端口编号 (若未指定则从配置文件读取)
+    spray_do_index: Optional[int] = None # 喷涂开关 DO 端口编号 (若未指定则从配置文件读取)
     # Backward compatibility fields
     speed: Optional[float] = None
     acc: Optional[float] = None
@@ -798,9 +827,10 @@ def execute_yaml_path(name: str, req: ExecuteYamlPathRequest):
     根据选择的路径 (单条或全部)，提取 Waypoints 位姿并通过 robot_service 发送到真实机械臂执行：
     1. 执行前先回到 Home 姿态 (使用关节参数 speed_j, acc_j)
     2. 第 1 条 path 的第 1 个 waypoint 使用 move_j 过去 (使用关节参数 speed_j, acc_j)
-    3. 然后通过 robot_service.move_l_queue 连续直线执行 (使用线速度参数 speed_l, acc_l, cp_ratio)
+    3. 然后通过 robot_service.move_l_segments 连续笛卡尔直线分段执行 (使用线速度参数 speed_l, acc_l, cp_ratio)，
+       驱动层按各段 spraying 状态在段边界同步切换喷涂 DO
     """
-    if not robot_service.is_connected:
+    if not robot_service.is_connected():
         raise HTTPException(status_code=400, detail="Robot is not connected. Please connect robot first in control panel.")
 
     template_path = os.path.join(TEMPLATE_GROUP_DIR, name)
@@ -852,8 +882,8 @@ def execute_yaml_path(name: str, req: ExecuteYamlPathRequest):
     sprayer_config.reload()
     target_tool_id = sprayer_config.robot_tcp_id
     target_tcp_name = sprayer_config.robot_tcp
-    target_do_index = req.do_index if req.do_index is not None else sprayer_config.robot_do_index
-    logger.info(f"execute_yaml_path: Automatically configuring robot tool to ID={target_tool_id} (TCP={target_tcp_name}), DO index={target_do_index}...")
+    target_do_index = req.spray_do_index if req.spray_do_index is not None else sprayer_config.spray_do_index
+    logger.info(f"execute_yaml_path: Automatically configuring robot tool to ID={target_tool_id} (TCP={target_tcp_name}), Spray DO index={target_do_index}...")
     tool_ok, tool_err = robot_service.set_tool(target_tool_id)
     if not tool_ok:
         logger.warning(f"execute_yaml_path: Warning when setting robot tool to ID {target_tool_id}: {tool_err}")
@@ -870,92 +900,84 @@ def execute_yaml_path(name: str, req: ExecuteYamlPathRequest):
     executed_names = []
     has_moved_j_to_start = False
 
-    # Count total waypoints across all target paths for progress tracking
-    all_poses_flat = []
-    for p in target_paths:
-        for pt in p.get("points", []):
-            if pt.get("tcp_pose_base"):
-                all_poses_flat.append(pt)
-    total_waypoints_all = len(all_poses_flat)
+    # 统计全部待执行航点总数，用于进度上报
+    total_waypoints_all = sum(
+        1 for p in target_paths for pt in p.get("points", []) if pt.get("tcp_pose_base")
+    )
     waypoints_done = 0
 
     try:
         for p_idx, path in enumerate(target_paths):
             pts = path.get("points", [])
-            poses = []
+            valid_items = []
             for pt in pts:
                 tcp = pt.get("tcp_pose_base")
                 if tcp:
-                    poses.append({
-                        "x": float(tcp.get("x", 0.0)),
-                        "y": float(tcp.get("y", 0.0)),
-                        "z": float(tcp.get("z", 0.0)),
-                        "rx": float(tcp.get("rx", 0.0)),
-                        "ry": float(tcp.get("ry", 0.0)),
-                        "rz": float(tcp.get("rz", 0.0)),
-                        "is_radians": False, # YAML 中姿态角度为 deg
+                    valid_items.append({
+                        "pose": {
+                            "x": float(tcp.get("x", 0.0)),
+                            "y": float(tcp.get("y", 0.0)),
+                            "z": float(tcp.get("z", 0.0)),
+                            "rx": float(tcp.get("rx", 0.0)),
+                            "ry": float(tcp.get("ry", 0.0)),
+                            "rz": float(tcp.get("rz", 0.0)),
+                            "is_radians": False, # YAML 中姿态角度为 deg
+                        },
+                        "spraying": _is_point_spraying(pt),
                     })
-            if poses:
-                path_title = path.get("name", f"Path {p_idx + 1}")
-                executed_names.append(path_title)
+            if not valid_items:
+                continue
 
-                # 2. 第 1 条有效 path 的第 1 个 waypoint，使用 move_j 快速安全过渡过去 (使用关节参数)
-                if not has_moved_j_to_start:
-                    first_pt = poses[0]
-                    first_pose = [
-                        first_pt["x"],
-                        first_pt["y"],
-                        first_pt["z"],
-                        math.radians(first_pt["rx"]),
-                        math.radians(first_pt["ry"]),
-                        math.radians(first_pt["rz"])
-                    ]
-                    logger.info(f"execute_yaml_path: MovJ to 1st waypoint of {path_title} -> {first_pt} (speed_j={speed_j}%, acc_j={acc_j}%, tool={target_tool_id})")
-                    j_ok, j_err = robot_service.move_to_pose_j(first_pose, speed=speed_j, acc=acc_j, tool_num=target_tool_id)
-                    if not j_ok:
-                        raise HTTPException(status_code=500, detail=f"Failed to MovJ to start waypoint of {path_title}: {j_err}")
-                    has_moved_j_to_start = True
-                    logger.info(f"execute_yaml_path: Robot has moved to 1st waypoint of {path_title}.")
+            path_title = path.get("name", f"Path {p_idx + 1}")
+            executed_names.append(path_title)
 
-                    # 在到达路径起点、开始轨迹执行前开启机械臂 DO (开喷)
-                    logger.info(f"execute_yaml_path: Setting robot DO (index {target_do_index}) to ON (1) before path trajectory execution...")
-                    do_ok, do_err = robot_service.set_do(target_do_index, 1)
-                    if not do_ok:
-                        logger.warning(f"execute_yaml_path: Warning when setting DO({target_do_index}, 1): {do_err}")
-                    time.sleep(0.1)
+            # 2. 第 1 条有效 path 的第 1 个 waypoint，使用 move_j 快速安全过渡过去 (关节参数，此时 DO 保持关闭)
+            just_moved_j = False
+            if not has_moved_j_to_start:
+                first_pt = valid_items[0]["pose"]
+                first_pose = RobotPose.from_dict(first_pt).to_list()
+                logger.info(f"execute_yaml_path: MovJ to 1st waypoint of {path_title} -> {first_pt} "
+                            f"(speed_j={speed_j}%, acc_j={acc_j}%, tool={target_tool_id})")
+                j_ok, j_err = robot_service.move_to_pose_j(first_pose, speed=speed_j, acc=acc_j, tool_num=target_tool_id)
+                if not j_ok:
+                    raise HTTPException(status_code=500, detail=f"Failed to MovJ to start waypoint of {path_title}: {j_err}")
+                has_moved_j_to_start = True
+                just_moved_j = True
+                waypoints_done += 1
+                logger.info(f"execute_yaml_path: Robot has moved to 1st waypoint of {path_title}.")
 
-                # 3. 批量发送 waypoints：第 1 条 path 的第 1 个 waypoint 已经通过 MovJ 到达，跳过
-                #    后续 path 从第 1 个 waypoint 开始（没有做 MovJ 过渡）
-                exec_poses = poses[1:] if p_idx == 0 else poses
-                logger.info(f"execute_yaml_path: Executing {len(exec_poses)}/{len(poses)} waypoints on {path_title} "
-                            f"(skip 1st: {p_idx == 0}, speed_l={speed_l} mm/s, acc_l={acc_l}%, cp={req.cp_ratio}, tool={target_tool_id})")
-                
-                batch_ok, batch_err = True, ""
-                if exec_poses:
-                    batch_ok, batch_err = robot_service.move_l_queue(
-                        exec_poses,
-                        speed=speed_l,
-                        acc=acc_l,
-                        cp_ratio=req.cp_ratio if req.cp_ratio is not None else 100,
-                        wait=True,
-                        tool_num=target_tool_id
-                    )
+            # 3. 执行笛卡尔轨迹：已经 MovJ 到达的第 1 个点不再重复下发，后续 path 则从第 1 个点开始全部纳入分段
+            exec_items = valid_items[1:] if just_moved_j else valid_items
+            if exec_items:
+                # 按相邻航点的 spraying 状态游程合并，相同连续状态合并为一段，仅在边界开关一次 DO
+                segments = _group_points_into_segments(exec_items)
+                logger.info(f"execute_yaml_path: Executing {len(exec_items)} waypoints in {len(segments)} segments on {path_title} "
+                            f"(speed_l={speed_l} mm/s, acc_l={acc_l}%, cp={req.cp_ratio}, DO={target_do_index}, tool={target_tool_id})")
+                # move_l_segments 只在最后一段等待轨迹真正执行完成，因此进度按整条 path 粒度上报
+                batch_ok, batch_err = robot_service.move_l_segments(
+                    segments,
+                    speed=speed_l,
+                    acc=acc_l,
+                    cp_ratio=req.cp_ratio if req.cp_ratio is not None else 100,
+                    spray_do_index=target_do_index,
+                    tool_num=target_tool_id,
+                )
                 if not batch_ok:
                     raise HTTPException(status_code=500, detail=f"Execution error on {path_title}: {batch_err}")
-                waypoints_done += len(poses)
-                total_executed_pts += len(poses)
-                # 批量执行完成后广播一次路径进度
-                robot_service.broadcast_exec_progress(
-                    current_waypoint=waypoints_done,
-                    total_waypoints=total_waypoints_all,
-                    path_idx=p_idx,
-                    total_paths=len(target_paths)
-                )
+                waypoints_done += len(exec_items)
+
+            total_executed_pts += len(valid_items)
+            robot_service.broadcast_exec_progress(
+                current_waypoint=waypoints_done,
+                total_waypoints=total_waypoints_all,
+                path_idx=p_idx,
+                total_paths=len(target_paths)
+            )
     finally:
-        # 执行完成或异常中断时，强制关闭机械臂 DO (关喷)
-        logger.info(f"execute_yaml_path: Setting robot DO (index {target_do_index}) to OFF (0) after path trajectory execution...")
+        # 执行完成或异常中断时，强制安全关闭机械臂喷涂 DO (使用立即指令确保关喷)
+        logger.info(f"execute_yaml_path: Setting robot spray DO (index {target_do_index}) to OFF (0)...")
         try:
-            off_ok, off_err = robot_service.set_do(target_do_index, 0)
+            off_ok, off_err = robot_service.set_do(target_do_index, 0, immediate=True)
             if not off_ok:
                 logger.warning(f"execute_yaml_path: Warning when setting DO({target_do_index}, 0): {off_err}")
             time.sleep(0.05)

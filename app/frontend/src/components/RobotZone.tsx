@@ -7,9 +7,8 @@ interface RobotState {
   pose: number[];
   joint: number[];
   status?: number;
-  tcp_speed_actual?: number[];
-  tcp_speed_mm_s?: number;
-  tcp_speed_actual_mm_s?: number[];
+  tcp_speed_actual?: number[];   // 6 分量原始反馈: Vx/Vy/Vz (m/s) + 角速度 (rad/s)
+  tcp_speed_mm_s?: number;       // 后端预计算的 |Vlin| 合速度 (mm/s)
   qd_actual?: number[];
   load?: number;
   error_status?: number;

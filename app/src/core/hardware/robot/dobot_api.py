@@ -136,7 +136,7 @@ MyType = np.dtype([
     ('i_actual', np.float64, (6,)),                 # 0528~0575 实际关节电流
     ('actual_TCP_force', np.float64, (6,)),         # 0576~0623 TCP 传感器力值
     ('tool_vector_actual', np.float64, (6,)),       # 0624~0671 TCP 笛卡尔实际坐标值
-    ('TCP_speed_actual', np.float64, (6,)),         # 0672~0719 TCP 笛卡尔实际速度值
+    ('TCP_speed_actual', np.float64, (6,)),         # 0672~0719 TCP 笛卡尔实际速度值 (m/s + rad/s)
     ('TCP_force', np.float64, (6,)),                # 0720~0767 TCP 力值（关节电流计算）
     ('Tool_vector_target', np.float64, (6,)),       # 0768~0815 TCP 笛卡尔目标坐标值
     ('TCP_speed_target', np.float64, (6,)),         # 0816~0863 TCP 笛卡尔目标速度值
