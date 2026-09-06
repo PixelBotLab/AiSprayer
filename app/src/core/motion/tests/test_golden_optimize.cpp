@@ -50,6 +50,9 @@ int main() {
   oopt.grid_y = {-5, 5, 2};
   oopt.grid_z = {-30, 30, 5};
   oopt.dense_verify = true;
+  // 黄金件锁的是「单档包络」下 DP 的位级行为，所以显式关掉容差阶梯择优；
+  // 阶梯本身的行为由 test_tol_ladder 覆盖（否则早停阈值一改，本测试就会静默失效）。
+  oopt.tol_ladder = false;
   CHECK(oopt.Validate().empty());
 
   VerifyOptions vopt;

@@ -16,10 +16,10 @@ import trimesh
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "app/src"))
 
-from core.vision.reconstruction import (
-    PoissonReconstructor, 
-    k_matrix_to_intrinsics, 
-    depth_to_point_cloud
+from core.vision import (
+    SurfaceReconstructor,
+    k_matrix_to_intrinsics,
+    depth_to_point_cloud,
 )
 from core.config import SprayerConfig
 
@@ -39,7 +39,7 @@ RECON_SUBPROCESS_TIMEOUT_S = 60.0
 def _persistent_worker_entry(work_conn, log_queue: mp.Queue):
     """
     Subprocess worker: runs in a persistent isolated process.
-    Pre-imports open3d, trimesh, and PoissonReconstructor once during startup.
+    Pre-imports open3d, trimesh, and SurfaceReconstructor once during startup.
     Handles multiple reconstruction requests sequentially over the work_conn pipe.
     """
     try:
@@ -55,7 +55,7 @@ def _persistent_worker_entry(work_conn, log_queue: mp.Queue):
         # Pre-import heavy dependencies to eliminate cold-start lag
         import open3d as o3d  # noqa: F401
         import trimesh  # noqa: F401
-        from core.vision.reconstruction import PoissonReconstructor  # noqa: F401
+        from core.vision import SurfaceReconstructor  # noqa: F401
 
         svc = InteractiveReconstructionService()
 
@@ -286,16 +286,6 @@ class ReconstructionWorkerManager:
 _worker_manager = ReconstructionWorkerManager()
 
 
-def run_reconstruction_subprocess(
-    template_path: str,
-    template_name: str,
-    max_attempts: int = RECON_MAX_ATTEMPTS,
-    timeout_s: float = RECON_SUBPROCESS_TIMEOUT_S,
-) -> dict:
-    """Legacy helper: delegates to the persistent worker manager."""
-    return _worker_manager.execute(template_path, template_name)
-
-
 class InteractiveReconstructionService:
     def __init__(self):
         self.calib_dir = os.path.abspath(os.path.join(PROJECT_ROOT, "data", "calib"))
@@ -486,11 +476,8 @@ class InteractiveReconstructionService:
         active_pixel_count = int(np.count_nonzero(unified_mask_2d))
         logger.info(f"⏱️ [Reconstruct Step 1] Depth, calib & masks loaded in {t_load_and_mask_s:.2f}s ({active_pixel_count} mask pixels)")
 
-        # 6. Initialize Reconstructor
-        reconstructor = PoissonReconstructor(
-            T_camera_to_base=T_camera_to_base,
-            intrinsics_k=intrinsics_k,
-            segmenter=None,
+        # 6. Initialize Surface Reconstructor & Preprocess
+        reconstructor = SurfaceReconstructor(
             z_min=100.0,
             z_max=3000.0,
             mask_erode_px=1,
@@ -500,40 +487,27 @@ class InteractiveReconstructionService:
             voxel_size=0.003,
             normal_radius=0.03,
             smooth_iterations=20,
-            n_threads=4
+            n_threads=4,
         )
 
         intrinsics = k_matrix_to_intrinsics(intrinsics_k)
-        valid_depth_mask = (depth_image > reconstructor.z_min) & (depth_image < reconstructor.z_max)
+        t_prep_start = time.perf_counter()
+        depth_proc, combined_mask = reconstructor.preprocess_depth(
+            depth_image, unified_mask_2d, inpaint_holes=True
+        )
 
-        # Inpaint holes inside mask
-        holes_mask = unified_mask_2d & (~valid_depth_mask)
-        if np.any(holes_mask):
-            hole_count = int(np.sum(holes_mask))
-            logger.info(f"Inpainting {hole_count} depth holes inside mask using OpenCV Navier-Stokes...")
-            depth_f32 = depth_image.astype(np.float32)
-            inpaint_mask = holes_mask.astype(np.uint8) * 255
-            filled_depth = cv2.inpaint(depth_f32, inpaint_mask, inpaintRadius=5, flags=cv2.INPAINT_NS)
-            depth_image[holes_mask] = filled_depth[holes_mask]
-            valid_depth_mask = (depth_image > reconstructor.z_min) & (depth_image < reconstructor.z_max)
-
-        # Erode mask to avoid boundary flying points
-        eroded_mask = reconstructor._erode_mask(unified_mask_2d, reconstructor.mask_erode_px)
-        flying_pixel_valid = reconstructor._flying_pixel_mask(depth_image, reconstructor.flying_pixel_max_grad) \
-            if reconstructor.flying_pixel_max_grad > 0 else np.ones_like(valid_depth_mask, dtype=bool)
-
-        combined_mask = eroded_mask & valid_depth_mask & flying_pixel_valid
-        
         # 7. Convert Depth to 2.5D Camera Point Cloud
-        raw_point_cloud = depth_to_point_cloud(depth_image, intrinsics)
+        raw_point_cloud = depth_to_point_cloud(depth_proc, intrinsics)
         t_pcd = time.perf_counter()
-        t_inpaint_and_pcd_s = round(t_pcd - t_mask, 3)
+        t_inpaint_and_pcd_s = round(t_pcd - t_prep_start, 3)
         active_points = int(np.count_nonzero(combined_mask))
         logger.info(f"⏱️ [Reconstruct Step 2] Inpaint & PCD extraction in {t_inpaint_and_pcd_s:.2f}s ({active_points} valid points)")
 
         # 8. Perform 3D Poisson Reconstruction
         logger.info("Executing Poisson surface reconstruction and base coordinate alignment...")
-        mesh: trimesh.Trimesh = reconstructor.reconstruct_mesh(raw_point_cloud, combined_mask)
+        mesh: trimesh.Trimesh = reconstructor.reconstruct_mesh(
+            raw_point_cloud, combined_mask, T_camera_to_base=T_camera_to_base
+        )
         t_mesh = time.perf_counter()
         t_poisson_mesh_s = round(t_mesh - t_pcd, 3)
         logger.info(f"⏱️ [Reconstruct Step 3] Poisson mesh & Taubin smoothing in {t_poisson_mesh_s:.2f}s ({len(mesh.vertices)} vertices, {len(mesh.faces)} faces)")

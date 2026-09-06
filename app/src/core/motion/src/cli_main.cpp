@@ -32,8 +32,10 @@ motion::AxisGrid ParseGrid(const std::string& s, const motion::AxisGrid& def) {
 }
 
 int EmitError(int code, const std::string& action, const std::string& msg) {
-  std::cout << "{\"success\":false,\"action\":\"" << action << "\",\"message\":\"" << msg
-            << "\"}\n";
+  // msg 常常是 yaml-cpp / 优化器抛出的异常文本，可能带引号或换行；不转义会让
+  // Python 侧 json.loads 失败，从而把一个可读的错误变成“stdout 不是合法 JSON”。
+  std::cout << "{\"success\":false,\"action\":\"" << action << "\",\"message\":\""
+            << motion::JsonEscapeString(msg) << "\"}\n";
   return code;
 }
 
@@ -76,6 +78,11 @@ int main(int argc, char** argv) {
   std::string home_joints = "0,0,-90,-90,-90,0";
   int beam = 32, max_per_branch = 16;
   bool no_dense = false;
+  // 容差阶梯择优（默认开）：请求包络 + 按比例收紧的若干档各跑一次，取最优。
+  bool no_tol_ladder = false;
+  std::string ladder_scales = "0.5,0.333333,0.25";
+  double ladder_stop_ratio = 0.3;
+  double ladder_max_pointing = 0.0;
   std::string state_type = "auto_poi";
 
   auto* optimize = app.add_subcommand("optimize", "Viterbi optimize scan.auto.path.yaml → poi");
@@ -96,6 +103,14 @@ int main(int argc, char** argv) {
   optimize->add_option("--step", step);
   optimize->add_option("--state-type", state_type, "写出的 type/state_type：auto_poi | poi");
   optimize->add_flag("--no-dense-verify", no_dense);
+  optimize->add_flag("--no-tol-ladder", no_tol_ladder,
+                     "关闭容差阶梯择优（只跑请求包络一档，即旧行为）");
+  optimize->add_option("--tol-ladder-scales", ladder_scales,
+                       "阶梯收紧比例（逗号分隔，均需在 (0,1)）");
+  optimize->add_option("--tol-ladder-stop-ratio", ladder_stop_ratio,
+                       "早停阈值：某档 PASS 且 峰值/限速 ≤ 此值时不再继续收紧（0=跑完全部）");
+  optimize->add_option("--tol-ladder-max-pointing-deg", ladder_max_pointing,
+                       "指向偏量护栏：某档最大指向偏量 > 请求档 + 此值就弃用该档（0=不限制）");
 
   std::string joints = "0,0,-90,-90,-90,0";
   std::string pose;
@@ -214,6 +229,24 @@ int main(int argc, char** argv) {
       oopt.beam_width = beam;
       oopt.max_candidates_per_branch = max_per_branch;
       oopt.dense_verify = !no_dense;
+      // 容差阶梯择优：CLI 显式传参 > 配置文件(eff) > 默认值。用 count()>0 判断是否显式给出，
+      // 未给出时回落到 eff（无 --config 时 eff 即结构体默认值，与旧行为一致）。
+      auto given_opt = [&](const char* name) {
+        const auto* o = optimize->get_option_no_throw(name);
+        return o != nullptr && o->count() > 0;
+      };
+      oopt.tol_ladder = given_opt("--no-tol-ladder") ? !no_tol_ladder : eff.tol_ladder;
+      if (given_opt("--tol-ladder-scales")) {
+        if (const auto sc = SplitCsv(ladder_scales); !sc.empty()) oopt.tol_ladder_scales = sc;
+      } else if (!eff.tol_ladder_scales.empty()) {
+        oopt.tol_ladder_scales = eff.tol_ladder_scales;
+      }
+      oopt.tol_ladder_stop_peak_ratio = given_opt("--tol-ladder-stop-ratio")
+                                            ? ladder_stop_ratio
+                                            : eff.tol_ladder_stop_peak_ratio;
+      oopt.tol_ladder_max_pointing_deg = given_opt("--tol-ladder-max-pointing-deg")
+                                             ? ladder_max_pointing
+                                             : eff.tol_ladder_max_pointing_deg;
       if (auto e = oopt.Validate(); !e.empty()) return EmitError(2, "optimize", e);
 
       motion::VerifyOptions vopt;
@@ -232,6 +265,10 @@ int main(int argc, char** argv) {
       }
 
       motion::PathDocument out_doc = doc;
+      if (doc.paths.empty()) {
+        // 旧代码在这种情况下会在后面的 doc.paths.back() 上未定义行为（空 vector）。
+        return EmitError(2, "optimize", "input has no paths: " + input);
+      }
       std::optional<motion::JointVec> last_q;
       motion::OptimizeResult last;
       double total_ms = 0.0;
@@ -256,6 +293,10 @@ int main(int argc, char** argv) {
       out_doc.state_type = state_type;
       out_doc.source_file = BaseName(input);
       out_doc.execution_speed_mm_s = speed;
+      // 阶梯择优可能采纳了比请求更紧的包络；报表与落盘都以“采纳档”为准。
+      const Eigen::Vector3d adopted_tol =
+          last.adopted_tol_deg.maxCoeff() > 0.0 ? last.adopted_tol_deg : spec.tol_deg;
+      const bool ladder_applied = (adopted_tol - spec.tol_deg).cwiseAbs().maxCoeff() > 1e-9;
       auto all = verifier.VerifyAll(out_doc.paths);
       if (!output.empty()) {
         motion::PoiConfig poi;
@@ -264,6 +305,8 @@ int main(int argc, char** argv) {
                                             : "absolute_anchor_tolerance";
         poi.ref_rpy_deg = spec.ref_rpy_deg;
         poi.tolerance_rpy_deg = spec.tol_deg;
+        poi.adopted_tolerance_rpy_deg = adopted_tol;
+        poi.tolerance_ladder_applied = ladder_applied;
         poi.has_ref_rpy = (anchor_source != "raw");
         if (!motion::SavePathYaml(output, out_doc, &all, &poi, &err)) {
           return EmitError(3, "optimize", err);
@@ -272,7 +315,7 @@ int main(int argc, char** argv) {
       const motion::PathVerifyReport* first =
           all.path_reports.empty() ? nullptr : &all.path_reports[0];
       const motion::Anchor last_anchor = motion::ResolveAnchor(spec, kin, doc.paths.back());
-      motion::PrintOptimizeReport(std::cerr, kin, doc.paths.back(), last, last_anchor, spec.tol_deg,
+      motion::PrintOptimizeReport(std::cerr, kin, doc.paths.back(), last, last_anchor, adopted_tol,
                                   spec.home_joints_rad, first, output);
       std::cout << motion::JsonReportOptimize(last, &all, true, "") << "\n";
       return 0;

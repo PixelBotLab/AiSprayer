@@ -43,11 +43,14 @@ function categorizeLog(log: LogEntry): LogTabType {
     return 'camera';
   }
   
-  // 2. Robot domain loggers (robot_service, dobot_driver, inexbot_driver, etc.)
+  // 2. Robot domain loggers (robot_service, dobot_driver, inexbot_driver, motion, path_verification, etc.)
   if (
     loggerName.includes('robot') ||
     loggerName.includes('dobot') ||
-    loggerName.includes('inexbot')
+    loggerName.includes('inexbot') ||
+    loggerName.includes('motion') ||
+    loggerName.includes('verification') ||
+    loggerName.includes('path')
   ) {
     return 'robot';
   }

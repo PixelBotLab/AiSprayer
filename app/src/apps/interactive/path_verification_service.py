@@ -1,6 +1,7 @@
 import os
 import logging
 from typing import Optional
+import yaml
 
 from core.config import load_tcp_from_urdf, sprayer_config
 from core.motion.cli_client import MotionCliError, optimize_path, verify_path
@@ -190,18 +191,114 @@ class PathVerificationService:
                 step_mm=step,
             )
         except MotionCliError as e:
-            raise RuntimeError(str(e)) from e
+            logger.error(
+                f"❌ [Verification Service] Optimization failed for '{template_name}' (anchor={anchor_source}): {e}. "
+                "Robot execution is blocked."
+            )
+            return self.record_optimization_failure(template_name, source=source, error=str(e))
+        except Exception as e:
+            logger.error(
+                f"❌ [Verification Service] Unexpected optimization error for '{template_name}': {e}. "
+                "Robot execution is blocked."
+            )
+            return self.record_optimization_failure(template_name, source=source, error=str(e))
 
         data = _load_yaml(opt_file)
         cleaned_report = data.get("verification") or {}
         cleaned_report["optimized_paths"] = data.get("paths") or []
         cleaned_report["saved_file"] = target_yaml
+        # 容差阶梯择优：motion_cli 可能采纳了比请求更紧的一档包络（大容差不保证解更好，
+        # 见 app/src/core/motion/docs/optimizer_monotonicity_improvement_proposal.md §6.5）。
+        # 这里把“实际生效的那一档”回传并记日志，避免用户误以为放宽没生效。
+        poi_cfg = data.get("poi_config") or {}
+        adopted_tol = poi_cfg.get("adopted_tolerance_rpy_deg")
+        cleaned_report["requested_tolerance_rpy_deg"] = list(tol_rpy)
+        if adopted_tol:
+            cleaned_report["adopted_tolerance_rpy_deg"] = list(adopted_tol)
+            cleaned_report["tolerance_ladder_applied"] = bool(poi_cfg.get("tolerance_ladder_applied"))
+            if [float(v) for v in adopted_tol] != [float(v) for v in tol_rpy]:
+                logger.info(
+                    "🪜 [Verification Service] 容差阶梯择优: 请求包络 %s → 采纳 %s（更紧的一档解质量更优）",
+                    list(tol_rpy), list(adopted_tol),
+                )
+        if "issues" not in cleaned_report or not cleaned_report["issues"]:
+            all_issues = []
+            for pr in cleaned_report.get("path_reports", []):
+                all_issues.extend(pr.get("issues", []))
+            cleaned_report["issues"] = all_issues
         _cleanup_stale_reports(template_dir)
-        logger.info(
-            "🎉 [Verification Service] Optimization (%s) completed for '%s': Status=%s",
-            out_state, template_name, cleaned_report.get("status", "UNKNOWN"),
-        )
+
+        is_pass = cleaned_report.get("status") == "PASS" or cleaned_report.get("summary", {}).get("status") == "PASS"
+        issues = cleaned_report.get("issues", [])
+        if not is_pass:
+            logger.error(
+                f"❌ [Verification Service] Optimization completed for '{template_name}', but verification status is FAILED "
+                f"({len(issues)} issue(s) detected). Robot execution is blocked."
+            )
+            for iss in issues[:5]:
+                logger.error(
+                    f"   ❌ [{iss.get('severity', 'ERROR')}] {iss.get('type', 'UNKNOWN')}: {iss.get('detail', '')}"
+                )
+        else:
+            logger.info(
+                f"🎉 [Verification Service] Optimization ({out_state}) completed successfully for '{template_name}': Status=PASS"
+            )
+
         return cleaned_report
+
+    def record_optimization_failure(self, template_name: str, source: str = "raw", error: str = "") -> dict:
+        """
+        在优化完全失败（如无可行解或 CLI 异常）时，将目标 .path.yaml 文件落盘标记为 FAILED，
+        并返回统一校验报告，杜绝前端残留旧的 PASS 状态并严防机械臂误执行。
+        """
+        out_state = "poi" if source == "raw" else "auto_poi"
+        template_dir = os.path.join(self.template_group_dir, template_name)
+        target_yaml = _scan_path_filename(out_state)
+        opt_file = os.path.join(template_dir, target_yaml)
+        source_paths_file = self._path_file(template_name, source)
+
+        paths = []
+        if os.path.exists(source_paths_file):
+            try:
+                paths = _load_yaml(source_paths_file).get("paths", [])
+            except Exception:
+                paths = []
+
+        failed_report = {
+            "status": "FAILED",
+            "saved_file": target_yaml,
+            "optimized_paths": paths,
+            "summary": {
+                "status": "FAILED",
+                "total_issues": 1,
+                "total_paths": len(paths),
+                "total_waypoints": sum(len(p.get("points", [])) for p in paths),
+                "total_steps": 0,
+            },
+            "issues": [
+                {
+                    "type": "OPTIMIZATION_FAILED",
+                    "severity": "ERROR",
+                    "detail": f"Path optimization rejected: {error}",
+                }
+            ],
+            "path_reports": [],
+        }
+
+        doc = {
+            "type": out_state,
+            "state_type": out_state,
+            "source_file": os.path.basename(source_paths_file),
+            "paths": paths,
+            "verification": failed_report,
+        }
+        try:
+            with open(opt_file, "w", encoding="utf-8") as f:
+                yaml.dump(doc, f, allow_unicode=True, sort_keys=False)
+        except Exception as write_err:
+            logger.error(f"Failed to write failure record to {opt_file}: {write_err}")
+
+        return failed_report
 
 
 path_verification_service = PathVerificationService()

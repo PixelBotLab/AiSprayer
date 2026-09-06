@@ -1,5 +1,5 @@
 """
-交互模板自动航点：读 mesh / masks / 标定，调用 JeansAutoWaypoints，写入 scan.auto.path.yaml。
+交互模板自动航点：读 mesh / masks / 标定，调用 WaypointPlanner，写入 scan.auto.path.yaml。
 """
 
 from __future__ import annotations
@@ -16,7 +16,10 @@ from apps.interactive.manual_path_service import manual_path_service
 from apps.interactive.reconstruction_service import reconstruction_service
 from apps.interactive.sam_service import sam_service
 from core.config import SprayerConfig, sprayer_config
-from core.vision.jeans_auto_waypoints import JeansAutoWaypoints, JeansAutoWaypointsError
+from core.vision import (
+    WaypointPlanner,
+    WaypointPlannerError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -59,7 +62,7 @@ class AutoPathService:
             standoff_dist_mm, row_spacing_mm, point_spacing_mm
         )
 
-        planner = JeansAutoWaypoints(
+        planner = WaypointPlanner(
             spray_dist_mm=spray_dist,
             row_spacing_mm=row_mm,
             point_spacing_mm=point_mm,
@@ -74,7 +77,7 @@ class AutoPathService:
         )
         try:
             planned = planner.plan(mesh, masks_data)
-        except JeansAutoWaypointsError as e:
+        except WaypointPlannerError as e:
             raise AutoPathServiceError(str(e)) from e
 
         paths = planned.get("paths") or []

@@ -842,9 +842,17 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
 
       if (onPathsUpdated) onPathsUpdated();
       await fetchTemplateFiles(activeTemplate);
-      showNotice('success', `POI optimized (${source === 'auto' ? 'AUTO-POI' : 'POI'})`);
+
+      const isPass = rep.status === 'PASS' || rep.summary?.status === 'PASS';
+      if (isPass) {
+        showNotice('success', `POI optimized (${source === 'auto' ? 'AUTO-POI' : 'POI'} PASS)`);
+      } else {
+        const issueCount = rep.summary?.total_issues ?? rep.issues?.length ?? 1;
+        showNotice('error', `Optimization FAILED (${issueCount} kinematic issues). Robot execution blocked.`);
+      }
     } catch (err: any) {
-      showNotice('error', err.message);
+      showNotice('error', `Optimization failed: ${err.message}`);
+      if (activeTemplate) await fetchTemplateFiles(activeTemplate);
     } finally {
       setIsOptimizing(false);
     }

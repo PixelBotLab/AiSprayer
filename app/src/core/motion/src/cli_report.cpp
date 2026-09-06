@@ -127,11 +127,6 @@ Eigen::Vector3d RelRpy(const Eigen::Matrix3d& R_anchor, const Eigen::Matrix3d& R
   return e;
 }
 
-double PointingDeg(const Eigen::Matrix3d& Ra, const Eigen::Matrix3d& Rb) {
-  const double c = std::min(1.0, std::max(-1.0, Ra.col(2).dot(Rb.col(2))));
-  return Deg(std::acos(c));
-}
-
 std::vector<JointVec> TrackRawJoints(const Cr5Kinematics& kin, const PathItem& raw,
                                      const JointVec& home) {
   std::vector<JointVec> out;
@@ -197,6 +192,15 @@ void PrintOptimizePreamble(std::ostream& os, const std::string& input, const Pat
   os << "   锚点硬包络: (Tol_Rx=±" << Fmt("%.1f", anchor.tol_deg[0]) << "°, Tol_Ry=±"
      << Fmt("%.1f", anchor.tol_deg[1]) << "°, Tol_Rz=±" << Fmt("%.1f", anchor.tol_deg[2])
      << "°)\n";
+  if (opt.tol_ladder && !opt.tol_ladder_scales.empty()) {
+    std::ostringstream sc;
+    for (size_t i = 0; i < opt.tol_ladder_scales.size(); ++i) {
+      if (i) sc << ", ";
+      sc << Fmt("%.3g", opt.tol_ladder_scales[i]);
+    }
+    os << "   容差阶梯择优: 开启（额外收紧档比例 " << sc.str() << "，早停阈值 峰值/限速 ≤ "
+       << Fmt("%.0f", opt.tol_ladder_stop_peak_ratio * 100.0) << "%）\n";
+  }
   os << "   Beam Width: " << opt.beam_width << ", 8支单桶容量: " << opt.max_candidates_per_branch
      << ", MoveL 抽检: [" << opt.movel_checks_min << ", " << opt.movel_checks_max << "] 点 (间距 "
      << opt.movel_spacing_mm << " mm)\n";
@@ -212,6 +216,36 @@ void PrintOptimizeReport(std::ostream& os, const Cr5Kinematics& kin, const PathI
                          const PathVerifyReport* verify, const std::string& output_path) {
   os << "   优化完成! 耗时: " << Fmt("%.2f", result.elapsed_ms)
      << " ms | 姿态已修改: " << (result.modified ? "True" : "False") << "\n";
+
+  // 容差阶梯择优：把每一档包络的实测结果列出来并标明采纳档。
+  // 单档（阶梯关闭）时 ladder 为空，报表格式与以前一致。
+  if (!result.ladder.empty()) {
+    const auto& req = result.ladder.front().tol_deg;
+    const std::vector<std::string> hd = {"档位", "包络 ±(Rx,Ry,Rz)°", "校验",
+                                        "峰值°/s", "峰值/限速", "指向偏量°", "DP代价 J", "耗时 ms"};
+    const std::vector<int> wd = {8, 22, 11, 10, 10, 11, 12, 9};
+    std::vector<std::vector<std::string>> rows;
+    for (size_t i = 0; i < result.ladder.size(); ++i) {
+      const auto& r = result.ladder[i];
+      const bool adopted = (r.tol_deg - result.adopted_tol_deg).cwiseAbs().maxCoeff() < 1e-9;
+      const bool err = r.status == "ERROR";
+      rows.push_back({(adopted ? "★" : "") + std::to_string(i + 1),
+                      Fmt("(%.1f, %.1f, %.1f)", r.tol_deg[0], r.tol_deg[1], r.tol_deg[2]),
+                      r.status, err ? "-" : Fmt("%.1f", r.peak_deg_s),
+                      err ? "-" : Fmt("%.1f%%", r.peak_ratio * 100.0),
+                      err ? "-" : Fmt("%.2f", r.max_pointing_deg),
+                      err ? r.error : Fmt("%.1f", r.objective), Fmt("%.0f", r.elapsed_ms)});
+    }
+    os << FormatTable(hd, wd, rows, "5.1 容差阶梯择优 (Tolerance Ladder)") << "\n";
+    os << "   请求包络: ±" << Fmt("(%.1f, %.1f, %.1f)", req[0], req[1], req[2]) << "° → 采纳包络: ±"
+       << Fmt("(%.1f, %.1f, %.1f)", result.adopted_tol_deg[0], result.adopted_tol_deg[1],
+              result.adopted_tol_deg[2])
+       << "°\n";
+    os << "   说明: 每一档包络都包含于请求包络，而密集校验与容差无关，因此采纳解不会比\n"
+       << "         任何一档差（择优标尺: 校验状态 → 指向护栏 → 峰值/限速 → 指向偏量 → J）。\n"
+       << "         注意：收紧包络是用「指向偏量（喷嘴偏离表面法向）」换「峰值速度」，\n"
+       << "         涂层质量优先时用 --tol-ladder-max-pointing-deg 限制或 --no-tol-ladder 关闭。\n";
+  }
 
   const bool per_point = !anchor.has_global();
   const Eigen::Matrix3d R_fix = per_point ? Eigen::Matrix3d::Identity() : *anchor.R;

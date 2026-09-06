@@ -15,6 +15,7 @@ import {
   RefreshCw,
   CheckCircle2,
   AlertTriangle,
+  XCircle,
 } from 'lucide-react';
 import type { FileItem, PathStateType, ManualPathItem, VerificationReport } from './types';
 
@@ -499,8 +500,9 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
                     const stateType = getFileState(file.name);
                     const isSelected = selectedFile === file.name;
                     const rep = reportForState(stateType);
-                    const isVerified = rep && (rep.summary?.status === 'PASS' || rep.status === 'PASS');
-                    const hasIssues = rep && (rep.summary?.status === 'FAILED' || rep.status === 'FAILED' || rep.summary?.status === 'WARNING');
+                    const isPass = rep && (rep.summary?.status === 'PASS' || rep.status === 'PASS');
+                    const isFailed = rep && (rep.summary?.status === 'FAILED' || rep.status === 'FAILED');
+                    const isWarning = rep && (rep.summary?.status === 'WARNING' || rep.status === 'WARNING');
 
                     return (
                       <div
@@ -537,7 +539,7 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
 
                           <div className="flex items-center gap-1 shrink-0">
                             {/* Verification Status Icon */}
-                            {isVerified && (
+                            {isPass && (
                               <div className="relative group/status flex items-center justify-center">
                                 <span className="text-emerald-400">
                                   <CheckCircle2 size={11} />
@@ -549,14 +551,26 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
                                 </div>
                               </div>
                             )}
-                            {hasIssues && (
+                            {isFailed && (
+                              <div className="relative group/status flex items-center justify-center">
+                                <span className="text-red-400 animate-pulse">
+                                  <XCircle size={11} />
+                                </span>
+                                <div className="absolute bottom-full mb-1 hidden group-hover/status:flex flex-col items-center pointer-events-none z-50">
+                                  <div className="bg-slate-950/80 backdrop-blur-md border border-red-500/30 rounded px-1.5 py-0.5 shadow text-[8px] text-red-300 whitespace-nowrap">
+                                    Optimization/Kinematics FAILED (Robot Blocked)
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+                            {isWarning && !isFailed && (
                               <div className="relative group/status flex items-center justify-center">
                                 <span className="text-amber-400">
                                   <AlertTriangle size={11} />
                                 </span>
                                 <div className="absolute bottom-full mb-1 hidden group-hover/status:flex flex-col items-center pointer-events-none z-50">
                                   <div className="bg-slate-950/80 backdrop-blur-md border border-amber-500/30 rounded px-1.5 py-0.5 shadow text-[8px] text-amber-300 whitespace-nowrap">
-                                    {`Status: ${rep?.summary?.status || rep?.status || 'WARN'}`}
+                                    Status: WARNING
                                   </div>
                                 </div>
                               </div>

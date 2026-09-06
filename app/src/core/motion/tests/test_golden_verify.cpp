@@ -77,11 +77,14 @@ int main() {
   CHECK(report.summary.status == "PASS");
   CHECK(report.summary.total_paths == 1);
   CHECK(report.summary.total_waypoints == 81);
-  CHECK(report.summary.total_steps == 5178);
+  // 下面的黄金常量锁定「校验链路（ChainVerifier + IK + MoveL 插值）在当前工件上的位级行为」。
+  // 注意：输入 scan.auto.path.yaml 是 gitignore 的流水线再生数据，一旦被重新生成，
+  // 这些常量就会失配（本测试失败）——此时应确认新工件 status=PASS/issues=0 后重新采集下方数值。
+  CHECK(report.summary.total_steps == 5384);
   CHECK(report.summary.total_issues == 0);
   CHECK(!report.path_reports.empty());
 
-  const double expect_peak[6] = {22.0, 25.4, 39.0, 36.4, 32.8, 19.9};
+  const double expect_peak[6] = {30.3, 27.8, 33.8, 145.7, 44.4, 122.5};
   for (int i = 0; i < 6; ++i) {
     const double got = report.path_reports[0].peak_joint_speeds_deg_s[i];
     if (std::abs(got - expect_peak[i]) > 0.15) {
@@ -90,7 +93,7 @@ int main() {
     }
   }
 
-  const double expect_q0[6] = {-2.4355, 1.5446, -0.994, -0.0802, -2.5684, 2.0506};
+  const double expect_q0[6] = {1.02779, -0.248253, -1.42254, -1.3748, -0.620557, -1.5595};
   if (!report.path_reports[0].trajectory_q.empty()) {
     const JointVec& q0 = report.path_reports[0].trajectory_q.front();
     for (int i = 0; i < 6; ++i) {

@@ -7,8 +7,7 @@ import time
 from typing import List, Tuple, Optional
 
 from core.config import sprayer_config
-from core.vision.image2d.mobilesam_session import load_mobilesam, MobileSAMSession
-from core.vision.image2d.wissight_detector import get_detector
+from core.vision import load_mobilesam, MobileSAMSegmenter, get_detector
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +17,7 @@ class SAMService:
         # MobileSAM predictor 内部只留一份 image embedding，所以只能有一个活跃会话；
         # 旧实现按模板名缓存多个 session，它们共享同一个 predictor，跨模板预测会静默
         # 用到另一个模板的图像，所以改成“单会话 + 当前模板名”。
-        self.session: Optional[MobileSAMSession] = None
+        self.session: Optional[MobileSAMSegmenter] = None
         self.loaded_template: Optional[str] = None
 
     def initialize(self):
@@ -63,7 +62,7 @@ class SAMService:
         except Exception as e:
             logger.error(f"Failed to initialize wissight detector: {e}", exc_info=True)
 
-    def _ensure_session(self, template_path: str, template_name: str) -> Optional[MobileSAMSession]:
+    def _ensure_session(self, template_path: str, template_name: str) -> Optional[MobileSAMSegmenter]:
         """返回已编码 template_name 图像的会话；未 init 或已切到其他模板时重新加载图像。
         predictor 只持有一份 embedding，所以这里必须校验当前模板，否则会静默预测另一张图。"""
         if self.session is not None and self.loaded_template == template_name:
@@ -92,7 +91,7 @@ class SAMService:
         if self.predictor is None:
             self.initialize()
         if self.session is None:
-            self.session = MobileSAMSession(self.predictor)
+            self.session = MobileSAMSegmenter(self.predictor)
         self.session.set_image(image_bgr)
         self.loaded_template = template_name
         logger.info(f"[SAM] MobileSAM image encoded for '{template_name}' ({w}x{h}) in {time.time() - t0:.2f}s.")

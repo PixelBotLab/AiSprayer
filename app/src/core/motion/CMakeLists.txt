@@ -69,3 +69,9 @@ add_executable(test_golden_optimize tests/test_golden_optimize.cpp)
 target_link_libraries(test_golden_optimize PRIVATE motion_io)
 target_compile_definitions(test_golden_optimize PRIVATE REPO_ROOT="${REPO_ROOT}")
 add_test(NAME test_golden_optimize COMMAND test_golden_optimize)
+
+# 容差阶梯择优（大容差不得劣于小容差）的验收测试，跑真实工件数据，约 10 s。
+add_executable(test_tol_ladder tests/test_tol_ladder.cpp)
+target_link_libraries(test_tol_ladder PRIVATE motion_io)
+target_compile_definitions(test_tol_ladder PRIVATE REPO_ROOT="${REPO_ROOT}")
+add_test(NAME test_tol_ladder COMMAND test_tol_ladder)

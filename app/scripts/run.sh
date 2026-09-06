@@ -83,15 +83,21 @@ echo "Frontend started with PID: $FRONTEND_PID"
 if [ "$(uname -s)" = Darwin ]; then
     LAN_IP=$(ipconfig getifaddr en0 2>/dev/null || ipconfig getifaddr en1 2>/dev/null || true)
 else
-    LAN_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+    # 优先获取通往外部局域网路由器的真实 IP（排除机械臂专属网段 192.168.5.x 与 Docker 172.x）
+    LAN_IP=$(ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+')
+    if [ -z "$LAN_IP" ]; then
+        LAN_IP=$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -v '^192\.168\.5\.' | grep -v '^172\.' | head -n 1)
+    fi
 fi
 LAN_IP=${LAN_IP:-127.0.0.1}
 
 echo "=========================================="
 echo "AiSprayer is now running!"
-echo "Backend:  http://$LAN_IP:8000  (http://localhost:8000)"
-echo "Frontend: http://$LAN_IP:5173  (http://localhost:5173)"
-echo "Press Ctrl+C to stop both processes."
+echo "Web UI (直接访问): http://$LAN_IP:5173"
+echo "Backend API:      http://$LAN_IP:8000"
+echo ""
+echo "⚠️  注意: 请在外部浏览器直接打开 http://$LAN_IP:5173"
+echo "⚠️  切勿通过 IDE 的 localhost 端口转发隧道访问，避免 2.5Mbps 视频流与多路 WebSocket 塞满 SSH 连接造成无线网卡/开发板掉电复位。"
 echo "=========================================="
 
 # Trap SIGINT, SIGTERM, and EXIT to kill background processes

@@ -1,9 +1,35 @@
 #include "motion/io.hpp"
 
+#include <cstdio>
 #include <iomanip>
 #include <sstream>
 
 namespace motion {
+// 异常文本会直接拼进 JSON 字符串，引号/反斜杠/控制字符必须转义，否则 Python 侧解析失败。
+// 定义在命名空间外，cli_main 的 EmitError 也走同一份实现。
+std::string JsonEscapeString(const std::string& s) {
+  std::string out;
+  out.reserve(s.size());
+  for (char c : s) {
+    switch (c) {
+      case '"': out += "\\\""; break;
+      case '\\': out += "\\\\"; break;
+      case '\n': out += "\\n"; break;
+      case '\r': out += "\\r"; break;
+      case '\t': out += "\\t"; break;
+      default:
+        if (static_cast<unsigned char>(c) < 0x20) {
+          char buf[8];
+          std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+          out += buf;
+        } else {
+          out += c;
+        }
+    }
+  }
+  return out;
+}
+
 namespace {
 
 void Arr6(std::ostringstream& os, const std::array<double, 6>& a) {
@@ -59,7 +85,7 @@ std::string JsonReportVerify(const VerifyReport& report, double elapsed_ms, bool
     }
   }
   os << ",\"issues_count\":" << report.summary.total_issues;
-  if (!message.empty()) os << ",\"message\":\"" << message << "\"";
+  if (!message.empty()) os << ",\"message\":\"" << JsonEscapeString(message) << "\"";
   os << ",\"urdf_tcp\":{";
   os << "\"has_tool\":" << (report.urdf_tcp.has_tool ? "true" : "false");
   os << ",\"tool_name\":\"" << report.urdf_tcp.tool_name << "\"";
@@ -80,6 +106,30 @@ std::string JsonReportOptimize(const OptimizeResult& result, const VerifyReport*
   os << ",\"action\":\"optimize\"";
   os << ",\"elapsed_ms\":" << std::fixed << std::setprecision(3) << result.elapsed_ms;
   os << ",\"was_modified\":" << (result.modified ? "true" : "false");
+  os << ",\"objective\":" << std::setprecision(4) << result.objective;
+  // 容差阶梯择优：采纳档可能比请求档更紧，Python/前端需要知道实际用的是哪个包络。
+  os << ",\"adopted_tolerance_rpy_deg\":[";
+  for (int i = 0; i < 3; ++i) {
+    if (i) os << ",";
+    os << std::setprecision(2) << result.adopted_tol_deg[i];
+  }
+  os << "]";
+  if (!result.ladder.empty()) {
+    os << ",\"tolerance_ladder\":[";
+    for (size_t i = 0; i < result.ladder.size(); ++i) {
+      const auto& r = result.ladder[i];
+      if (i) os << ",";
+      os << "{\"tol_deg\":[" << std::setprecision(2) << r.tol_deg[0] << "," << r.tol_deg[1] << ","
+         << r.tol_deg[2] << "],\"status\":\"" << r.status << "\",\"peak_deg_s\":"
+         << std::setprecision(2) << r.peak_deg_s << ",\"peak_ratio\":" << std::setprecision(4)
+         << r.peak_ratio << ",\"max_pointing_deg\":" << std::setprecision(2) << r.max_pointing_deg
+         << ",\"objective\":" << r.objective << ",\"elapsed_ms\":" << std::setprecision(2)
+         << r.elapsed_ms;
+      if (!r.error.empty()) os << ",\"error\":\"" << JsonEscapeString(r.error) << "\"";
+      os << "}";
+    }
+    os << "]";
+  }
   if (all) {
     os << ",\"status\":\"" << all->summary.status << "\"";
     os << ",\"summary\":{";
@@ -92,7 +142,7 @@ std::string JsonReportOptimize(const OptimizeResult& result, const VerifyReport*
   } else {
     os << ",\"status\":\"" << result.verify.status << "\"";
   }
-  if (!message.empty()) os << ",\"message\":\"" << message << "\"";
+  if (!message.empty()) os << ",\"message\":\"" << JsonEscapeString(message) << "\"";
   os << "}";
   return os.str();
 }

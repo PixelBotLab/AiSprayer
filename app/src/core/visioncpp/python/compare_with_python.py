@@ -22,8 +22,14 @@ if str(APP_SRC) not in sys.path:
     sys.path.insert(0, str(APP_SRC))
 
 from core.config import SprayerConfig  # noqa: E402
-from core.vision.jeans_auto_waypoints import JeansAutoWaypoints  # noqa: E402
-from core.vision.reconstruction import PoissonReconstructor, depth_to_point_cloud, k_matrix_to_intrinsics  # noqa: E402
+from core.vision import (  # noqa: E402
+    JeansAutoWaypoints,
+    PoissonReconstructor,
+    SurfaceReconstructor,
+    WaypointPlanner,
+    depth_to_point_cloud,
+    k_matrix_to_intrinsics,
+)
 
 
 def _latest_calib(repo: Path) -> Path:

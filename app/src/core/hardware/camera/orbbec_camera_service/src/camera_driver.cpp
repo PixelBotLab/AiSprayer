@@ -991,6 +991,22 @@ bool CameraDriver::getLatestFrame(FrameData& out_frame) {
     return true;
 }
 
+bool CameraDriver::waitForValidFrame(FrameData& out_frame, int timeout_ms) {
+    std::unique_lock<std::mutex> lock(frame_mutex_);
+    if (latest_frame_.has_color || latest_frame_.has_depth) {
+        out_frame = latest_frame_;
+        return true;
+    }
+    bool ok = frame_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this]() {
+        return !running_ || latest_frame_.has_color || latest_frame_.has_depth;
+    });
+    if (!ok || !running_ || (!latest_frame_.has_color && !latest_frame_.has_depth)) {
+        return false;
+    }
+    out_frame = latest_frame_;
+    return true;
+}
+
 bool CameraDriver::waitForNextFrame(FrameData& out_frame, int timeout_ms) {
     std::unique_lock<std::mutex> lock(frame_mutex_);
     bool ok = frame_cv_.wait_for(lock, std::chrono::milliseconds(timeout_ms), [this]() {

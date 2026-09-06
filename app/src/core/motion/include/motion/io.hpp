@@ -19,6 +19,12 @@ struct SprayingConfig {
   AxisGrid grid_z{-30.0, 30.0, 5.0};
   double speed_mm_s = 150.0;
   double step_mm = 2.0;
+  // 容差阶梯择优（对应 OptimizeOptions 同名字段）：放到配置里是为了部署侧能不重编
+  // 就关掉阶梯或调整护栏；CLI 显式传参优先级更高。
+  bool tol_ladder = true;
+  std::vector<double> tol_ladder_scales{0.5, 1.0 / 3.0, 0.25};
+  double tol_ladder_stop_peak_ratio = 0.3;
+  double tol_ladder_max_pointing_deg = 0.0;
 };
 
 bool LoadSprayingConfig(const std::string& yaml_path, SprayingConfig& out, std::string* err);
@@ -30,6 +36,10 @@ struct PoiConfig {
   Eigen::Vector3d ref_rpy_deg{90.0, 0.0, 90.0};
   Eigen::Vector3d tolerance_rpy_deg{10.0, 10.0, 30.0};
   bool has_ref_rpy = true;  // anchor_source=raw 时 Python 侧写 null
+  // 容差阶梯择优：tolerance_rpy_deg 保持原语义（= 用户/配置请求的包络，前端会回显它），
+  // 另用一个新字段记录最终采纳的包络（总是≤请求档），避免前端把两者混淆。
+  Eigen::Vector3d adopted_tolerance_rpy_deg{10.0, 10.0, 30.0};
+  bool tolerance_ladder_applied = false;
 };
 
 bool LoadPathYaml(const std::string& path, PathDocument& out, std::string* err);
@@ -41,5 +51,7 @@ std::string JsonReportVerify(const VerifyReport& report, double elapsed_ms, bool
                              const std::string& message);
 std::string JsonReportOptimize(const OptimizeResult& result, const VerifyReport* all,
                                bool success, const std::string& message);
+// 把任意文本安全地放进 JSON 字符串值（转义引号/反斜杠/控制字符）。
+std::string JsonEscapeString(const std::string& s);
 
 }  // namespace motion

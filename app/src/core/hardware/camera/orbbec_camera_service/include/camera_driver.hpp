@@ -44,6 +44,9 @@ public:
     // Fetch the latest aligned frame data (non-blocking)
     bool getLatestFrame(FrameData& out_frame);
 
+    // Fetch latest frame, or wait up to timeout_ms if no valid frame is available yet (e.g. during startup or reconnect)
+    bool waitForValidFrame(FrameData& out_frame, int timeout_ms = 2000);
+
     // Event-driven frame waiting: blocks until next camera hardware frame arrives
     bool waitForNextFrame(FrameData& out_frame, int timeout_ms = 100);
 

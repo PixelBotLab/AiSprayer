@@ -407,7 +407,7 @@ void HttpServer::setupRoutes() {
             if (body.contains("metadata")) save_req.metadata = body["metadata"];
 
             FrameData cur_frame;
-            if (!camera_->getLatestFrame(cur_frame)) {
+            if (!camera_->waitForValidFrame(cur_frame, 2000)) {
                 json j;
                 j["code"] = -2;
                 j["msg"] = "No frame available from camera";

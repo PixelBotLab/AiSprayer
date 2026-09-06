@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-APP_BUILD="$(cd "${SCRIPT_DIR}/../../../scripts" && pwd)/build.sh"
-if [[ -x "${APP_BUILD}" ]]; then
-  exec "${APP_BUILD}" --only motion
+# app/src/core/motion/scripts → 上溯 4 级才是 app/scripts（原来只上溯 3 级，cd 失败后
+# set -e 直接退出，导致本脚本从未走到统一构建入口）。
+APP_SCRIPTS="${SCRIPT_DIR}/../../../../scripts"
+if [[ -x "${APP_SCRIPTS}/build.sh" ]]; then
+  exec "${APP_SCRIPTS}/build.sh" --only motion
 fi
 MOTION="$(cd "${SCRIPT_DIR}/.." && pwd)"
 BUILD="${MOTION}/build"

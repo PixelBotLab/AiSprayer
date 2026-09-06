@@ -106,6 +106,14 @@ inline double GeodesicDeg(const Eigen::Matrix3d& Ra, const Eigen::Matrix3d& Rb) 
   return Deg(std::acos(std::min(1.0, std::max(-1.0, c))));
 }
 
+// 两个姿态的「指向」夹角：只比工具 Z 轴（喷嘴指向），忽略绕该轴的自旋。
+// 与 GeodesicDeg 的区别：绕枪轴自旋 80° 时 GeodesicDeg≈80 而 PointingDeg≈0，
+// 后者才是影响漆膜厚度的工艺量（圆喷嘴绕轴旋转对称）。
+inline double PointingDeg(const Eigen::Matrix3d& Ra, const Eigen::Matrix3d& Rb) {
+  const double c = std::min(1.0, std::max(-1.0, Ra.col(2).dot(Rb.col(2))));
+  return Deg(std::acos(c));
+}
+
 // scipy as_quat / walk_movel: [x, y, z, w]，w>=0
 inline Eigen::Vector4d QuatXyzw(const Eigen::Matrix3d& R) {
   Eigen::Quaterniond q(R);

@@ -249,6 +249,10 @@ bool SavePathYaml(const std::string& path, const PathDocument& doc, const Verify
       }
       e << YAML::Key << "tolerance_rpy_deg" << YAML::Value;
       EmitFixedSeq(e, poi->tolerance_rpy_deg.data(), 3, 1);
+      // 阶梯择优可能采纳了比请求更紧的包络，这里把“实际用的那一档”也写回去。
+      e << YAML::Key << "adopted_tolerance_rpy_deg" << YAML::Value;
+      EmitFixedSeq(e, poi->adopted_tolerance_rpy_deg.data(), 3, 1);
+      e << YAML::Key << "tolerance_ladder_applied" << YAML::Value << poi->tolerance_ladder_applied;
       e << YAML::Key << "euler_order" << YAML::Value << "xyz";
       e << YAML::Key << "units" << YAML::Value << "deg";
       e << YAML::EndMap;
@@ -346,6 +350,16 @@ bool LoadSprayingConfig(const std::string& yaml_path, SprayingConfig& out, std::
       out.grid_x = ReadGrid(spraying["grid_tol_x_deg"], out.grid_x);
       out.grid_y = ReadGrid(spraying["grid_tol_y_deg"], out.grid_y);
       out.grid_z = ReadGrid(spraying["grid_tol_z_deg"], out.grid_z);
+      // 容差阶梯择优：部署侧可不重编译就关掉阶梯或调整护栏（CLI 显式传参优先级更高）。
+      if (spraying["tol_ladder"]) out.tol_ladder = spraying["tol_ladder"].as<bool>();
+      if (const auto sc = spraying["tol_ladder_scales"]; sc && sc.IsSequence() && sc.size() > 0) {
+        out.tol_ladder_scales.clear();
+        for (const auto& v : sc) out.tol_ladder_scales.push_back(v.as<double>());
+      }
+      if (spraying["tol_ladder_stop_peak_ratio"])
+        out.tol_ladder_stop_peak_ratio = spraying["tol_ladder_stop_peak_ratio"].as<double>();
+      if (spraying["tol_ladder_max_pointing_deg"])
+        out.tol_ladder_max_pointing_deg = spraying["tol_ladder_max_pointing_deg"].as<double>();
     }
     out.urdf_path = ResolveRel(out.urdf_path, yaml_path);
     return true;

@@ -196,7 +196,6 @@ def capture_template_data(name: str):
         
     try:
         logger.info(f"Starting hardware data capture for template '{name}'...")
-        # 1. 触发 C++ 底层硬件异步无损直接保存 scan.color.jpg 与 scan.depth.png
         save_res = camera_service.save_frame(
             save_dir=template_path,
             color_filename="scan.color.jpg",
@@ -207,7 +206,19 @@ def capture_template_data(name: str):
             save_info_yaml=False
         )
         if not save_res:
-            raise HTTPException(status_code=500, detail="Hardware camera frame capture failed")
+            logger.warning(f"Initial frame capture failed for template '{name}', retrying after 0.8s...")
+            time.sleep(0.8)
+            save_res = camera_service.save_frame(
+                save_dir=template_path,
+                color_filename="scan.color.jpg",
+                depth_filename="scan.depth.png",
+                color_format="jpg",
+                save_color=True,
+                save_depth=True,
+                save_info_yaml=False
+            )
+        if not save_res:
+            raise HTTPException(status_code=500, detail="Hardware camera frame capture failed. The camera may be re-initializing, please try again.")
 
         # 2. 动态保存相机参数元数据 (无 hardcode，直接来自驱动/硬件配置)
         meta = {
@@ -542,12 +553,15 @@ def optimize_paths(name: str, req: OptimizePathRequest = OptimizePathRequest()):
     except HTTPException:
         raise
     except FileNotFoundError as e:
+        logger.error(f"❌ [Path Optimization] File not found for '{name}': {e}")
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
+        logger.error(f"❌ [Path Optimization] Invalid request for '{name}': {e}")
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
-        logger.error(f"Optimization error for '{name}': {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Optimization failed: {str(e)}")
+        logger.error(f"❌ [Path Optimization] Error for '{name}': {e}")
+        res = path_verification_service.record_optimization_failure(name, source=req.source, error=str(e))
+        return res
 
 
 @router.get("/templates/{name}/verification_report")
@@ -802,6 +816,17 @@ def execute_yaml_path(name: str, req: ExecuteYamlPathRequest):
     raw_paths = data.get("paths", [])
     if not raw_paths:
         raise HTTPException(status_code=400, detail=f"No paths found in {req.file_name}")
+
+    # 严密安全防护：物理机械臂只允许执行校验状态为 PASS 的安全路径，严防执行 FAILED 或未校验路径
+    verification = data.get("verification") or {}
+    ver_status = str(verification.get("status") or verification.get("summary", {}).get("status") or "").upper()
+    if ver_status != "PASS":
+        err_msg = (
+            f"Cannot execute '{req.file_name}': Path verification status is '{ver_status or 'UNVERIFIED'}'. "
+            "Only paths verified with status 'PASS' can be executed on the physical robot."
+        )
+        logger.error(f"❌ [Robot Execution] {err_msg}")
+        raise HTTPException(status_code=400, detail=err_msg)
 
     # 筛选待执行的路径
     target_paths = []

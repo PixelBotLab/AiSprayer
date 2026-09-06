@@ -1,7 +1,14 @@
-import sys
+"""MobileSAM 交互式语义分割模块：支持 RK3588 NPU (RKNN)、ONNX Runtime 与 PyTorch 多后端。
+
+以面向对象方式提供 `MobileSAMSegmenter` 类，管理图像 Embedding 缓存与交互式提示词（点选、框选）掩码预测。
+"""
+
+from __future__ import annotations
+
 import logging
+import sys
 from pathlib import Path
-from typing import Tuple, Optional, List, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -20,7 +27,7 @@ from core.vision.backend import (
 try:
     import torch
     HAS_TORCH = True
-    # MobileSAM is an interactive feature; it must not consume all CPU cores.
+    # MobileSAM 是交互式功能，限制单线程避免挤占全部 CPU 资源
     torch.set_num_threads(1)
     try:
         torch.set_num_interop_threads(1)
@@ -32,63 +39,47 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# MobileSAM 相关模型与代码目录（项目根由 core.vision.backend 统一给出）
 MOBILESAM_DIR = REPO_ROOT / "third_party" / "MobileSAM"
-
 DEFAULT_MOBILESAM_WEIGHTS = REPO_ROOT / "models" / "mobile_sam.pt"
 
-# RKNN image encoder (RK3588 NPU)。decoder 没有 .rknn 版：转换脚本导的 decoder 图与运行时
-# 不兼容（无 orig_im_size、只 2 路输出），运行时固定用下面那份 ONNX decoder。
+# RKNN image encoder (RK3588 NPU)。decoder 固定使用 ONNX decoder
 DEFAULT_MOBILESAM_RKNN_ENCODER = REPO_ROOT / "models" / "mobile_sam_encoder.rknn"
 
-# ONNX models (Non-RK, x86, macOS, generic Linux)
+# ONNX 模型
 DEFAULT_MOBILESAM_ONNX_ENCODER = REPO_ROOT / "models" / "mobile_sam_encoder.onnx"
 DEFAULT_MOBILESAM_ONNX_DECODER = REPO_ROOT / "models" / "mobile_sam_decoder.onnx"
 
 
 def _has_onnx_models() -> bool:
-    """ONNX encoder/decoder 是否都就绪。"""
+    """ONNX encoder/decoder 是否均已就绪。"""
     return _model_ready(DEFAULT_MOBILESAM_ONNX_ENCODER) and _model_ready(DEFAULT_MOBILESAM_ONNX_DECODER)
 
 
 def _auto_backend() -> str:
-    """未指定后端时的探测顺序：NPU > CUDA > ONNX > MPS > CPU。"""
-    # 1. RK3588 上优先走 NPU
+    """未指定后端时的自动探测优先级：NPU > CUDA > ONNX > MPS > CPU。"""
     if is_rk3588() and _model_ready(DEFAULT_MOBILESAM_RKNN_ENCODER):
         return "rknn"
-
-    # 2. PyTorch CUDA
     if HAS_TORCH and torch.cuda.is_available():
         return "cuda"
-
-    # 3. 非 RK 平台：有 ONNX 模型就用它（比 PyTorch CPU 更快、更轻）
     if _has_onnx_models():
         try:
             import onnxruntime  # noqa: F401
             return "onnx"
         except ImportError:
             pass
-
     if HAS_TORCH and hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
         return "mps"
-
     return "cpu"
 
 
-def resolve_device(requested: str | None = None) -> str:
-    """解析 MobileSAM 推理后端。
-
-    优先级：显式入参 > 环境变量 MOBILESAM_DEVICE/MOBILESAM_BACKEND >
-    配置 interactive.sam.backend > _auto_backend() 自动探测。
-    'pt'/'pytorch' 会归一成具体 torch 设备，'auto' 等价于未填。
-    """
+def resolve_device(requested: Optional[str] = None) -> str:
+    """解析 MobileSAM 推理后端。"""
     return pick_backend(
         requested,
         ("MOBILESAM_DEVICE", "MOBILESAM_BACKEND"),
         sprayer_config.sam_backend,
         _auto_backend,
     )
-
 
 
 def _resize_and_pad(image: np.ndarray, img_size: int) -> Tuple[np.ndarray, Tuple[int, int], Tuple[int, int]]:
@@ -104,11 +95,7 @@ def _resize_and_pad(image: np.ndarray, img_size: int) -> Tuple[np.ndarray, Tuple
     return padded, (orig_h, orig_w), (new_h, new_w)
 
 
-# 运行时 decoder 期望的图签名：由 third_party/MobileSAM/scripts/export_onnx_model.py（SamOnnxModel）
-# 导出 —— 多一个 orig_im_size 输入、在图内把 mask 上采样回原图、按 (masks, iou_predictions,
-# low_res_masks) 顺序输出 3 路。tools/convert_mobilesam_to_rknn.py 导的是另一套签名（无
-# orig_im_size、只 2 路且 iou 在前），_run_onnx_decoder 是按位置解包的，拿错文件会静默错位，
-# 所以加载时就拒绝。
+# 运行时 decoder 期望的图签名：由 export_onnx_model.py 导出
 _DECODER_INPUTS = {
     "image_embeddings", "point_coords", "point_labels", "mask_input", "has_mask_input", "orig_im_size",
 }
@@ -116,7 +103,7 @@ _DECODER_OUTPUTS = ["masks", "iou_predictions", "low_res_masks"]
 
 
 def _check_decoder_graph(session, model_path: Path) -> None:
-    """校验 ONNX decoder 的图签名；不匹配则抛错，由 load_mobilesam 回落到其他后端。"""
+    """校验 ONNX decoder 图签名；不匹配则抛错由加载器回退。"""
     ins = {i.name for i in session.get_inputs()}
     outs = [o.name for o in session.get_outputs()]
     if ins != _DECODER_INPUTS or outs != _DECODER_OUTPUTS:
@@ -136,7 +123,7 @@ def _run_onnx_decoder(
     point_labels: np.ndarray,
     multimask_output: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Shared ONNX decoder inference function for both pure-ONNX and RKNN+ONNX pipelines."""
+    """ONNX decoder 推理执行函数。"""
     orig_h, orig_w = original_size
     new_h, new_w = input_size
 
@@ -155,15 +142,12 @@ def _run_onnx_decoder(
 
     masks, iou_predictions, low_res_masks = decoder_session.run(None, ort_inputs)
 
-    # Unpack batch dimension
-    masks = masks[0]                  # (C, H, W)
+    masks = masks[0]                      # (C, H, W)
     iou_predictions = iou_predictions[0]  # (C,)
     low_res_masks = low_res_masks[0]
 
-    # SAM 的 mask decoder 有 4 个输出头：0 号是 multimask_output=False 的“稳定”单 mask，
-    # 1~3 号是三个粒度候选。这份 ONNX 导出把 4 路原样输出（未做切片），所以必须在这里
-    # 补上与 SamPredictor 一致的切片语义：否则加背景点精修时 argmax 会在不同粒度之间跳变，
-    # 表现为“右键点背景反而让 mask 变大”。
+    # SAM mask decoder 有 4 个输出头：0 号为稳定单 mask，1~3 号为 3 个粒度候选。
+    # 多提示词或带 box 时切片为 0 号，避免在粒度间跳变导致加背景点反向膨胀。
     if masks.shape[0] == 4:
         keep = slice(1, None) if multimask_output else slice(0, 1)
         masks = masks[keep]
@@ -174,11 +158,7 @@ def _run_onnx_decoder(
 
 
 class ONNXMobileSAMPredictor:
-    """
-    Pure ONNX Runtime implementation of MobileSAM.
-    Runs both the Image Encoder and Mask Decoder via ONNXRuntime,
-    enabling high-performance inference on x86, macOS, and non-RK Linux without PyTorch overhead.
-    """
+    """基于 ONNX Runtime 的纯轻量化 MobileSAM 预测器。"""
 
     def __init__(
         self,
@@ -231,7 +211,6 @@ class ONNXMobileSAMPredictor:
         self.reset_image()
         padded, self.original_size, self.input_size = _resize_and_pad(image, self.img_size)
 
-        # NCHW normalized float32
         tensor = padded.transpose(2, 0, 1)[None, ...].astype(np.float32)
         tensor = (tensor - self.pixel_mean) / self.pixel_std
 
@@ -268,12 +247,7 @@ class ONNXMobileSAMPredictor:
 
 
 class RKNNMobileSAMPredictor:
-    """
-    Drop-in replacement for SamPredictor on Rockchip RK3588.
-    The heavy Image Encoder (TinyViT, 1024x1024) runs on the RK3588 NPU via RKNN.
-    The lightweight Prompt Encoder + Mask Decoder runs via ONNX Runtime on CPU (<15ms, Zero-PyTorch)
-    or falls back to PyTorch if ONNX decoder is not available.
-    """
+    """在 Rockchip RK3588 NPU 上运行的 MobileSAM 预测器。"""
 
     def __init__(
         self,
@@ -292,7 +266,6 @@ class RKNNMobileSAMPredictor:
         self.decoder_session = None
         self.sam_predictor = None
 
-        # Prefer ONNX decoder for Zero-PyTorch dependency
         if self.onnx_decoder_path:
             dec_p = Path(self.onnx_decoder_path)
             if _model_ready(dec_p):
@@ -331,7 +304,6 @@ class RKNNMobileSAMPredictor:
             sam = sam_model_registry["vit_t"](checkpoint=ckpt)
             sam.eval()
 
-            # Free heavy image encoder from CPU memory, retain dummy for property compatibility
             del sam.image_encoder
             sam.image_encoder = type("DummyEncoder", (), {"img_size": 1024})()
             if torch.cuda.is_available():
@@ -349,9 +321,6 @@ class RKNNMobileSAMPredictor:
         self.rknn = load_rknn_runtime(self.rknn_encoder_path)
 
     def set_image(self, image: np.ndarray, image_format: str = "RGB") -> None:
-        """
-        Calculates image embeddings using RKNN on the NPU.
-        """
         assert image_format in ["RGB", "BGR"], f"image_format must be RGB or BGR, got {image_format}"
         if image_format == "BGR":
             image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
@@ -359,7 +328,6 @@ class RKNNMobileSAMPredictor:
         self.reset_image()
         padded, self.original_size, self.input_size = _resize_and_pad(image, self.img_size)
 
-        # NPU input: NHWC float32 (normalization mean/std is built into the RKNN model)
         input_tensor = np.expand_dims(padded, axis=0).astype(np.float32)
 
         t0 = cv2.getTickCount()
@@ -415,18 +383,15 @@ class RKNNMobileSAMPredictor:
 
 def load_mobilesam(
     checkpoint: str = str(DEFAULT_MOBILESAM_WEIGHTS),
-    device: str | None = None,
+    device: Optional[str] = None,
     rknn_encoder_path: str = str(DEFAULT_MOBILESAM_RKNN_ENCODER),
     onnx_encoder_path: str = str(DEFAULT_MOBILESAM_ONNX_ENCODER),
     onnx_decoder_path: str = str(DEFAULT_MOBILESAM_ONNX_DECODER),
 ):
-    """
-    Unified loader for MobileSAM supporting RKNN, ONNX, and PyTorch backends.
-    """
+    """统一加载器：按后端优先级实例化 MobileSAM 底层预测器。"""
     device = resolve_device(device)
     onnx_enc, onnx_dec = Path(onnx_encoder_path), Path(onnx_decoder_path)
     onnx_ready = _model_ready(onnx_enc) and _model_ready(onnx_dec)
-    # RKNN / ONNX 都不可用时的最终归宿（torch 未安装时就是 cpu，走不到 PyTorch 分支）
     torch_dev = _torch_device() or "cpu"
 
     logger.info("=" * 66)
@@ -439,53 +404,31 @@ def load_mobilesam(
         rknn_path = Path(rknn_encoder_path)
         if not rknn_path.exists():
             logger.warning(
-                f"[MobileSAM] RKNN encoder model not found at {rknn_path.resolve()}, "
-                f"falling back to ONNX/PyTorch."
+                f"[MobileSAM] RKNN encoder model not found at {rknn_path.resolve()}, falling back to ONNX/PyTorch."
             )
             device = "onnx" if onnx_ready else torch_dev
         elif not _model_ready(rknn_path):
             logger.warning(
-                f"[MobileSAM] RKNN encoder model at {rknn_path.resolve()} is an un-pulled Git LFS pointer "
-                f"({rknn_path.stat().st_size} bytes). Run 'git lfs pull' to download actual model weight. "
-                f"Falling back to ONNX/PyTorch."
+                f"[MobileSAM] RKNN encoder model at {rknn_path.resolve()} is an un-pulled Git LFS pointer. Falling back."
             )
             device = "onnx" if onnx_ready else torch_dev
         else:
             try:
-                has_onnx_dec = _model_ready(onnx_dec)
-                ckpt_p = Path(checkpoint)
-                if has_onnx_dec:
-                    dec_desc = f"{onnx_dec.name} ({_size_mb(onnx_dec)}, ONNX - Zero PyTorch)"
-                else:
-                    dec_desc = f"{ckpt_p.name} (PyTorch)"
-
-                logger.info(f"[MobileSAM] Loading RKNN Backend (Rockchip RK3588 NPU):")
+                logger.info(f"[MobileSAM] Loading RKNN (NPU) Backend:")
                 logger.info(f"[MobileSAM]   * Encoder (.rknn): {rknn_path.resolve()} ({_size_mb(rknn_path)})")
-                logger.info(f"[MobileSAM]   * Decoder:        {dec_desc}")
                 predictor = RKNNMobileSAMPredictor(
                     rknn_encoder_path=str(rknn_path),
-                    checkpoint=checkpoint if not has_onnx_dec else None,
-                    onnx_decoder_path=str(onnx_dec) if has_onnx_dec else None,
+                    checkpoint=checkpoint,
+                    onnx_decoder_path=onnx_decoder_path,
                 )
             except Exception as e:
-                logger.warning(
-                    f"[MobileSAM] RKNN MobileSAM backend not available: {e}. Falling back to ONNX/PyTorch."
-                )
-                logger.debug("[MobileSAM] RKNN initialization error details:", exc_info=True)
+                logger.warning(f"[MobileSAM] RKNN NPU backend failed: {e}. Falling back to ONNX/PyTorch.")
                 device = "onnx" if onnx_ready else torch_dev
 
-    # 2. ONNX Runtime path (Fast, lightweight inference on non-RK platforms)
-    if device == "onnx":
-        if not (onnx_enc.exists() and onnx_dec.exists()):
-            logger.warning(
-                f"[MobileSAM] ONNX models not found ({onnx_enc.name}, {onnx_dec.name}), falling back to PyTorch."
-            )
-            device = torch_dev
-        elif not onnx_ready:
-            logger.warning(
-                f"[MobileSAM] ONNX models at {onnx_enc.name}/{onnx_dec.name} are un-pulled Git LFS pointers. "
-                f"Falling back to PyTorch."
-            )
+    # 2. ONNX path
+    if predictor is None and device == "onnx":
+        if not onnx_ready:
+            logger.warning("[MobileSAM] ONNX models not ready; falling back to PyTorch.")
             device = torch_dev
         else:
             try:
@@ -497,18 +440,13 @@ def load_mobilesam(
                     decoder_path=str(onnx_dec),
                 )
             except Exception as e:
-                logger.warning(
-                    f"[MobileSAM] ONNX MobileSAM backend not available: {e}. Falling back to PyTorch."
-                )
-                logger.debug("[MobileSAM] ONNX initialization error details:", exc_info=True)
+                logger.warning(f"[MobileSAM] ONNX backend not available: {e}. Falling back to PyTorch.")
                 device = torch_dev
 
-    # 3. PyTorch path (CUDA / MPS / CPU fallback)
+    # 3. PyTorch path
     if predictor is None:
         if not HAS_TORCH:
-            logger.error(
-                "[MobileSAM] No usable RKNN/ONNX model and PyTorch is not installed; MobileSAM is disabled."
-            )
+            logger.error("[MobileSAM] No usable RKNN/ONNX model and PyTorch is not installed; MobileSAM disabled.")
             logger.info("=" * 66)
             return None
 
@@ -541,31 +479,67 @@ def load_mobilesam(
     return predictor
 
 
+class MobileSAMSegmenter:
+    """MobileSAM 交互分割核心类。
 
-class MobileSAMSession:
-    """一张已编码图像及其点选会话。predictor 同时只能持有一张图的 embedding，
-    所以一个 predictor 只能对应一个活跃会话（切换模板必须重新 set_image）。"""
+    封装底层推理 Predictor 及当前已编码图像的特征 (Embedding)。
+    支持点提示（前景=1, 背景=0）与框提示（box [x1, y1, x2, y2]）。
+    """
 
-    def __init__(self, predictor):
-        self.predictor = predictor
-        self.image_bgr = None
+    def __init__(self, predictor=None, device: Optional[str] = None):
+        """
+        :param predictor: 已构造的底层 Predictor 对象；若为 None 则通过 load_mobilesam 自动加载
+        :param device: 目标推理后端（可选）
+        """
+        if predictor is not None:
+            self.predictor = predictor
+        else:
+            self.predictor = load_mobilesam(device=device)
+        self.image_bgr: Optional[np.ndarray] = None
 
-    def set_image(self, image_bgr: np.ndarray):
+    @property
+    def available(self) -> bool:
+        """底层模型是否可用。"""
+        return self.predictor is not None
+
+    @property
+    def backend_desc(self) -> str:
+        """底层后端描述。"""
+        if not self.predictor:
+            return "disabled"
+        return getattr(self.predictor, "backend_desc", type(self.predictor).__name__)
+
+    @property
+    def is_image_set(self) -> bool:
+        """当前是否已载入图像并完成 Embedding 编码。"""
+        if not self.predictor:
+            return False
+        return bool(getattr(self.predictor, "is_image_set", False))
+
+    def set_image(self, image_bgr: np.ndarray) -> None:
+        """传入 BGR 图像，完成长边等比对齐与 NPU/GPU/CPU 特征提取。"""
         self.image_bgr = image_bgr
         if self.predictor:
             self.predictor.set_image(cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB))
 
+    def reset_image(self) -> None:
+        """清空当前缓存图像与 Embedding。"""
+        self.image_bgr = None
+        if self.predictor:
+            self.predictor.reset_image()
+
     def predict(
         self,
-        points: list[tuple[int, int]],
-        labels: list[int],
+        points: Sequence[Tuple[int, int]],
+        labels: Sequence[int],
         box: Optional[Sequence[float]] = None,
-    ) -> tuple[np.ndarray | None, float]:
-        """点提示 + 可选 box 提示，返回 (mask, score)；无任何提示时返回 (None, 0.0)。
+    ) -> Tuple[Optional[np.ndarray], float]:
+        """执行掩码预测。
 
-        box 按 SAM 约定展开成左上/右下两个角点 + labels [2, 3]，和点提示合成同一份
-        输入：ONNX 图（_embed_points 里 label 2/3 → 对应的 corner embedding）与
-        PyTorch 回退路径拿到的提示完全一致，跨平台不会分叉。
+        :param points: [(x, y), ...] 点坐标列表
+        :param labels: [1, 0, ...] 点标签列表（1 为前景点，0 为背景点）
+        :param box: 可选的目标框 (x1, y1, x2, y2)
+        :return: (boolean_mask [H, W], iou_score)；无有效提示或模型不可用时返回 (None, 0.0)
         """
         if not self.predictor or (not points and box is None):
             return None, 0.0
@@ -579,8 +553,6 @@ class MobileSAMSession:
             coords += [(min(x1, x2), min(y1, y2)), (max(x1, x2), max(y1, y2))]
             lbls += [2, 3]
 
-        # 单点提示在输入上是歧义的，SAM 建议在三个粒度候选里取最优；一旦有了 box 或
-        # 补充点（尤其背景点）就改用稳定单 mask，否则 mask 会在不同粒度之间跳变。
         multimask = box is None and len(coords) == 1
 
         masks, scores, _ = self.predictor.predict(

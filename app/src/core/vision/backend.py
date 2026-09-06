@@ -1,8 +1,7 @@
 """跨平台推理后端（RK3588 NPU / ONNX Runtime / PyTorch）的公共底座。
 
 凡是"这台机器该用哪个后端""NPU 运行时怎么起来"的判断都只在这里实现一次，
-MobileSAM（image2d/mobilesam_session.py）与 Wissight 检测器
-（image2d/wissight_detector.py）共用，避免各写一份、行为漂移。
+MobileSAM（segmenter.py）与 Wissight 检测器（detector.py）共用，避免各写一份、行为漂移。
 """
 import logging
 import os

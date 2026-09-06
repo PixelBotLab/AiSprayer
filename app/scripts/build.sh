@@ -138,7 +138,16 @@ build_motion() {
     local src="${PROJECT_ROOT}/app/src/core/motion"
     cmake -S "${src}" -B "${src}/build" -DCMAKE_BUILD_TYPE=RelWithDebInfo
     cmake --build "${src}/build" --parallel "${JOBS}"
-    echo "motion: ${src}/build/motion_cli  ${src}/build/libmotion_c.*"
+    # cli_client.py / kinematics.py / install.sh 的查找顺序都是 bin/ 优先于 build/，
+    # 只留在 build/ 会让旧的 bin/motion_cli 静默遮蔽新构建（改完代码跑出来还是旧行为）。
+    # 这里把新产物同步发布到 bin/；bin/ 已在 .gitignore 中，不会污染仓库。
+    mkdir -p "${src}/bin"
+    cp -f "${src}/build/motion_cli" "${src}/bin/motion_cli"
+    local lib
+    for lib in "${src}"/build/libmotion_c.*; do
+        if [[ -e "${lib}" ]]; then cp -f "${lib}" "${src}/bin/"; fi
+    done
+    echo "motion: ${src}/build/motion_cli → ${src}/bin/motion_cli  ${src}/build/libmotion_c.*"
 }
 
 build_follow() {
