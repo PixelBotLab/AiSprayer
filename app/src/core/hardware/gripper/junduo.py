@@ -7,13 +7,20 @@ import threading
 from enum import Enum
 from typing import Tuple, Optional
 
-# 路径设置：确保直接运行时能找到 aisprayer 包
+# 路径设置：确保直接运行时能找到核心包
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
-if os.path.join(PROJECT_ROOT, "src") not in sys.path:
-    sys.path.insert(0, os.path.join(PROJECT_ROOT, "src"))
+for p in [os.path.join(PROJECT_ROOT, "app/src"), os.path.join(PROJECT_ROOT, "src")]:
+    if p not in sys.path:
+        sys.path.insert(0, p)
 
 # 导入越疆 V3 API 中的 Dashboard 类
-from aisprayer.core.hardware.robot.dobot_api import DobotApiDashboard
+try:
+    from ..robot.dobot_api import DobotApiDashboard
+except (ImportError, ValueError):
+    try:
+        from core.hardware.robot.dobot_api import DobotApiDashboard
+    except ImportError:
+        from aisprayer.core.hardware.robot.dobot_api import DobotApiDashboard
 
 # 模块级日志器（不在模块层调用 basicConfig，避免覆盖主应用的日志配置）
 logger = logging.getLogger(__name__)
@@ -52,10 +59,44 @@ class JunduoGripper:
 
     # 越疆 CR 控制器 RTU 透传端口 (固定 60000)
     RTU_TRANSPARENT_PORT = 60000
-    # EPG50-060 全行程开合时间 (最大速度下)
-    FULL_STROKE_TIME = 0.65
-    # EPG50-060 单侧最大夹持力 (N)
-    MAX_FORCE_N = 60.0
+
+    # -------------------------------------------------------------
+    # 硬件规格参数 (Hardware Specifications) - 单一真实源
+    # -------------------------------------------------------------
+    MODEL = "EPG50-060"
+    TOTAL_STROKE_MM = 50.0            # 夹爪最大开度/总有效行程 (mm)
+    SINGLE_FINGER_STROKE_MM = 25.0    # 单侧手指对称滑动行程 (mm)
+    MIN_STROKE_MM = 0.0               # 完全闭合行程 (mm)
+    MAX_STROKE_MM = 50.0              # 完全张开行程 (mm)
+    DEFAULT_STROKE_MM = 0.0           # 默认初始处于闭合状态 (mm)
+    
+    MAX_FORCE_N = 60.0                # 单侧最大持续保持夹持力 (N)
+    MIN_FORCE_N = 0.0                 # 最小夹持力 (N)
+    DEFAULT_FORCE_PERCENT = 50        # 默认推荐夹持力百分比 (1-100%)
+    
+    DEFAULT_SPEED_PERCENT = 50        # 默认推荐开合速度百分比 (1-100%)
+    OPEN_SPEED_PERCENT = 80           # 张开快速动作推荐速度百分比 (1-100%)
+    CLAMP_SPEED_PERCENT = 50          # 夹持动作推荐速度百分比 (1-100%)
+    FULL_STROKE_TIME = 0.65           # 全行程开合时间 (s, 最大速度下)
+
+    @classmethod
+    def get_specs(cls) -> dict:
+        """获取夹爪硬件规格与配置参数字典 (供上层服务与前端 UI 读取)"""
+        return {
+            "model": cls.MODEL,
+            "total_stroke_mm": cls.TOTAL_STROKE_MM,
+            "single_finger_stroke_mm": cls.SINGLE_FINGER_STROKE_MM,
+            "min_stroke_mm": cls.MIN_STROKE_MM,
+            "max_stroke_mm": cls.MAX_STROKE_MM,
+            "default_stroke_mm": cls.DEFAULT_STROKE_MM,
+            "max_force_n": cls.MAX_FORCE_N,
+            "min_force_n": cls.MIN_FORCE_N,
+            "default_force_percent": cls.DEFAULT_FORCE_PERCENT,
+            "default_speed_percent": cls.DEFAULT_SPEED_PERCENT,
+            "open_speed_percent": cls.OPEN_SPEED_PERCENT,
+            "clamp_speed_percent": cls.CLAMP_SPEED_PERCENT,
+            "full_stroke_time_s": cls.FULL_STROKE_TIME,
+        }
 
     def __init__(self, dashboard: DobotApiDashboard, slave_id: int = 9):
         """
@@ -70,6 +111,9 @@ class JunduoGripper:
         self._heartbeat_thread: Optional[threading.Thread] = None
         self._heartbeat_stop = threading.Event()
         self.last_state: GripperState = GripperState.UNKNOWN
+        self.last_position_mm: float = self.DEFAULT_STROKE_MM  # 默认初始处于闭合状态 (0.0 mm)
+        self.last_force_n: float = 0.0       # 实时检测到的保持力 (N)
+        self._io_lock = threading.Lock()     # 保护 Modbus RTU 读写防并发冲突
 
     def connect(self) -> bool:
         """
@@ -84,9 +128,10 @@ class JunduoGripper:
         """
         logger.info(f"正在建立 Modbus RTU 连接 (从站号={self.slave_id}, 端口={self.RTU_TRANSPARENT_PORT})...")
         try:
-            res = self.dashboard.ModbusCreate(
-                "127.0.0.1", self.RTU_TRANSPARENT_PORT, self.slave_id, 1
-            )
+            with self._io_lock:
+                res = self.dashboard.ModbusCreate(
+                    "127.0.0.1", self.RTU_TRANSPARENT_PORT, self.slave_id, 1
+                )
             # 返回格式: "0,{index},ModbusCreate(...)"  或  "-1,{},ModbusCreate(...)"
             if res and res.startswith("0"):
                 # 解析返回的设备索引
@@ -108,17 +153,24 @@ class JunduoGripper:
         self.stop_heartbeat()
         if self.device_index >= 0:
             try:
-                self.dashboard.ModbusClose(self.device_index)
+                with self._io_lock:
+                    self.dashboard.ModbusClose(self.device_index)
                 logger.info(f"已断开 Modbus RTU 连接 (索引={self.device_index})")
             except Exception as e:
                 logger.warning(f"ModbusClose 异常: {e}")
             self.device_index = -1
 
-    def start_heartbeat(self, interval: float = 0.5):
+    def start_heartbeat(self, idle_interval: float = 0.25, moving_interval: float = 0.03, interval: Optional[float] = None):
         """
-        启动后台心跳线程，定期读取状态寄存器保持 Modbus 通信活跃。
-        官方脚本每 10ms 轮询一次，我们用 500ms 已足够维持通信。
+        自适应心跳与状态轮询线程：
+        - 运动中 (MOVING)：采用 30ms (~33Hz) 极速轮询，提供平滑轨迹采样；
+        - 静止时 (IDLE/ARRIVED/CLAMPED)：自动回退至 250ms 低频保活，避免总线拥堵。
+        :param idle_interval: 静止状态下的心跳保活间隔 (s)，默认 0.25s
+        :param moving_interval: 运动状态下的高频采样间隔 (s)，默认 0.03s (30ms)
+        :param interval: 兼容旧接口传参
         """
+        if interval is not None:
+            idle_interval = interval
         if self._heartbeat_thread and self._heartbeat_thread.is_alive():
             return
         self._heartbeat_stop.clear()
@@ -126,14 +178,16 @@ class JunduoGripper:
         def _poll():
             while not self._heartbeat_stop.is_set():
                 if self.device_index >= 0:
-                    state = self.get_state()
-                    self.last_state = state
-                    logger.debug(f"夹爪状态: {state.name}")
-                self._heartbeat_stop.wait(interval)
+                    state, pos, force = self.update_telemetry()
+                    logger.debug(f"夹爪状态: {state.name}, 位置: {pos}mm, 保持力: {force}N")
+                    curr_interval = moving_interval if state == GripperState.MOVING else idle_interval
+                else:
+                    curr_interval = idle_interval
+                self._heartbeat_stop.wait(curr_interval)
 
         self._heartbeat_thread = threading.Thread(target=_poll, daemon=True, name="gripper-heartbeat")
         self._heartbeat_thread.start()
-        logger.debug("夹爪心跳线程已启动")
+        logger.debug("夹爪自适应高频心跳线程已启动")
 
     def stop_heartbeat(self):
         """停止心跳线程"""
@@ -149,8 +203,9 @@ class JunduoGripper:
             return False
         val_str = "{" + ",".join(map(str, values)) + "}"
         try:
-            # 第一个参数是 ModbusCreate 返回的设备索引 (0-4)，不是从站号！
-            res = self.dashboard.SetHoldRegs(self.device_index, start_addr, count, val_str, "U16")
+            with self._io_lock:
+                # 第一个参数是 ModbusCreate 返回的设备索引 (0-4)，不是从站号！
+                res = self.dashboard.SetHoldRegs(self.device_index, start_addr, count, val_str, "U16")
             # 越疆返回 0 代表下发成功，格式通常为: "0,{},SetHoldRegs(...)"
             if res and res.startswith("0"):
                 return True
@@ -165,7 +220,8 @@ class JunduoGripper:
         if self.device_index < 0:
             return -1
         try:
-            res = self.dashboard.GetHoldRegs(self.device_index, addr, 1, "U16")
+            with self._io_lock:
+                res = self.dashboard.GetHoldRegs(self.device_index, addr, 1, "U16")
             # 返回格式: "0,{val},GetHoldRegs(...)"
             if res and res.startswith("0"):
                 parts = res.split("{")
@@ -178,6 +234,59 @@ class JunduoGripper:
             logger.warning(f"GetHoldRegs(0x{addr:04X}) 异常: {e}")
         return -1
 
+    def _read_regs(self, addr: int, count: int) -> list:
+        """底层批量读取封装：读取连续保持寄存器 (单包 Modbus 批量查询)"""
+        if self.device_index < 0:
+            return []
+        try:
+            with self._io_lock:
+                res = self.dashboard.GetHoldRegs(self.device_index, addr, count, "U16")
+            if res and res.startswith("0"):
+                parts = res.split("{")
+                if len(parts) > 1:
+                    raw_str = parts[1].split("}")[0].strip()
+                    if raw_str:
+                        return [int(v.strip()) for v in raw_str.split(",") if v.strip()]
+            else:
+                logger.debug(f"GetHoldRegs(0x{addr:04X}, count={count}) 返回: {res}")
+        except Exception as e:
+            logger.warning(f"GetHoldRegs(0x{addr:04X}, count={count}) 异常: {e}")
+        return []
+
+    def update_telemetry(self) -> Tuple[GripperState, float, float]:
+        """
+        单包合并读取状态(0x07D0)、位置(0x07D1)、保持力(0x07D2)连续 3 个寄存器，
+        大幅削减 Modbus 通信往返与网络开销。
+        """
+        regs = self._read_regs(self.REG_STATUS, 3)
+        if len(regs) >= 3:
+            # 1. 状态解析 (0x07D0)
+            raw_status = regs[0]
+            if not (raw_status & 0x0080):
+                state = GripperState.MOVING
+            elif raw_status & 0x0040:
+                state = GripperState.ARRIVED
+            else:
+                state = GripperState.CLAMPED
+            self.last_state = state
+
+            # 2. 位置解析 (0x07D1 高 8 位: 0=全开 50mm, 255=全闭 0mm)
+            pos_raw = (regs[1] >> 8) & 0xFF
+            stroke_mm = round((255 - pos_raw) * (self.TOTAL_STROKE_MM / 255.0), 1)
+            self.last_position_mm = stroke_mm
+
+            # 3. 保持力解析 (0x07D2 高 8 位)
+            force_raw = (regs[2] >> 8) & 0xFF
+            force_n = round(force_raw * self.MAX_FORCE_N / 255.0, 1)
+            self.last_force_n = force_n
+
+            return state, stroke_mm, force_n
+
+        # 回退单寄存器读取逻辑
+        state = self.get_state()
+        pos = self.get_position()
+        force = self.get_hold_force()
+        return state, pos, force
     def init_gripper(self, timeout: float = 5.0) -> bool:
         """
         夹爪初始化 / 上电回零 (动作前必须调用一次)
@@ -260,6 +369,9 @@ class JunduoGripper:
         # Step 3: 写控制字 0x0009 到 0x03E8 触发运动
         if not self._write_regs(self.REG_CTRL, 1, [self.CMD_MOVE]):
             return False, GripperState.FAULT
+
+        # 立即更新状态为 MOVING，触发后台自适应心跳轮询瞬间切入 30ms 极速采样模式
+        self.last_state = GripperState.MOVING
 
         # 如果无需阻塞等待，下发完成后直接返回
         if not wait_complete:
@@ -344,6 +456,57 @@ class JunduoGripper:
             return GripperState.ARRIVED
         else:  # bit6=0: 被物体阻挡停止
             return GripperState.CLAMPED
+
+    def get_position(self) -> float:
+        """
+        获取当前夹爪实时张开行程 (0.0 ~ 50.0 mm)
+        读取 0x07D1 寄存器高 8 位 (0-255)
+        0 = 完全张开 (50.0mm), 255 = 完全闭合 (0.0mm)
+        """
+        raw = self._read_reg(self.REG_POS_FAULT)
+        if raw < 0:
+            return self.last_position_mm
+        pos_raw = (raw >> 8) & 0xFF
+        stroke_mm = round((255 - pos_raw) * (self.TOTAL_STROKE_MM / 255.0), 1)
+        self.last_position_mm = stroke_mm
+        return stroke_mm
+
+    def get_hold_force(self) -> float:
+        """获取当前夹持力 (0.0 ~ 60.0 N)"""
+        sf = self._read_reg(0x07D2)
+        if sf < 0:
+            return self.last_force_n
+        hold_force_raw = (sf >> 8) & 0xFF
+        force_n = round(hold_force_raw * self.MAX_FORCE_N / 255.0, 1)
+        self.last_force_n = force_n
+        return force_n
+
+    def move_stroke(self, stroke_mm: float, force_percent: Optional[int] = None, speed: Optional[int] = None, wait_complete: bool = False, timeout: float = 3.0) -> Tuple[bool, GripperState]:
+        """
+        按物理行程控制夹爪开合
+        :param stroke_mm: 目标开度 (MIN_STROKE_MM ~ TOTAL_STROKE_MM)
+        :param force_percent: 夹持力比例 1~100 (%)，默认使用 DEFAULT_FORCE_PERCENT
+        :param speed: 运动速度 1~100 (%)，默认使用 DEFAULT_SPEED_PERCENT
+        :param wait_complete: 是否等待到位
+        :param timeout: 超时时间 (s)
+        :return: (是否成功, 最终状态)
+        """
+        fp = self.DEFAULT_FORCE_PERCENT if force_percent is None else max(1, min(100, int(force_percent)))
+        sp = self.DEFAULT_SPEED_PERCENT if speed is None else max(1, min(100, int(speed)))
+        stroke = max(self.MIN_STROKE_MM, min(self.TOTAL_STROKE_MM, float(stroke_mm)))
+        pos_1000 = int(round((stroke / self.TOTAL_STROKE_MM) * 1000))
+        return self.move(position=pos_1000, force_percent=fp, speed=sp, wait_complete=wait_complete, timeout=timeout)
+
+    def get_status_dict(self) -> dict:
+        """获取夹爪完整状态字典"""
+        return {
+            "connected": self.device_index >= 0,
+            "initialized": self.is_initialized,
+            "state": self.last_state.name,
+            "position_mm": self.last_position_mm,
+            "force_n": self.last_force_n,
+            "specs": self.get_specs(),
+        }
 
 
 # ==========================================

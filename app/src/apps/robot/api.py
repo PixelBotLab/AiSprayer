@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import sys
+from typing import Optional
 
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 
@@ -11,7 +12,7 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "app/src"))
 
 from apps.robot.models import (
-    ConnectRobotReq, GlobalSpeedReq, HomeReq, JogContinuousReq, JogReq,
+    ConnectRobotReq, GlobalSpeedReq, GripperActionReq, GripperMoveReq, HomeReq, JogContinuousReq, JogReq,
     SetDoReq, SpeedReq,
 )
 from apps.robot.services.robot_service import robot_service
@@ -159,6 +160,58 @@ def robot_set_do(req: SetDoReq):
     if not success:
         raise HTTPException(status_code=400, detail=msg)
     return {"status": "ok", "index": eff_index, "do_status": req.status, "immediate": req.immediate}
+
+
+# ---------------------------------------------------------------------------
+# Junduo Gripper Endpoints (0.0mm Closed ~ 50.0mm Fully Open)
+# ---------------------------------------------------------------------------
+
+@robot_router.post("/gripper/move")
+def move_gripper(req: GripperMoveReq):
+    """Set gripper stroke position (0.0mm Closed ~ 50.0mm Fully Open)"""
+    success, msg = robot_service.move_gripper(
+        stroke_mm=req.stroke_mm,
+        force_percent=req.force_percent,
+        speed=req.speed,
+        wait_complete=req.wait_complete
+    )
+    if not success:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"status": "ok", "stroke_mm": req.stroke_mm}
+
+
+@robot_router.post("/gripper/open")
+def open_gripper(req: Optional[GripperActionReq] = None):
+    """Fully open gripper with optional custom force/speed"""
+    fp = req.force_percent if req else None
+    sp = req.speed if req else None
+    success, msg = robot_service.open_gripper(force_percent=fp, speed=sp)
+    if not success:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"status": "ok"}
+
+
+@robot_router.post("/gripper/clamp")
+def clamp_gripper(req: Optional[GripperActionReq] = None):
+    """Close/clamp gripper with optional custom force/speed"""
+    fp = req.force_percent if req else None
+    sp = req.speed if req else None
+    success, msg = robot_service.clamp_gripper(force_percent=fp, speed=sp)
+    if not success:
+        raise HTTPException(status_code=400, detail=msg)
+    return {"status": "ok"}
+
+
+@robot_router.get("/gripper/state")
+def get_gripper_state():
+    """Query current gripper telemetry and connection status"""
+    return robot_service.get_gripper_state()
+
+
+@robot_router.get("/gripper/specs")
+def get_gripper_specs():
+    """Query gripper hardware specifications (single source of truth from JunduoGripper)"""
+    return robot_service.get_gripper_specs()
 
 
 @robot_router.websocket("/ws")

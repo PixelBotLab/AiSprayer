@@ -26,6 +26,13 @@ interface RobotState {
   r_velocity_ratio?: number;
   digital_outputs?: number[];
   digital_output_bits?: number;
+  gripper?: {
+    connected?: boolean;
+    position_mm?: number;
+    state?: string;
+    force_n?: number;
+    specs?: any;
+  };
 }
 
 interface WorkspaceViewProps {

@@ -22,6 +22,13 @@ interface RobotState {
   r_velocity_ratio?: number;   // 1020 笛卡尔姿态速度比例 (%)
   digital_outputs?: number[];  // 16路数字输出状态 [DO1..DO16] (0或1)
   digital_output_bits?: number;// 64位数字输出端子状态位掩码
+  gripper?: {
+    connected?: boolean;
+    position_mm?: number;
+    state?: string;
+    force_n?: number;
+    specs?: any;
+  };
 }
 
 interface RobotZoneProps {
@@ -103,6 +110,7 @@ const RobotZone: React.FC<RobotZoneProps> = ({
       <div className="flex-1 min-h-0 bg-slate-900/80 rounded-xl border border-slate-800 shadow-lg flex flex-col shrink-0 p-1 relative overflow-hidden">
         <Robot3DViewer
           jointAngles={robotState.joint}
+          gripperStroke={robotState.gripper?.position_mm}
           activeTemplate={activeTemplate}
           meshVersion={meshVersion}
           pathsVersion={pathsVersion}

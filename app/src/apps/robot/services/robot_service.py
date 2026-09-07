@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "app/src"))
 from core.config import SprayerConfig
 from core.hardware.robot.base_driver import BaseRobotDriver, RobotPose, is_spraying_on
 from core.hardware.robot.factory import get_robot
+from core.hardware.gripper.junduo import JunduoGripper
 
 logger = logging.getLogger(__name__)
 
@@ -29,8 +30,11 @@ class RobotService:
         self._driver: Optional[BaseRobotDriver] = None
         self._is_connected = False
         self._polling_thread = None
-        self._stop_polling = False
         self._ws_callbacks: List[Callable] = []
+
+        # 夹爪硬件管理 (钧舵 EPG50-060, 参数自 JunduoGripper 读取)
+        self._gripper: Optional[JunduoGripper] = None
+        self._gripper_position_mm: float = JunduoGripper.DEFAULT_STROKE_MM  # 默认闭合 0.0mm
 
         # 从统一配置文件读取速度与限位参数
         self._global_speed_factor: int = self._config.global_speed_factor
@@ -123,6 +127,22 @@ class RobotService:
                 except Exception as e:
                     logger.warning(f"Failed to set initial speed/tool after connect: {e}")
 
+                # 尝试初始化挂载在 Dobot 末端的钧舵电动夹爪
+                try:
+                    if hasattr(self._driver, "dashboard") and self._driver.dashboard:
+                        from core.hardware.gripper.junduo import JunduoGripper
+                        self._gripper = JunduoGripper(dashboard=self._driver.dashboard, slave_id=9)
+                        def _init_gripper_bg():
+                            try:
+                                if self._gripper.init_gripper(timeout=3.0):
+                                    self._gripper.start_heartbeat(idle_interval=0.10, moving_interval=0.03)
+                                    logger.info("Junduo gripper initialized and adaptive high-frequency heartbeat started")
+                            except Exception as ge:
+                                logger.warning(f"Junduo gripper initialization warning: {ge}")
+                        threading.Thread(target=_init_gripper_bg, daemon=True, name="gripper-init").start()
+                except Exception as e:
+                    logger.warning(f"Could not load Junduo gripper: {e}")
+
                 return True, ""
             else:
                 msg = f"Failed to initialize or start robot driver for {robot_type} at {ip}:{port}."
@@ -141,6 +161,12 @@ class RobotService:
         logger.info("Disconnecting robot...")
         try:
             self.stop_status_polling()
+            if self._gripper:
+                try:
+                    self._gripper.disconnect()
+                except Exception:
+                    pass
+                self._gripper = None
             if self._driver and self._is_connected:
                 self._driver.shutdown()
             self._is_connected = False
@@ -664,6 +690,13 @@ class RobotService:
                     "r_velocity_ratio": diagnostics.get("r_velocity_ratio", 0),
                     "digital_outputs": diagnostics.get("digital_outputs", [0] * 16),
                     "digital_output_bits": diagnostics.get("digital_output_bits", 0),
+                    "gripper": {
+                        "connected": bool(self._is_connected and self._gripper and self._gripper.device_index >= 0),
+                        "position_mm": self._gripper.last_position_mm if (self._is_connected and self._gripper and self._gripper.device_index >= 0) else self._gripper_position_mm,
+                        "state": self._gripper.last_state.name if (self._is_connected and self._gripper and self._gripper.device_index >= 0) else "DISCONNECTED",
+                        "force_n": self._gripper.last_force_n if (self._is_connected and self._gripper and self._gripper.device_index >= 0) else 0.0,
+                        "specs": JunduoGripper.get_specs(),
+                    },
                 }
                 for cb in self._ws_callbacks:
                     try:
@@ -708,6 +741,60 @@ class RobotService:
         if not off_ok:
             logger.warning(f"estop: 关闭喷涂 DO 失败: {off_err}")
         return success, "" if success else "Failed to estop robot"
+
+    def move_gripper(self, stroke_mm: float, force_percent: Optional[int] = None, speed: Optional[int] = None, wait_complete: bool = False) -> tuple[bool, str]:
+        """
+        设置夹爪目标张开行程 (根据硬件 specs 自动校验区间)
+        严格互锁检查：若机械臂未连接或夹爪未连接，拒绝下发并返回错误提示
+        """
+        if not self._is_connected:
+            return False, "Robot is disconnected. Please connect the robot before operating the gripper."
+        if not self._gripper or self._gripper.device_index < 0:
+            return False, "Gripper is disconnected."
+
+        specs = JunduoGripper.get_specs()
+        fp = force_percent if force_percent is not None else specs["default_force_percent"]
+        sp = speed if speed is not None else specs["default_speed_percent"]
+        stroke = max(specs["min_stroke_mm"], min(specs["max_stroke_mm"], float(stroke_mm)))
+
+        ok, state = self._gripper.move_stroke(
+            stroke, force_percent=fp, speed=sp, wait_complete=wait_complete
+        )
+        if not ok:
+            return False, f"Gripper motion failed: {state.name}"
+        self._gripper_position_mm = self._gripper.last_position_mm
+        return True, ""
+
+    def open_gripper(self, force_percent: Optional[int] = None, speed: Optional[int] = None) -> tuple[bool, str]:
+        """完全张开夹爪 (根据硬件 specs)"""
+        specs = JunduoGripper.get_specs()
+        sp = speed if speed is not None else specs["open_speed_percent"]
+        return self.move_gripper(specs["max_stroke_mm"], force_percent=force_percent, speed=sp)
+
+    def clamp_gripper(self, force_percent: Optional[int] = None, speed: Optional[int] = None) -> tuple[bool, str]:
+        """闭合/夹持 (根据硬件 specs)"""
+        specs = JunduoGripper.get_specs()
+        fp = force_percent if force_percent is not None else specs["default_force_percent"]
+        sp = speed if speed is not None else specs["clamp_speed_percent"]
+        return self.move_gripper(specs["min_stroke_mm"], force_percent=fp, speed=sp)
+
+    def get_gripper_state(self) -> dict:
+        """获取当前夹爪状态与硬件规格"""
+        specs = JunduoGripper.get_specs()
+        if self._is_connected and self._gripper and self._gripper.device_index >= 0:
+            return self._gripper.get_status_dict()
+        return {
+            "connected": False,
+            "initialized": False,
+            "state": "DISCONNECTED",
+            "position_mm": self._gripper_position_mm,
+            "force_n": 0.0,
+            "specs": specs,
+        }
+
+    def get_gripper_specs(self) -> dict:
+        """获取夹爪硬件规格参数 (单一真实源)"""
+        return JunduoGripper.get_specs()
 
 
 robot_service = RobotService()

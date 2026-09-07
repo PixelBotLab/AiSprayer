@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Canvas } from '@react-three/fiber';
+import { Canvas, useFrame } from '@react-three/fiber';
 import { OrbitControls, Grid } from '@react-three/drei';
 import URDFLoader from 'urdf-loader';
 import { Maximize2, Minimize2, Eye, EyeOff, Box, Grid3X3, Route } from 'lucide-react';
@@ -33,6 +33,7 @@ import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader.js';
 
 interface RobotModelProps {
   jointAngles: number[];
+  gripperStroke?: number;
   activeTemplate: string | null;
   meshVersion: number;
   pathsVersion: number;
@@ -99,9 +100,21 @@ function loadUrdfMesh(
       (dae) => {
         if (dae && dae.scene) {
           stripEmbeddedLights(dae.scene);
+          dae.scene.traverse((child: Object3D) => {
+            const mesh = child as Mesh;
+            if (mesh.isMesh) {
+              const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+              mats.forEach((m: any) => {
+                if (m) {
+                  m.side = DoubleSide;
+                  m.needsUpdate = true;
+                }
+              });
+            }
+          });
           done(dae.scene);
         } else {
-          done(new Object3D(), new Error(`Invalid DAE file: ${path}`));
+          done(new Object3D());
         }
       },
       undefined,
@@ -111,11 +124,12 @@ function loadUrdfMesh(
   }
 
   console.warn(`URDFLoader: no mesh loader for ${path}`);
-  done(new Object3D(), new Error(`Unsupported mesh type: ${path}`));
+  done(new Object3D());
 }
 
 const RobotModel: React.FC<RobotModelProps> = ({ 
   jointAngles,
+  gripperStroke = 0.0,
   activeTemplate,
   meshVersion,
   pathsVersion,
@@ -124,7 +138,7 @@ const RobotModel: React.FC<RobotModelProps> = ({
   isPathsVisible,
   pathState = 'raw',
   onMeshLoaded,
-  onPathsLoaded
+  onPathsLoaded,
 }) => {
   const effectiveState = pathState;
 
@@ -165,6 +179,11 @@ const RobotModel: React.FC<RobotModelProps> = ({
               m.needsUpdate = true;
             });
           });
+          // Initialize gripper to default closed state (stroke 0mm -> 0.025m displacement)
+          if (r.setJointValue) {
+            r.setJointValue('gripper_finger_left_joint', 0.025);
+            r.setJointValue('gripper_finger_right_joint', 0.025);
+          }
           setRobot(r);
         });
       })
@@ -177,7 +196,38 @@ const RobotModel: React.FC<RobotModelProps> = ({
     };
   }, []);
 
-  // 2. Update Joint Angles Dynamically
+  const targetStrokeRef = useRef<number>(gripperStroke ?? 0.0);
+  const currentStrokeRef = useRef<number>(gripperStroke ?? 0.0);
+
+  // Synchronize target stroke whenever prop updates
+  useEffect(() => {
+    targetStrokeRef.current = gripperStroke !== undefined ? gripperStroke : 0.0;
+  }, [gripperStroke]);
+
+  // 60fps frame-level LERP interpolation for ultra-smooth parallel gripper movement
+  useFrame((_state, delta) => {
+    if (!robot) return;
+    const r = robot as any;
+    if (!r.setJointValue) return;
+
+    const target = targetStrokeRef.current;
+    const current = currentStrokeRef.current;
+    const diff = target - current;
+
+    if (Math.abs(diff) > 0.001) {
+      // Exponential smoothing factor: settles smoothly within ~100-150ms without lagging behind
+      const factor = Math.min(1.0, Math.max(0.0, 1.0 - Math.exp(-24.0 * delta)));
+      currentStrokeRef.current += diff * factor;
+    } else {
+      currentStrokeRef.current = target;
+    }
+
+    const singleOffsetM = Math.max(0, Math.min(0.025, ((50.0 - currentStrokeRef.current) / 2.0) / 1000.0));
+    r.setJointValue('gripper_finger_left_joint', singleOffsetM);
+    r.setJointValue('gripper_finger_right_joint', singleOffsetM);
+  });
+
+  // 2. Update Robot Arm Joint Angles Dynamically
   useEffect(() => {
     if (!robot) return;
     const r = robot as any;
@@ -580,6 +630,7 @@ const RobotModel: React.FC<RobotModelProps> = ({
 
 interface Robot3DViewerProps {
   jointAngles?: number[];
+  gripperStroke?: number;
   activeTemplate?: string | null;
   meshVersion?: number;
   pathsVersion?: number;
@@ -590,6 +641,7 @@ const TOOLTIP_CLASSES = "bg-slate-950/90 backdrop-blur-md text-slate-200 text-[1
 
 const Robot3DViewer: React.FC<Robot3DViewerProps> = ({ 
   jointAngles = [0, 0, 0, 0, 0, 0],
+  gripperStroke = 0.0,
   activeTemplate = null,
   meshVersion = 0,
   pathsVersion = 0,
@@ -621,6 +673,7 @@ const Robot3DViewer: React.FC<Robot3DViewerProps> = ({
         {/* Robot Model with Base-Aligned Reconstructed Surface Mesh & 3D TCP Trajectories */}
         <RobotModel 
           jointAngles={jointAngles} 
+          gripperStroke={gripperStroke}
           activeTemplate={activeTemplate}
           meshVersion={meshVersion}
           pathsVersion={pathsVersion}

@@ -94,12 +94,12 @@
     <child link="my_tools_silver" />
   </joint>
 
-  <!-- 3. 夹爪活动部件 (夹爪手指 + 导轨滑块夹具) -> 颜色: 哑光银色 -->
-  <link name="my_tools_fingers">
+  <!-- 3. 夹爪活动部件 (可动双指滑块机构, 全行程 50mm, 单指闭合行程 25mm) -> 颜色: 哑光银色 -->
+  <link name="my_tools_finger_left">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://dobot_rviz/meshes/dobot_gazebo_sim/my_tools_fingers.stl" scale="0.001 0.001 0.001" />
+        <mesh filename="package://dobot_rviz/meshes/dobot_gazebo_sim/my_tools_finger_left.stl" scale="0.001 0.001 0.001" />
       </geometry>
       <material name="matte_silver">
         <color rgba="0.65 0.68 0.72 1.0" />
@@ -108,15 +108,43 @@
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0" />
       <geometry>
-        <mesh filename="package://dobot_rviz/meshes/dobot_gazebo_sim/my_tools_fingers.stl" scale="0.001 0.001 0.001" />
+        <mesh filename="package://dobot_rviz/meshes/dobot_gazebo_sim/my_tools_finger_left.stl" scale="0.001 0.001 0.001" />
       </geometry>
     </collision>
   </link>
 
-  <joint name="Link6_to_my_tools_fingers" type="fixed">
+  <joint name="gripper_finger_left_joint" type="prismatic">
     <origin xyz="0 0 0" rpy="0 0 -1.5708" />
     <parent link="Link6" />
-    <child link="my_tools_fingers" />
+    <child link="my_tools_finger_left" />
+    <axis xyz="0 1 0" />
+    <limit lower="0.0" upper="0.025" effort="60" velocity="0.1" />
+  </joint>
+
+  <link name="my_tools_finger_right">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://dobot_rviz/meshes/dobot_gazebo_sim/my_tools_finger_right.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+      <material name="matte_silver">
+        <color rgba="0.65 0.68 0.72 1.0" />
+      </material>
+    </visual>
+    <collision>
+      <origin xyz="0 0 0" rpy="0 0 0" />
+      <geometry>
+        <mesh filename="package://dobot_rviz/meshes/dobot_gazebo_sim/my_tools_finger_right.stl" scale="0.001 0.001 0.001" />
+      </geometry>
+    </collision>
+  </link>
+
+  <joint name="gripper_finger_right_joint" type="prismatic">
+    <origin xyz="0 0 0" rpy="0 0 -1.5708" />
+    <parent link="Link6" />
+    <child link="my_tools_finger_right" />
+    <axis xyz="0 -1 0" />
+    <limit lower="0.0" upper="0.025" effort="60" velocity="0.1" />
   </joint>
 
   <!-- 4. 激光头出光嘴部件 (激光头锥形出光嘴 / 喷嘴) -> 颜色: 金属黄铜金色 -->

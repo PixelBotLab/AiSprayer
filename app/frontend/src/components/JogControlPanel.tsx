@@ -2,6 +2,22 @@ import React, { useEffect, useState, useRef } from 'react';
 import { Cpu, Crosshair, Home, Pause, Play, AlertOctagon, Minimize2 } from 'lucide-react';
 import { API_BASE, WS_BASE } from '../config';
 
+interface GripperSpecs {
+  model?: string;
+  total_stroke_mm?: number;
+  single_finger_stroke_mm?: number;
+  min_stroke_mm?: number;
+  max_stroke_mm?: number;
+  default_stroke_mm?: number;
+  max_force_n?: number;
+  min_force_n?: number;
+  default_force_percent?: number;
+  default_speed_percent?: number;
+  open_speed_percent?: number;
+  clamp_speed_percent?: number;
+  full_stroke_time_s?: number;
+}
+
 interface RobotState {
   pose: number[];
   joint: number[];
@@ -13,6 +29,13 @@ interface RobotState {
   tool_vector_actual?: number[];
   digital_outputs?: number[];
   digital_output_bits?: number;
+  gripper?: {
+    connected?: boolean;
+    position_mm?: number;
+    state?: string;
+    force_n?: number;
+    specs?: GripperSpecs;
+  };
 }
 
 interface JogControlPanelProps {
@@ -42,16 +65,88 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
   // Track active jog button
   const [activeJog, setActiveJog] = useState<{ axis: string, dir: number } | null>(null);
 
-  const wsRef = useRef<WebSocket | null>(null);
+  // Gripper specs & state (specs sourced from JunduoGripper driver)
+  const gripperSpecs = displayState.gripper?.specs;
+  const maxStrokeMm = gripperSpecs?.total_stroke_mm ?? 50.0;
+  const maxForceN = gripperSpecs?.max_force_n ?? 60.0;
+
+  // Gripper state (defaults to closed: 0.0mm)
+  const [targetStroke, setTargetStroke] = useState<number>(0.0);
+  const [gripperSpeed, setGripperSpeed] = useState<number>(gripperSpecs?.default_speed_percent ?? 50);
+  const [gripperForce, setGripperForce] = useState<number>(gripperSpecs?.default_force_percent ?? 50);
+  const [gripperOperating, setGripperOperating] = useState<boolean>(false);
 
   const isMoving = displayState.status === 1;
   const disableMotion = !robotConnected || isMoving;
+
+  // Connection and interlock checks (strictly disable when disconnected or moving)
+  const isGripperConnected = !!(displayState.gripper?.connected && robotConnected);
+  const disableGripper = !isGripperConnected || isMoving || gripperOperating;
+
+  const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
     if (!isMoving) {
       setActiveAction(null);
     }
   }, [isMoving]);
+
+  // Synchronize targetStroke with backend reported position when not dragging
+  useEffect(() => {
+    if (displayState.gripper?.position_mm !== undefined && !gripperOperating) {
+      setTargetStroke(displayState.gripper.position_mm);
+    }
+  }, [displayState.gripper?.position_mm, gripperOperating]);
+
+  const handleGripperMove = async (stroke: number) => {
+    if (!isGripperConnected) return;
+    setGripperOperating(true);
+    try {
+      await fetch(`${API_BASE}/api/robot/gripper/move`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stroke_mm: stroke, force_percent: gripperForce, speed: gripperSpeed })
+      });
+    } catch (err) {
+      console.error('Failed to move gripper:', err);
+    } finally {
+      setTimeout(() => setGripperOperating(false), 300);
+    }
+  };
+
+  const handleGripperOpen = async () => {
+    if (!isGripperConnected) return;
+    setTargetStroke(maxStrokeMm);
+    setGripperOperating(true);
+    try {
+      await fetch(`${API_BASE}/api/robot/gripper/open`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force_percent: gripperForce, speed: gripperSpeed })
+      });
+    } catch (err) {
+      console.error('Failed to open gripper:', err);
+    } finally {
+      setTimeout(() => setGripperOperating(false), 300);
+    }
+  };
+
+  const handleGripperClamp = async () => {
+    if (!isGripperConnected) return;
+    setTargetStroke(0.0);
+    setGripperOperating(true);
+    try {
+      await fetch(`${API_BASE}/api/robot/gripper/clamp`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force_percent: gripperForce, speed: gripperSpeed })
+      });
+    } catch (err) {
+      console.error('Failed to clamp gripper:', err);
+    } finally {
+      setTimeout(() => setGripperOperating(false), 300);
+    }
+  };
 
   useEffect(() => {
     fetchSpeed();
@@ -570,6 +665,134 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
         {/* Joint (Right) */}
         <div className="flex flex-col gap-1.5 flex-1">
           {jointAxes.map((axis, idx) => renderAxisRow(axis, idx, true))}
+        </div>
+      </div>
+
+      {/* Gripper Control Widget (钧舵 EPG50-060 / 50mm Parallel Gripper) */}
+      <div className={`bg-slate-950/80 border rounded-lg p-2 flex flex-col gap-2 mt-1 transition-all ${
+        isGripperConnected ? 'border-slate-800' : 'border-slate-800/60 opacity-60'
+      }`}>
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] font-bold tracking-wide text-slate-300">PARALLEL GRIPPER</span>
+            {gripperSpecs?.model && (
+              <span className="text-[8px] px-1 py-0.2 rounded font-mono bg-slate-900 text-slate-400 border border-slate-800">
+                {gripperSpecs.model}
+              </span>
+            )}
+            <span className={`text-[8.5px] px-1.5 py-0.2 rounded font-mono uppercase font-semibold ${
+              isGripperConnected
+                ? 'bg-emerald-950 text-emerald-400 border border-emerald-800/60'
+                : 'bg-red-950/60 text-red-400 border border-red-800/60'
+            }`}>
+              {isGripperConnected ? (displayState.gripper?.state || 'IDLE') : 'DISCONNECTED'}
+            </span>
+          </div>
+          <div className="flex items-center gap-2 font-mono text-[10px]">
+            <span className="text-slate-400">
+              STROKE: <strong className={isGripperConnected ? 'text-amber-400' : 'text-slate-500'}>
+                {(displayState.gripper?.position_mm ?? targetStroke).toFixed(1)}
+              </strong> mm
+            </span>
+            {displayState.gripper?.force_n !== undefined && displayState.gripper.force_n > 0 && isGripperConnected && (
+              <span className="text-blue-400 font-semibold">
+                {displayState.gripper.force_n.toFixed(1)} N
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Primary Stroke Slider & Quick Action Buttons */}
+        <div className="flex items-center gap-2">
+          <button
+            onClick={handleGripperClamp}
+            disabled={disableGripper}
+            className={`px-2 py-1 text-[9.5px] font-semibold rounded border transition-colors select-none ${
+              disableGripper
+                ? 'bg-slate-900 border-slate-800 text-slate-600 cursor-not-allowed'
+                : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
+            }`}
+            title="Clamp to 0mm"
+          >
+            CLAMP (0mm)
+          </button>
+
+          <div className="flex-1 flex flex-col gap-0.5">
+            <input
+              type="range"
+              min="0"
+              max={maxStrokeMm}
+              step="0.5"
+              value={targetStroke}
+              disabled={disableGripper}
+              onChange={(e) => setTargetStroke(Number(e.target.value))}
+              onPointerUp={() => handleGripperMove(targetStroke)}
+              onKeyUp={() => handleGripperMove(targetStroke)}
+              className={`w-full h-1.5 bg-slate-800 rounded-lg appearance-none accent-amber-500 ${
+                disableGripper ? 'opacity-30 cursor-not-allowed' : 'cursor-pointer'
+              }`}
+            />
+          </div>
+
+          <button
+            onClick={handleGripperOpen}
+            disabled={disableGripper}
+            className={`px-2 py-1 text-[9.5px] font-semibold rounded border transition-colors select-none ${
+              disableGripper
+                ? 'bg-slate-900 border-slate-800 text-slate-600 cursor-not-allowed'
+                : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
+            }`}
+            title={`Open to ${maxStrokeMm}mm`}
+          >
+            OPEN ({maxStrokeMm.toFixed(0)}mm)
+          </button>
+        </div>
+
+        {/* Gripper Speed & Grip Force Setting Sliders */}
+        <div className="flex gap-3 pt-1 border-t border-slate-800/60">
+          <div className="flex-1 flex flex-col gap-0.5">
+            <div className="flex justify-between items-baseline text-[9px] font-medium">
+              <span className="text-slate-400">GRP SPEED</span>
+              <span className={`font-mono font-semibold ${isGripperConnected ? 'text-amber-400' : 'text-slate-500'}`}>
+                {gripperSpeed}%
+              </span>
+            </div>
+            <input
+              type="range"
+              min="1"
+              max="100"
+              value={gripperSpeed}
+              disabled={disableGripper}
+              onChange={(e) => setGripperSpeed(Number(e.target.value))}
+              className={`w-full h-1 bg-slate-800 rounded-lg appearance-none accent-amber-500 ${
+                disableGripper ? 'opacity-30 cursor-not-allowed' : 'cursor-pointer'
+              }`}
+            />
+          </div>
+          <div className="flex-1 flex flex-col gap-0.5">
+            <div className="flex justify-between items-baseline text-[9px] font-medium">
+              <span className="text-slate-400">GRP FORCE</span>
+              <div className="flex items-center gap-1 font-mono">
+                <span className={`font-semibold ${isGripperConnected ? 'text-blue-400' : 'text-slate-500'}`}>
+                  {gripperForce}%
+                </span>
+                <span className="text-[8px] text-slate-500">
+                  ({(gripperForce * maxForceN / 100).toFixed(1)}N)
+                </span>
+              </div>
+            </div>
+            <input
+              type="range"
+              min="1"
+              max="100"
+              value={gripperForce}
+              disabled={disableGripper}
+              onChange={(e) => setGripperForce(Number(e.target.value))}
+              className={`w-full h-1 bg-slate-800 rounded-lg appearance-none accent-blue-500 ${
+                disableGripper ? 'opacity-30 cursor-not-allowed' : 'cursor-pointer'
+              }`}
+            />
+          </div>
         </div>
       </div>
     </div>
