@@ -50,6 +50,30 @@ body {
   background-color: #475569;
 }
 
+/* Compact range slider thumb (robot jog control panel) — color inherits from
+   the input's Tailwind text-* class via currentColor; size matches 9px fonts */
+.slider-compact::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 9999px;
+  background: currentColor;
+  border: none;
+  box-shadow: 0 0 2px rgba(0, 0, 0, 0.6);
+  cursor: pointer;
+}
+
+.slider-compact::-moz-range-thumb {
+  width: 9px;
+  height: 9px;
+  border-radius: 9999px;
+  background: currentColor;
+  border: none;
+  box-shadow: 0 0 2px rgba(0, 0, 0, 0.6);
+  cursor: pointer;
+}
+
 /* In-Canvas Animation Utilities */
 @keyframes canvas-scanline {
   0% {

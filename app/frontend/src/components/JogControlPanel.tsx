@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Cpu, Crosshair, Home, Pause, Play, AlertOctagon, Minimize2 } from 'lucide-react';
+import { Cpu, Crosshair, Home, Pause, Play, AlertOctagon, Minimize2, ChevronDown, ChevronUp } from 'lucide-react';
 import { API_BASE, WS_BASE } from '../config';
 
 interface GripperSpecs {
@@ -65,6 +65,9 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
   // Track active jog button
   const [activeJog, setActiveJog] = useState<{ axis: string, dir: number } | null>(null);
 
+  // Panel collapse toggle: fold everything below the toolbar to maximize the 3D viewer
+  const [collapsed, setCollapsed] = useState<boolean>(false);
+
   // Gripper specs & state (specs sourced from JunduoGripper driver)
   const gripperSpecs = displayState.gripper?.specs;
   const maxStrokeMm = gripperSpecs?.total_stroke_mm ?? 50.0;
@@ -82,6 +85,9 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
   // Connection and interlock checks (strictly disable when disconnected or moving)
   const isGripperConnected = !!(displayState.gripper?.connected && robotConnected);
   const disableGripper = !isGripperConnected || isMoving || gripperOperating;
+
+  // Speed dynamics are read-only when the robot is offline (grayed out like the gripper widget)
+  const disableSpeed = !robotConnected;
 
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -470,20 +476,18 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
   };
 
   return (
-    <div className="bg-slate-900/80 rounded-xl border border-slate-800 p-3 shadow-lg backdrop-blur-sm shrink-0 w-full flex flex-col gap-2.5 relative">
-      {/* Jog Controls Toolbar */}
-      <div className="flex justify-between items-center mt-1">
-        <div className="flex flex-col gap-1 w-[80px] relative">
-          {/* Status LED Indicator */}
-          <div className="absolute -top-4 left-0 flex items-center gap-1.5 pointer-events-none">
-            <div className={`w-2 h-2 rounded-full transition-colors duration-300 ${!robotConnected ? 'bg-slate-600' : isMoving ? 'bg-amber-400 animate-pulse shadow-[0_0_8px_rgba(251,191,36,0.6)]' : 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]'}`}></div>
-            <span className="text-[9px] font-medium uppercase tracking-wider text-slate-400">
-              {!robotConnected ? 'Offline' : isMoving ? 'Moving' : 'Idle'}
-            </span>
-          </div>
+    <div className="bg-slate-900/80 rounded-xl border border-slate-800 p-2.5 shadow-lg backdrop-blur-sm shrink-0 w-full flex flex-col gap-2 relative">
+      {/* Toolbar Row: Status LED + Action Buttons + Panel Collapse Toggle (always visible, also the collapsed header) */}
+      <div className="flex items-center gap-2">
+        {/* Status LED Indicator */}
+        <div className="flex items-center gap-1.5 shrink-0 w-[70px] pointer-events-none">
+          <div className={`w-2 h-2 rounded-full transition-colors duration-300 ${!robotConnected ? 'bg-slate-600' : isMoving ? 'bg-amber-400 animate-pulse shadow-[0_0_8px_rgba(251,191,36,0.6)]' : 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]'}`}></div>
+          <span className="text-[9px] font-medium uppercase tracking-wider text-slate-400">
+            {!robotConnected ? 'Offline' : isMoving ? 'Moving' : 'Idle'}
+          </span>
         </div>
-        {/* Action Buttons (Single Row) */}
-        <div className="flex flex-row gap-1 flex-1 overflow-x-auto hide-scrollbar max-w-full">
+        {/* Action Buttons (Single Row, evenly distributed) */}
+        <div className="flex flex-row gap-1 flex-1 justify-between overflow-x-auto hide-scrollbar min-w-0">
           <button
             onClick={handleConnect}
             disabled={connecting}
@@ -541,260 +545,273 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
             <AlertOctagon size={12} className="shrink-0" /> <span>Stop</span>
           </button>
         </div>
+
+        {/* Panel Collapse Toggle: fold the body to maximize the 3D viewer area */}
+        <button
+          onClick={() => setCollapsed((c) => !c)}
+          title={collapsed ? 'Expand control panel' : 'Collapse control panel'}
+          className="shrink-0 w-6 h-6 flex items-center justify-center rounded-md bg-slate-800/80 border border-slate-700/50 text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
+        >
+          {collapsed ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+        </button>
       </div>
 
-      {/* Speed & Acceleration Sliders & Motion Dynamics */}
-      <div className="flex flex-col gap-1.5 mb-0.5 bg-slate-950/40 p-2 rounded-lg border border-slate-800/40 text-[10px]">
-        {/* Motion Dynamics Header & Global Speed */}
-        <div className="flex flex-wrap items-center justify-between gap-2 px-0.5 border-b border-slate-800/40 pb-1.5 font-medium">
-          <div className="flex items-center gap-2">
-            <span className="tracking-wider uppercase text-slate-400 font-semibold text-[9.5px]">Global Speed</span>
-            <div className="flex items-center gap-1.5 w-24">
-              <input
-                type="range"
-                className="flex-1 accent-amber-500 h-1 bg-slate-700/50 rounded-lg appearance-none cursor-pointer"
-                min="1" max="100" step="1"
-                value={globalSpeedFactor}
-                onChange={(e) => setGlobalSpeedFactor(parseInt(e.target.value))}
-                onMouseUp={(e) => syncGlobalSpeed(parseInt((e.target as HTMLInputElement).value))}
-                onTouchEnd={(e) => syncGlobalSpeed(parseInt((e.target as HTMLInputElement).value))}
-              />
-              <span className="text-amber-400 font-mono font-semibold text-[9px] w-6 text-right shrink-0">{globalSpeedFactor}%</span>
-            </div>
+      {/* Three-Column Body: Cartesian Axes | Joint Axes | Speed Dynamics + Gripper */}
+      {!collapsed && (
+        <div className="flex gap-2.5 min-h-0">
+          {/* Cartesian (Left) — jog layout preserved, fixed narrow width */}
+          <div className="flex flex-col gap-1.5 w-[176px] shrink-0">
+            {cartesianAxes.map((axis, idx) => renderAxisRow(axis, idx, false))}
           </div>
-          <div className="font-mono text-slate-400 flex flex-wrap items-center gap-1.5 text-[9px]">
-            <span>TCP Cap: <strong className="text-sky-400">{effMaxLinSpeed} mm/s</strong></span>
-            <span className="text-slate-600">|</span>
-            <span>JNT Cap: <strong className="text-emerald-400">{effMaxJntSpeed} °/s</strong></span>
-            <span className="text-slate-600">|</span>
-            <span>Load: <strong className="text-purple-400">{(displayState.load ?? 0).toFixed(2)} kg</strong></span>
-          </div>
-        </div>
 
-        {/* Linear Speed/Acc */}
-        <div className="flex gap-3">
-          <div className="flex-1 flex flex-col gap-0.5">
-            <div className="flex justify-between items-baseline text-[9.5px] font-medium">
-              <span className="text-slate-400">LIN SPEED</span>
-              <div className="flex items-center gap-1 font-mono">
-                <span className="text-blue-400 font-semibold">{speedL} mm/s</span>
-                <span className="text-[8.5px] text-slate-500 font-normal">/ {effMaxLinSpeed}</span>
+          {/* Divider */}
+          <div className="w-[1px] bg-slate-800/60 rounded-full" />
+
+          {/* Joint (Middle) — jog layout preserved, fixed narrow width */}
+          <div className="flex flex-col gap-1.5 w-[176px] shrink-0">
+            {jointAxes.map((axis, idx) => renderAxisRow(axis, idx, true))}
+          </div>
+
+          {/* Divider */}
+          <div className="w-[1px] bg-slate-800/60 rounded-full" />
+
+          {/* Right: Global Speed + Speed/Accel + Gripper (Vertical Stack, takes remaining width) */}
+          <div className="flex-1 min-w-0 flex flex-col gap-1.5">
+            {/* Global Speed & Effective Caps */}
+            <div className="flex flex-col gap-1 bg-slate-950/40 p-1.5 rounded-lg border border-slate-800/40">
+              <div className="flex items-center gap-1.5">
+                <span className="tracking-wider uppercase text-slate-400 font-semibold text-[9px] shrink-0">Global</span>
+                <input
+                  type="range"
+                  disabled={disableSpeed}
+                  className={`slider-compact flex-1 h-1 bg-slate-700/50 rounded-lg appearance-none cursor-pointer text-amber-500 ${
+                    disableSpeed ? 'opacity-30 cursor-not-allowed' : ''
+                  }`}
+                  min="1" max="100" step="1"
+                  value={globalSpeedFactor}
+                  onChange={(e) => setGlobalSpeedFactor(parseInt(e.target.value))}
+                  onMouseUp={(e) => syncGlobalSpeed(parseInt((e.target as HTMLInputElement).value))}
+                  onTouchEnd={(e) => syncGlobalSpeed(parseInt((e.target as HTMLInputElement).value))}
+                />
+                <span className="text-amber-400 font-mono font-semibold text-[9px] w-7 text-right shrink-0">{globalSpeedFactor}%</span>
+              </div>
+              {/* Effective caps (mm/s, °/s) & payload — max values derived from global speed factor */}
+              <div className={`font-mono text-slate-400 flex flex-wrap items-center gap-x-1 gap-y-0.5 text-[8.5px] ${disableSpeed ? 'opacity-40' : ''}`}>
+                <span>TCP <strong className="text-sky-400">{effMaxLinSpeed} mm/s</strong></span>
+                <span className="text-slate-600">|</span>
+                <span>JNT <strong className="text-emerald-400">{effMaxJntSpeed} °/s</strong></span>
+                <span className="text-slate-600">|</span>
+                <span>Load <strong className="text-purple-400">{(displayState.load ?? 0).toFixed(2)} kg</strong></span>
               </div>
             </div>
-            <input
-              type="range"
-              min="1"
-              max={effMaxLinSpeed}
-              step="1"
-              value={Math.min(speedL, effMaxLinSpeed)}
-              onChange={(e) => setSpeedL(Number(e.target.value))}
-              onPointerUp={handleSpeedUpdate}
-              onKeyUp={handleSpeedUpdate}
-              className="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
-            />
-          </div>
-          <div className="flex-1 flex flex-col gap-0.5">
-            <div className="flex justify-between items-baseline text-[9.5px] font-medium">
-              <span className="text-slate-400">LIN ACCEL</span>
-              <span className="text-blue-400 font-mono font-semibold">{accL}%</span>
-            </div>
-            <input
-              type="range"
-              min="1"
-              max="100"
-              value={accL}
-              onChange={(e) => setAccL(Number(e.target.value))}
-              onPointerUp={handleSpeedUpdate}
-              onKeyUp={handleSpeedUpdate}
-              className="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
-            />
-          </div>
-        </div>
 
-        {/* Joint Speed/Acc */}
-        <div className="flex gap-3">
-          <div className="flex-1 flex flex-col gap-0.5">
-            <div className="flex justify-between items-baseline text-[9.5px] font-medium">
-              <span className="text-slate-400">JNT SPEED</span>
-              <div className="flex items-center gap-1 font-mono">
-                <span className="text-green-400 font-semibold">{speedJ} °/s</span>
-                <span className="text-[8.5px] text-slate-500 font-normal">/ {effMaxJntSpeed}</span>
+            {/* Linear / Joint Speed & Accel — 2x2 compact grid (disabled when robot offline) */}
+            <div className={`grid grid-cols-2 gap-x-2 gap-y-1.5 ${disableSpeed ? 'opacity-40' : ''}`}>
+              <div className="flex flex-col gap-0.5 min-w-0">
+                <div className="flex justify-between items-baseline text-[9px] font-medium">
+                  <span className="text-slate-400">LIN SPEED</span>
+                  <span className="text-blue-400 font-mono font-semibold">{speedL} mm/s</span>
+                </div>
+                <input
+                  type="range"
+                  disabled={disableSpeed}
+                  className={`slider-compact w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer text-blue-500 ${
+                    disableSpeed ? 'cursor-not-allowed' : ''
+                  }`}
+                  min="1"
+                  max={effMaxLinSpeed}
+                  step="1"
+                  value={Math.min(speedL, effMaxLinSpeed)}
+                  onChange={(e) => setSpeedL(Number(e.target.value))}
+                  onPointerUp={handleSpeedUpdate}
+                  onKeyUp={handleSpeedUpdate}
+                />
+              </div>
+              <div className="flex flex-col gap-0.5 min-w-0">
+                <div className="flex justify-between items-baseline text-[9px] font-medium">
+                  <span className="text-slate-400">LIN ACCEL</span>
+                  <span className="text-blue-400 font-mono font-semibold">{accL}%</span>
+                </div>
+                <input
+                  type="range"
+                  disabled={disableSpeed}
+                  className={`slider-compact w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer text-blue-500 ${
+                    disableSpeed ? 'cursor-not-allowed' : ''
+                  }`}
+                  min="1"
+                  max="100"
+                  value={accL}
+                  onChange={(e) => setAccL(Number(e.target.value))}
+                  onPointerUp={handleSpeedUpdate}
+                  onKeyUp={handleSpeedUpdate}
+                />
+              </div>
+              <div className="flex flex-col gap-0.5 min-w-0">
+                <div className="flex justify-between items-baseline text-[9px] font-medium">
+                  <span className="text-slate-400">JNT SPEED</span>
+                  <span className="text-green-400 font-mono font-semibold">{speedJ} °/s</span>
+                </div>
+                <input
+                  type="range"
+                  disabled={disableSpeed}
+                  className={`slider-compact w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer text-green-500 ${
+                    disableSpeed ? 'cursor-not-allowed' : ''
+                  }`}
+                  min="1"
+                  max={effMaxJntSpeed}
+                  step="1"
+                  value={Math.min(speedJ, effMaxJntSpeed)}
+                  onChange={(e) => setSpeedJ(Number(e.target.value))}
+                  onPointerUp={handleSpeedUpdate}
+                  onKeyUp={handleSpeedUpdate}
+                />
+              </div>
+              <div className="flex flex-col gap-0.5 min-w-0">
+                <div className="flex justify-between items-baseline text-[9px] font-medium">
+                  <span className="text-slate-400">JNT ACCEL</span>
+                  <span className="text-green-400 font-mono font-semibold">{accJ}%</span>
+                </div>
+                <input
+                  type="range"
+                  disabled={disableSpeed}
+                  className={`slider-compact w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer text-green-500 ${
+                    disableSpeed ? 'cursor-not-allowed' : ''
+                  }`}
+                  min="1"
+                  max="100"
+                  value={accJ}
+                  onChange={(e) => setAccJ(Number(e.target.value))}
+                  onPointerUp={handleSpeedUpdate}
+                  onKeyUp={handleSpeedUpdate}
+                />
               </div>
             </div>
-            <input
-              type="range"
-              min="1"
-              max={effMaxJntSpeed}
-              step="1"
-              value={Math.min(speedJ, effMaxJntSpeed)}
-              onChange={(e) => setSpeedJ(Number(e.target.value))}
-              onPointerUp={handleSpeedUpdate}
-              onKeyUp={handleSpeedUpdate}
-              className="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-green-500"
-            />
-          </div>
-          <div className="flex-1 flex flex-col gap-0.5">
-            <div className="flex justify-between items-baseline text-[9.5px] font-medium">
-              <span className="text-slate-400">JNT ACCEL</span>
-              <span className="text-green-400 font-mono font-semibold">{accJ}%</span>
-            </div>
-            <input
-              type="range"
-              min="1"
-              max="100"
-              value={accJ}
-              onChange={(e) => setAccJ(Number(e.target.value))}
-              onPointerUp={handleSpeedUpdate}
-              onKeyUp={handleSpeedUpdate}
-              className="w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-green-500"
-            />
-          </div>
-        </div>
-      </div>
 
-      {/* Axis Rows (Side by Side) */}
-      <div className="flex gap-3 mt-1">
-        {/* Cartesian (Left) */}
-        <div className="flex flex-col gap-1.5 flex-1">
-          {cartesianAxes.map((axis, idx) => renderAxisRow(axis, idx, false))}
-        </div>
-
-        {/* Divider */}
-        <div className="w-[1px] bg-slate-800/60 rounded-full" />
-
-        {/* Joint (Right) */}
-        <div className="flex flex-col gap-1.5 flex-1">
-          {jointAxes.map((axis, idx) => renderAxisRow(axis, idx, true))}
-        </div>
-      </div>
-
-      {/* Gripper Control Widget (钧舵 EPG50-060 / 50mm Parallel Gripper) */}
-      <div className={`bg-slate-950/80 border rounded-lg p-2 flex flex-col gap-2 mt-1 transition-all ${
-        isGripperConnected ? 'border-slate-800' : 'border-slate-800/60 opacity-60'
-      }`}>
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-1.5">
-            <span className="text-[10px] font-bold tracking-wide text-slate-300">PARALLEL GRIPPER</span>
-            {gripperSpecs?.model && (
-              <span className="text-[8px] px-1 py-0.2 rounded font-mono bg-slate-900 text-slate-400 border border-slate-800">
-                {gripperSpecs.model}
-              </span>
-            )}
-            <span className={`text-[8.5px] px-1.5 py-0.2 rounded font-mono uppercase font-semibold ${
-              isGripperConnected
-                ? 'bg-emerald-950 text-emerald-400 border border-emerald-800/60'
-                : 'bg-red-950/60 text-red-400 border border-red-800/60'
+            {/* Gripper Control Widget (钧舵 EPG50-060 / 50mm Parallel Gripper) — compact */}
+            <div className={`bg-slate-950/80 border rounded-lg p-1.5 flex flex-col gap-1.5 flex-1 transition-all ${
+              isGripperConnected ? 'border-slate-800' : 'border-slate-800/60 opacity-60'
             }`}>
-              {isGripperConnected ? (displayState.gripper?.state || 'IDLE') : 'DISCONNECTED'}
-            </span>
-          </div>
-          <div className="flex items-center gap-2 font-mono text-[10px]">
-            <span className="text-slate-400">
-              STROKE: <strong className={isGripperConnected ? 'text-amber-400' : 'text-slate-500'}>
-                {(displayState.gripper?.position_mm ?? targetStroke).toFixed(1)}
-              </strong> mm
-            </span>
-            {displayState.gripper?.force_n !== undefined && displayState.gripper.force_n > 0 && isGripperConnected && (
-              <span className="text-blue-400 font-semibold">
-                {displayState.gripper.force_n.toFixed(1)} N
-              </span>
-            )}
-          </div>
-        </div>
+              {/* Header: model + state badge + live stroke/force readout */}
+              <div className="flex items-center justify-between gap-1 flex-wrap">
+                <div className="flex items-center gap-1 min-w-0">
+                  <span className="text-[9px] font-bold tracking-wide text-slate-300 shrink-0">GRIPPER</span>
+                  {gripperSpecs?.model && (
+                    <span className="text-[8px] px-1 rounded font-mono bg-slate-900 text-slate-400 border border-slate-800 truncate">
+                      {gripperSpecs.model}
+                    </span>
+                  )}
+                  <span className={`text-[8.5px] px-1 rounded font-mono uppercase font-semibold shrink-0 ${
+                    isGripperConnected
+                      ? 'bg-emerald-950 text-emerald-400 border border-emerald-800/60'
+                      : 'bg-red-950/60 text-red-400 border border-red-800/60'
+                  }`}>
+                    {isGripperConnected ? (displayState.gripper?.state || 'IDLE') : 'DISCONNECTED'}
+                  </span>
+                </div>
+                <div className="flex items-center gap-1.5 font-mono text-[9px] shrink-0">
+                  <span className="text-slate-400">
+                    STROKE: <strong className={isGripperConnected ? 'text-amber-400' : 'text-slate-500'}>
+                      {(displayState.gripper?.position_mm ?? targetStroke).toFixed(1)}
+                    </strong> mm
+                  </span>
+                  {displayState.gripper?.force_n !== undefined && displayState.gripper.force_n > 0 && isGripperConnected && (
+                    <span className="text-blue-400 font-semibold">
+                      {displayState.gripper.force_n.toFixed(1)} N
+                    </span>
+                  )}
+                </div>
+              </div>
 
-        {/* Primary Stroke Slider & Quick Action Buttons */}
-        <div className="flex items-center gap-2">
-          <button
-            onClick={handleGripperClamp}
-            disabled={disableGripper}
-            className={`px-2 py-1 text-[9.5px] font-semibold rounded border transition-colors select-none ${
-              disableGripper
-                ? 'bg-slate-900 border-slate-800 text-slate-600 cursor-not-allowed'
-                : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
-            }`}
-            title="Clamp to 0mm"
-          >
-            CLAMP (0mm)
-          </button>
+              {/* Primary Stroke: Clamp / Slider / Open */}
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={handleGripperClamp}
+                  disabled={disableGripper}
+                  className={`px-1.5 py-1 text-[9px] font-semibold rounded border transition-colors select-none shrink-0 ${
+                    disableGripper
+                      ? 'bg-slate-900 border-slate-800 text-slate-600 cursor-not-allowed'
+                      : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
+                  }`}
+                  title="Clamp to 0mm"
+                >
+                  CLAMP
+                </button>
 
-          <div className="flex-1 flex flex-col gap-0.5">
-            <input
-              type="range"
-              min="0"
-              max={maxStrokeMm}
-              step="0.5"
-              value={targetStroke}
-              disabled={disableGripper}
-              onChange={(e) => setTargetStroke(Number(e.target.value))}
-              onPointerUp={() => handleGripperMove(targetStroke)}
-              onKeyUp={() => handleGripperMove(targetStroke)}
-              className={`w-full h-1.5 bg-slate-800 rounded-lg appearance-none accent-amber-500 ${
-                disableGripper ? 'opacity-30 cursor-not-allowed' : 'cursor-pointer'
-              }`}
-            />
-          </div>
+                <input
+                  type="range"
+                  min="0"
+                  max={maxStrokeMm}
+                  step="0.5"
+                  value={targetStroke}
+                  disabled={disableGripper}
+                  onChange={(e) => setTargetStroke(Number(e.target.value))}
+                  onPointerUp={() => handleGripperMove(targetStroke)}
+                  onKeyUp={() => handleGripperMove(targetStroke)}
+                  className={`slider-compact flex-1 min-w-0 h-1.5 bg-slate-800 rounded-lg appearance-none text-amber-500 ${
+                    disableGripper ? 'opacity-30 cursor-not-allowed' : 'cursor-pointer'
+                  }`}
+                />
 
-          <button
-            onClick={handleGripperOpen}
-            disabled={disableGripper}
-            className={`px-2 py-1 text-[9.5px] font-semibold rounded border transition-colors select-none ${
-              disableGripper
-                ? 'bg-slate-900 border-slate-800 text-slate-600 cursor-not-allowed'
-                : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
-            }`}
-            title={`Open to ${maxStrokeMm}mm`}
-          >
-            OPEN ({maxStrokeMm.toFixed(0)}mm)
-          </button>
-        </div>
+                <button
+                  onClick={handleGripperOpen}
+                  disabled={disableGripper}
+                  className={`px-1.5 py-1 text-[9px] font-semibold rounded border transition-colors select-none shrink-0 ${
+                    disableGripper
+                      ? 'bg-slate-900 border-slate-800 text-slate-600 cursor-not-allowed'
+                      : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
+                  }`}
+                  title={`Open to ${maxStrokeMm}mm`}
+                >
+                  OPEN
+                </button>
+              </div>
 
-        {/* Gripper Speed & Grip Force Setting Sliders */}
-        <div className="flex gap-3 pt-1 border-t border-slate-800/60">
-          <div className="flex-1 flex flex-col gap-0.5">
-            <div className="flex justify-between items-baseline text-[9px] font-medium">
-              <span className="text-slate-400">GRP SPEED</span>
-              <span className={`font-mono font-semibold ${isGripperConnected ? 'text-amber-400' : 'text-slate-500'}`}>
-                {gripperSpeed}%
-              </span>
-            </div>
-            <input
-              type="range"
-              min="1"
-              max="100"
-              value={gripperSpeed}
-              disabled={disableGripper}
-              onChange={(e) => setGripperSpeed(Number(e.target.value))}
-              className={`w-full h-1 bg-slate-800 rounded-lg appearance-none accent-amber-500 ${
-                disableGripper ? 'opacity-30 cursor-not-allowed' : 'cursor-pointer'
-              }`}
-            />
-          </div>
-          <div className="flex-1 flex flex-col gap-0.5">
-            <div className="flex justify-between items-baseline text-[9px] font-medium">
-              <span className="text-slate-400">GRP FORCE</span>
-              <div className="flex items-center gap-1 font-mono">
-                <span className={`font-semibold ${isGripperConnected ? 'text-blue-400' : 'text-slate-500'}`}>
-                  {gripperForce}%
-                </span>
-                <span className="text-[8px] text-slate-500">
-                  ({(gripperForce * maxForceN / 100).toFixed(1)}N)
-                </span>
+              {/* Gripper Speed & Grip Force Setting Sliders */}
+              <div className="flex gap-2 pt-1 border-t border-slate-800/60">
+                <div className="flex-1 flex flex-col gap-0.5 min-w-0">
+                  <div className="flex justify-between items-baseline text-[8.5px] font-medium">
+                    <span className="text-slate-400">GRP SPEED</span>
+                    <span className={`font-mono font-semibold ${isGripperConnected ? 'text-amber-400' : 'text-slate-500'}`}>
+                      {gripperSpeed}%
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min="1"
+                    max="100"
+                    value={gripperSpeed}
+                    disabled={disableGripper}
+                    onChange={(e) => setGripperSpeed(Number(e.target.value))}
+                    className={`slider-compact w-full h-1 bg-slate-800 rounded-lg appearance-none text-amber-500 ${
+                      disableGripper ? 'opacity-30 cursor-not-allowed' : 'cursor-pointer'
+                    }`}
+                  />
+                </div>
+                <div className="flex-1 flex flex-col gap-0.5 min-w-0">
+                  <div className="flex justify-between items-baseline text-[8.5px] font-medium">
+                    <span className="text-slate-400">GRP FORCE</span>
+                    <span className={`font-mono font-semibold ${isGripperConnected ? 'text-blue-400' : 'text-slate-500'}`}>
+                      {gripperForce}%
+                      <span className="text-[7.5px] text-slate-500 font-normal"> ({(gripperForce * maxForceN / 100).toFixed(1)}N)</span>
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min="1"
+                    max="100"
+                    value={gripperForce}
+                    disabled={disableGripper}
+                    onChange={(e) => setGripperForce(Number(e.target.value))}
+                    className={`slider-compact w-full h-1 bg-slate-800 rounded-lg appearance-none text-blue-500 ${
+                      disableGripper ? 'opacity-30 cursor-not-allowed' : 'cursor-pointer'
+                    }`}
+                  />
+                </div>
               </div>
             </div>
-            <input
-              type="range"
-              min="1"
-              max="100"
-              value={gripperForce}
-              disabled={disableGripper}
-              onChange={(e) => setGripperForce(Number(e.target.value))}
-              className={`w-full h-1 bg-slate-800 rounded-lg appearance-none accent-blue-500 ${
-                disableGripper ? 'opacity-30 cursor-not-allowed' : 'cursor-pointer'
-              }`}
-            />
           </div>
         </div>
-      </div>
+      )}
     </div>
   );
 };
