@@ -2,7 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { OrbitControls, Grid } from '@react-three/drei';
 import URDFLoader from 'urdf-loader';
-import { Maximize2, Minimize2, Eye, EyeOff, Box, Grid3X3, Route } from 'lucide-react';
+import { Maximize2, Minimize2, Eye, EyeOff, Box, Grid3X3, Route, Spline } from 'lucide-react';
 import { API_BASE } from '../config';
 import {
   Object3D,
@@ -18,6 +18,9 @@ import {
   Color,
   DoubleSide,
   BufferGeometry,
+  InstancedInterleavedBuffer,
+  InterleavedBufferAttribute,
+  DynamicDrawUsage,
   Vector3,
   Euler,
   ArrowHelper,
@@ -30,6 +33,10 @@ import {
 import { ColladaLoader } from 'three/examples/jsm/loaders/ColladaLoader.js';
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js';
 import { PLYLoader } from 'three/examples/jsm/loaders/PLYLoader.js';
+// Line2 family: GPU line width in pixels (LineBasicMaterial linewidth is capped at 1px in WebGL)
+import { Line2 } from 'three/examples/jsm/lines/Line2.js';
+import { LineGeometry } from 'three/examples/jsm/lines/LineGeometry.js';
+import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
 
 interface RobotModelProps {
   jointAngles: number[];
@@ -40,6 +47,7 @@ interface RobotModelProps {
   isMeshVisible: boolean;
   isWireframe: boolean;
   isPathsVisible: boolean;
+  isTraceVisible: boolean;
   pathState?: 'raw' | 'auto' | 'poi' | 'auto_poi';
   onMeshLoaded?: (vertexCount: number) => void;
   onPathsLoaded?: (pathCount: number, pointCount: number) => void;
@@ -48,6 +56,9 @@ interface RobotModelProps {
 
 // Joint names in CR5 URDF matching the order J1..J6
 const JOINT_NAMES = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6'];
+
+// TCP motion trace buffer size (points). Rolling window: oldest points are dropped when full.
+const TRACE_MAX_POINTS = 2000;
 
 function stripEmbeddedLights(root: Object3D) {
   const lights: Light[] = [];
@@ -136,6 +147,7 @@ const RobotModel: React.FC<RobotModelProps> = ({
   isMeshVisible,
   isWireframe,
   isPathsVisible,
+  isTraceVisible,
   pathState = 'raw',
   onMeshLoaded,
   onPathsLoaded,
@@ -147,6 +159,20 @@ const RobotModel: React.FC<RobotModelProps> = ({
   const surfaceMaterialRef = useRef<MeshStandardMaterial | null>(null);
   const pathsGroupRef = useRef<Group | null>(null);
 
+  // TCP motion trace refs: the traced link is the tool tip resolved from the
+  // configured tools selection (robot_tcp in configs/aisprayer_config.yaml)
+  const tcpLinkNameRef = useRef<string>('');
+  const tcpLinkRef = useRef<Object3D | null>(null);
+  const traceLineRef = useRef<Line2 | null>(null);
+  const traceGeometryRef = useRef<LineGeometry | null>(null);
+  const traceInstBufRef = useRef<InstancedInterleavedBuffer | null>(null);
+  const traceInstanceDataRef = useRef<Float32Array>(new Float32Array((TRACE_MAX_POINTS - 1) * 6));
+  const traceBufferRef = useRef<Float32Array>(new Float32Array(TRACE_MAX_POINTS * 3));
+  const traceCountRef = useRef<number>(0);
+  const lastTracePointRef = useRef<Vector3 | null>(null);
+  const tcpWorldPosRef = useRef<Vector3>(new Vector3());
+  const traceLocalPosRef = useRef<Vector3>(new Vector3());
+
   // 1. Load Robot URDF Model (dynamically synchronized with backend configs/aisprayer_config.yaml)
   useEffect(() => {
     let isCancelled = false;
@@ -156,6 +182,8 @@ const RobotModel: React.FC<RobotModelProps> = ({
       .then(data => {
         if (isCancelled) return;
         const urdfFile = data?.urdf_source || 'cr5_robot.urdf';
+        // Tool TCP link name derived from the configured tools (robot_tcp) in the backend config
+        tcpLinkNameRef.current = data?.tool_name || '';
         const manager = new LoadingManager();
         const loader = new URDFLoader(manager);
 
@@ -225,6 +253,65 @@ const RobotModel: React.FC<RobotModelProps> = ({
     const singleOffsetM = Math.max(0, Math.min(0.025, ((50.0 - currentStrokeRef.current) / 2.0) / 1000.0));
     r.setJointValue('gripper_finger_left_joint', singleOffsetM);
     r.setJointValue('gripper_finger_right_joint', singleOffsetM);
+
+    // TCP trace sampling: record the tool-tip trajectory in base frame while enabled.
+    // A point is appended only when the tip moved > 2mm (keeps the buffer compact);
+    // once TRACE_MAX_POINTS is reached the oldest point is dropped (rolling window).
+    if (isTraceVisible && traceLineRef.current && traceGeometryRef.current && tcpLinkRef.current) {
+      // Keep the LineMaterial pixel-width resolution in sync with the canvas size
+      const line = traceLineRef.current;
+      const lineMat = line.material as LineMaterial;
+      lineMat.resolution.set(_state.size.width, _state.size.height);
+
+      tcpLinkRef.current.getWorldPosition(tcpWorldPosRef.current);
+      const parent = line.parent;
+      if (parent) {
+        const local = traceLocalPosRef.current.copy(tcpWorldPosRef.current);
+        parent.worldToLocal(local);
+        const last = lastTracePointRef.current;
+        if (!last || local.distanceToSquared(last) > 4e-6) {
+          const buf = traceBufferRef.current;
+          if (traceCountRef.current >= TRACE_MAX_POINTS) {
+            // Rolling window: shift points left by one; the segment instances must
+            // shift too (drop the oldest segment), otherwise a stale segment from
+            // the evicted head point would remain rendered at the queue head
+            buf.copyWithin(0, 3);
+            traceInstanceDataRef.current.copyWithin(0, 6);
+            traceCountRef.current = TRACE_MAX_POINTS - 1;
+          }
+          const i3 = traceCountRef.current * 3;
+          buf[i3] = local.x;
+          buf[i3 + 1] = local.y;
+          buf[i3 + 2] = local.z;
+          traceCountRef.current += 1;
+
+          // In-place update: write only the newest segment (prev point -> new point)
+          // into the preallocated instanced buffer and grow the draw count.
+          // No GPU buffer recreation per frame — safe for Mali GPUs during motion.
+          const segIdx = traceCountRef.current - 2;
+          if (segIdx >= 0) {
+            const prev3 = segIdx * 3;
+            const o = segIdx * 6;
+            const instData = traceInstanceDataRef.current;
+            instData[o]     = buf[prev3];
+            instData[o + 1] = buf[prev3 + 1];
+            instData[o + 2] = buf[prev3 + 2];
+            instData[o + 3] = local.x;
+            instData[o + 4] = local.y;
+            instData[o + 5] = local.z;
+            const instBuf = traceInstBufRef.current;
+            if (instBuf) instBuf.needsUpdate = true;
+            traceGeometryRef.current!.instanceCount = segIdx + 1;
+          }
+
+          if (last) {
+            last.copy(local);
+          } else {
+            lastTracePointRef.current = local.clone();
+          }
+        }
+      }
+    }
   });
 
   // 2. Update Robot Arm Joint Angles Dynamically
@@ -237,6 +324,84 @@ const RobotModel: React.FC<RobotModelProps> = ({
       }
     });
   }, [robot, jointAngles]);
+
+  // 2b. TCP Motion Trace — attach/detach the tool-tip trail line (base frame)
+  // when the trace toggle changes. Trail buffer is reset on every re-attach.
+  useEffect(() => {
+    if (!robot) return;
+    const r = robot as any;
+    const baseLink = r.links?.['base_link'] || r.getObjectByName('base_link') || robot;
+
+    const old = baseLink.getObjectByName('tcp_trace_line');
+    if (old && old.parent) old.parent.remove(old);
+    if (traceGeometryRef.current) {
+      traceGeometryRef.current.dispose();
+      traceGeometryRef.current = null;
+    }
+    traceLineRef.current = null;
+    traceCountRef.current = 0;
+    lastTracePointRef.current = null;
+
+    if (!isTraceVisible) return;
+
+    // Resolve the tool TCP link from the configured tools selection;
+    // fallback to the flange (Link6) when the URDF carries no tool link
+    const name = tcpLinkNameRef.current;
+    const tcpLink = (name && (r.links?.[name] || r.getObjectByName(name)))
+      || r.links?.['Link6'] || r.getObjectByName('Link6') || null;
+    tcpLinkRef.current = tcpLink;
+    if (!tcpLink) return;
+
+    // Line2 + LineMaterial: supports real GPU pixel line width (deep blue, 3px)
+    const geom = new LineGeometry();
+
+    // Preallocate the GPU instanced buffer ONCE at full capacity (TRACE_MAX_POINTS - 1
+    // segments, 6 floats per segment: start.xyz + end.xyz). Calling setPositions on every
+    // append would recreate/dispose GPU buffers at frame rate and stalls Mali GPUs
+    // (RK3588) when the trace is toggled during motion — updates are in-place instead.
+    const instData = traceInstanceDataRef.current;
+    instData.fill(0);
+    const instBuf = new InstancedInterleavedBuffer(instData, 6, 1);
+    instBuf.setUsage(DynamicDrawUsage);
+    geom.setAttribute('instanceStart', new InterleavedBufferAttribute(instBuf, 3, 0));
+    geom.setAttribute('instanceEnd', new InterleavedBufferAttribute(instBuf, 3, 3));
+    geom.instanceCount = 0;
+    traceInstBufRef.current = instBuf;
+
+    const mat = new LineMaterial({
+      color: 0x1e40af,
+      linewidth: 3,
+      transparent: true,
+      opacity: 0.95,
+      depthTest: true,
+    });
+    const line = new Line2(geom, mat);
+    line.name = 'tcp_trace_line';
+    line.renderOrder = 1001;
+    line.frustumCulled = false;
+    baseLink.add(line);
+    traceLineRef.current = line;
+    traceGeometryRef.current = geom;
+
+    return () => {
+      if (traceLineRef.current && traceLineRef.current.parent) {
+        traceLineRef.current.parent.remove(traceLineRef.current);
+      }
+      if (traceLineRef.current) {
+        (traceLineRef.current.material as LineMaterial).dispose();
+      }
+      if (traceGeometryRef.current) {
+        traceGeometryRef.current.dispose();
+        traceGeometryRef.current = null;
+      }
+      // InstancedInterleavedBuffer has no dispose(); its GPU storage is freed
+      // together with the parent geometry above.
+      traceInstBufRef.current = null;
+      traceLineRef.current = null;
+      traceCountRef.current = 0;
+      lastTracePointRef.current = null;
+    };
+  }, [robot, isTraceVisible]);
 
   // 3. Load and Attach Reconstructed Surface Mesh to Robot base_link
   useEffect(() => {
@@ -651,6 +816,7 @@ const Robot3DViewer: React.FC<Robot3DViewerProps> = ({
   const [isMeshVisible, setIsMeshVisible] = useState(true);
   const [isWireframe, setIsWireframe] = useState(false);
   const [isPathsVisible, setIsPathsVisible] = useState(true);
+  const [isTraceVisible, setIsTraceVisible] = useState(false);
   const [meshVertexCount, setMeshVertexCount] = useState<number>(0);
   const [pathsCount, setPathsCount] = useState<number>(0);
   const [pointsCount, setPointsCount] = useState<number>(0);
@@ -681,6 +847,7 @@ const Robot3DViewer: React.FC<Robot3DViewerProps> = ({
           isMeshVisible={isMeshVisible}
           isWireframe={isWireframe}
           isPathsVisible={isPathsVisible}
+          isTraceVisible={isTraceVisible}
           onMeshLoaded={(cnt) => setMeshVertexCount(cnt)}
           onPathsLoaded={(pCount, ptCount) => {
             setPathsCount(pCount);
@@ -735,8 +902,28 @@ const Robot3DViewer: React.FC<Robot3DViewerProps> = ({
         )}
       </div>
 
-      {/* Top Right: Compact Controls (Mesh Visibility, Wireframe, TCP Paths, Fullscreen) */}
+      {/* Top Right: Compact Controls (Trace, TCP Paths, Mesh, Wireframe, Fullscreen) */}
       <div className="absolute top-2.5 right-2.5 flex items-center gap-1 z-10">
+        {/* TCP Motion Trace Toggle Button — tool-tip trail from the configured tools selection */}
+        <div className="relative group flex items-center">
+          <button
+            onClick={() => setIsTraceVisible(!isTraceVisible)}
+            className={`h-6 px-2 rounded-full text-[9px] font-medium border flex items-center gap-1 backdrop-blur-md transition-all shadow-sm ${
+              isTraceVisible
+                ? 'bg-cyan-950/60 hover:bg-cyan-900/70 border-cyan-500/40 text-cyan-300 shadow-cyan-950/30'
+                : 'bg-slate-950/50 hover:bg-slate-900/70 border-white/10 text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Spline size={11} className={isTraceVisible ? 'text-cyan-400' : 'text-slate-400'} />
+            <span>Trace</span>
+          </button>
+          <div className="absolute top-full mt-1.5 right-0 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
+            <div className={TOOLTIP_CLASSES}>
+              {isTraceVisible ? 'Hide Tool TCP Motion Trace' : 'Show Tool TCP Motion Trace'}
+            </div>
+          </div>
+        </div>
+
         {/* TCP Paths Toggle Button */}
         {pathsCount > 0 && (
           <div className="flex items-center gap-1">

@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Cpu, Crosshair, Home, Pause, Play, AlertOctagon, Minimize2, ChevronDown, ChevronUp } from 'lucide-react';
+import { Cpu, Crosshair, Home, Pause, Play, AlertOctagon, Minimize2, ChevronDown, ChevronUp, Hand } from 'lucide-react';
 import { API_BASE, WS_BASE } from '../config';
 
 interface GripperSpecs {
@@ -82,12 +82,18 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
   const isMoving = displayState.status === 1;
   const disableMotion = !robotConnected || isMoving;
 
-  // Connection and interlock checks (strictly disable when disconnected or moving)
+  // Connection and interlock checks: the gripper is operable whenever the device
+  // is connected and not currently actuating — independent of robot motion state
   const isGripperConnected = !!(displayState.gripper?.connected && robotConnected);
-  const disableGripper = !isGripperConnected || isMoving || gripperOperating;
+  const disableGripper = !isGripperConnected || gripperOperating;
 
   // Speed dynamics are read-only when the robot is offline (grayed out like the gripper widget)
   const disableSpeed = !robotConnected;
+
+  // Toolbar gripper quick toggle: derive open/closed from live telemetry with a
+  // mid-stroke threshold (>50% stroke = open), so the button state stays consistent
+  // with the panel CLAMP/OPEN actions and any external gripper motion via WebSocket.
+  const gripperIsOpen = isGripperConnected && (displayState.gripper?.position_mm ?? 0) > maxStrokeMm * 0.5;
 
   const wsRef = useRef<WebSocket | null>(null);
 
@@ -480,25 +486,25 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
       {/* Toolbar Row: Status LED + Action Buttons + Panel Collapse Toggle (always visible, also the collapsed header) */}
       <div className="flex items-center gap-2">
         {/* Status LED Indicator */}
-        <div className="flex items-center gap-1.5 shrink-0 w-[70px] pointer-events-none">
+        <div className="flex items-center gap-1 shrink-0 pointer-events-none">
           <div className={`w-2 h-2 rounded-full transition-colors duration-300 ${!robotConnected ? 'bg-slate-600' : isMoving ? 'bg-amber-400 animate-pulse shadow-[0_0_8px_rgba(251,191,36,0.6)]' : 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,0.6)]'}`}></div>
           <span className="text-[9px] font-medium uppercase tracking-wider text-slate-400">
             {!robotConnected ? 'Offline' : isMoving ? 'Moving' : 'Idle'}
           </span>
         </div>
-        {/* Action Buttons (Single Row, evenly distributed) */}
-        <div className="flex flex-row gap-1 flex-1 justify-between overflow-x-auto hide-scrollbar min-w-0">
+        {/* Action Buttons (Single Row, compact & evenly distributed) */}
+        <div className="flex flex-row gap-0.5 flex-1 justify-between min-w-0">
           <button
             onClick={handleConnect}
             disabled={connecting}
-            className={`px-2 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors border disabled:opacity-50 ${robotConnected ? 'bg-green-600/20 text-green-500 hover:bg-green-600 hover:text-white border-green-600/30' : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border-slate-700/50'}`}
+            className={`px-1.5 h-7 text-[11px] whitespace-nowrap rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors border disabled:opacity-50 ${robotConnected ? 'bg-green-600/20 text-green-500 hover:bg-green-600 hover:text-white border-green-600/30' : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border-slate-700/50'}`}
           >
             <Cpu size={12} className="shrink-0" /> <span>{connecting ? '...' : robotConnected ? 'Disconnect' : 'Connect'}</span>
           </button>
           <button
             onClick={handleHome}
             disabled={disableMotion}
-            className={`px-2 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors border ${activeAction === 'home'
+            className={`px-1.5 h-7 text-[11px] whitespace-nowrap rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors border ${activeAction === 'home'
                 ? 'bg-emerald-600/20 text-emerald-400 border-emerald-500/50 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)] cursor-not-allowed'
                 : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border-slate-700/50 disabled:opacity-50 disabled:cursor-not-allowed'
               }`}
@@ -508,7 +514,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
           <button
             onClick={handleZero}
             disabled={disableMotion}
-            className={`px-2 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors border ${activeAction === 'zero'
+            className={`px-1.5 h-7 text-[11px] whitespace-nowrap rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors border ${activeAction === 'zero'
                 ? 'bg-emerald-600/20 text-emerald-400 border-emerald-500/50 animate-pulse shadow-[0_0_8px_rgba(16,185,129,0.5)] cursor-not-allowed'
                 : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border-slate-700/50 disabled:opacity-50 disabled:cursor-not-allowed'
               }`}
@@ -519,7 +525,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
             onClick={handleFold}
             disabled={disableMotion}
             title="Fold robot to [0, 0, -156°, 0, 0, 0]"
-            className={`px-2 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors border ${activeAction === 'fold'
+            className={`px-1.5 h-7 text-[11px] whitespace-nowrap rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors border ${activeAction === 'fold'
                 ? 'bg-purple-600/20 text-purple-400 border-purple-500/50 animate-pulse shadow-[0_0_8px_rgba(168,85,247,0.5)] cursor-not-allowed'
                 : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border-slate-700/50 disabled:opacity-50 disabled:cursor-not-allowed'
               }`}
@@ -528,19 +534,37 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
           </button>
           <button
             onClick={handlePause}
-            className="px-2 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700/50"
+            disabled={!robotConnected}
+            className="px-1.5 h-7 text-[11px] whitespace-nowrap rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700/50 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Pause size={12} className="shrink-0" /> <span>Pause</span>
           </button>
           <button
             onClick={handleResume}
-            className="px-2 h-7 text-xs font-medium rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700/50"
+            disabled={!robotConnected}
+            className="px-1.5 h-7 text-[11px] whitespace-nowrap rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border border-slate-700/50 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <Play size={12} className="shrink-0" /> <span>Resume</span>
           </button>
+          {/* Gripper Quick Toggle: open when closed / close when open; state synced from live gripper telemetry */}
+          <button
+            onClick={gripperIsOpen ? handleGripperClamp : handleGripperOpen}
+            disabled={disableGripper}
+            title="Toggle gripper open/close (state synced from live gripper telemetry)"
+            className={`px-1.5 h-7 text-[11px] whitespace-nowrap rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors border ${
+              gripperOperating
+                ? 'bg-amber-600/20 text-amber-400 border-amber-500/50 animate-pulse cursor-not-allowed'
+                : gripperIsOpen
+                ? 'bg-amber-600/20 text-amber-300 hover:bg-amber-600 hover:text-white border-amber-600/30'
+                : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border-slate-700/50 disabled:opacity-50 disabled:cursor-not-allowed'
+            }`}
+          >
+            <Hand size={12} className="shrink-0" /> <span>{gripperIsOpen ? 'Close' : 'Open'}</span>
+          </button>
           <button
             onClick={handleEstop}
-            className="px-2 h-7 text-xs font-bold rounded-md flex items-center justify-center gap-1.5 shrink-0 transition-colors bg-red-600/20 text-red-500 hover:bg-red-600 hover:text-white border border-red-600/30"
+            disabled={!robotConnected}
+            className="px-1.5 h-7 text-[11px] whitespace-nowrap rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors bg-red-600/20 text-red-500 hover:bg-red-600 hover:text-white border border-red-600/30 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <AlertOctagon size={12} className="shrink-0" /> <span>Stop</span>
           </button>
@@ -593,24 +617,24 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
                   onMouseUp={(e) => syncGlobalSpeed(parseInt((e.target as HTMLInputElement).value))}
                   onTouchEnd={(e) => syncGlobalSpeed(parseInt((e.target as HTMLInputElement).value))}
                 />
-                <span className="text-amber-400 font-mono font-semibold text-[9px] w-7 text-right shrink-0">{globalSpeedFactor}%</span>
+                <span className={`font-mono font-semibold text-[9px] w-7 text-right shrink-0 ${disableSpeed ? 'text-slate-500' : 'text-amber-400'}`}>{globalSpeedFactor}%</span>
               </div>
-              {/* Effective caps (mm/s, °/s) & payload — max values derived from global speed factor */}
-              <div className={`font-mono text-slate-400 flex flex-wrap items-center gap-x-1 gap-y-0.5 text-[8.5px] ${disableSpeed ? 'opacity-40' : ''}`}>
-                <span>TCP <strong className="text-sky-400">{effMaxLinSpeed} mm/s</strong></span>
+              {/* Effective caps (mm/s, °/s) & payload — gray when robot offline */}
+              <div className="font-mono text-slate-400 flex flex-wrap items-center gap-x-1 gap-y-0.5 text-[8.5px]">
+                <span>TCP <strong className={disableSpeed ? 'text-slate-500' : 'text-sky-400'}>{effMaxLinSpeed} mm/s</strong></span>
                 <span className="text-slate-600">|</span>
-                <span>JNT <strong className="text-emerald-400">{effMaxJntSpeed} °/s</strong></span>
+                <span>JNT <strong className={disableSpeed ? 'text-slate-500' : 'text-emerald-400'}>{effMaxJntSpeed} °/s</strong></span>
                 <span className="text-slate-600">|</span>
-                <span>Load <strong className="text-purple-400">{(displayState.load ?? 0).toFixed(2)} kg</strong></span>
+                <span>Load <strong className={disableSpeed ? 'text-slate-500' : 'text-purple-400'}>{(displayState.load ?? 0).toFixed(2)} kg</strong></span>
               </div>
             </div>
 
-            {/* Linear / Joint Speed & Accel — 2x2 compact grid (disabled when robot offline) */}
-            <div className={`grid grid-cols-2 gap-x-2 gap-y-1.5 ${disableSpeed ? 'opacity-40' : ''}`}>
+            {/* Linear / Joint Speed & Accel — 2x2 compact grid (gray text when robot offline) */}
+            <div className="grid grid-cols-2 gap-x-2 gap-y-1.5">
               <div className="flex flex-col gap-0.5 min-w-0">
                 <div className="flex justify-between items-baseline text-[9px] font-medium">
                   <span className="text-slate-400">LIN SPEED</span>
-                  <span className="text-blue-400 font-mono font-semibold">{speedL} mm/s</span>
+                  <span className={`font-mono font-semibold ${disableSpeed ? 'text-slate-500' : 'text-blue-400'}`}>{speedL} mm/s</span>
                 </div>
                 <input
                   type="range"
@@ -630,7 +654,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
               <div className="flex flex-col gap-0.5 min-w-0">
                 <div className="flex justify-between items-baseline text-[9px] font-medium">
                   <span className="text-slate-400">LIN ACCEL</span>
-                  <span className="text-blue-400 font-mono font-semibold">{accL}%</span>
+                  <span className={`font-mono font-semibold ${disableSpeed ? 'text-slate-500' : 'text-blue-400'}`}>{accL}%</span>
                 </div>
                 <input
                   type="range"
@@ -649,7 +673,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
               <div className="flex flex-col gap-0.5 min-w-0">
                 <div className="flex justify-between items-baseline text-[9px] font-medium">
                   <span className="text-slate-400">JNT SPEED</span>
-                  <span className="text-green-400 font-mono font-semibold">{speedJ} °/s</span>
+                  <span className={`font-mono font-semibold ${disableSpeed ? 'text-slate-500' : 'text-green-400'}`}>{speedJ} °/s</span>
                 </div>
                 <input
                   type="range"
@@ -669,7 +693,7 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
               <div className="flex flex-col gap-0.5 min-w-0">
                 <div className="flex justify-between items-baseline text-[9px] font-medium">
                   <span className="text-slate-400">JNT ACCEL</span>
-                  <span className="text-green-400 font-mono font-semibold">{accJ}%</span>
+                  <span className={`font-mono font-semibold ${disableSpeed ? 'text-slate-500' : 'text-green-400'}`}>{accJ}%</span>
                 </div>
                 <input
                   type="range"
