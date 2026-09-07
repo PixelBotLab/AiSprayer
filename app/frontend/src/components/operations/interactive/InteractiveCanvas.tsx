@@ -32,6 +32,7 @@ import type {
   SimulationState,
   SessionData,
   CanvasNotice,
+  ExecutingAction,
 } from './types';
 import { PATH_PALETTE } from './types';
 import { PathStateSwitcher } from './PathStateSwitcher';
@@ -47,6 +48,7 @@ interface InteractiveCanvasProps {
   isAutoGenerating?: boolean;
   isVerifying?: boolean;
   isOptimizing?: boolean;
+  executingAction?: ExecutingAction | null;
   canvasNotice?: CanvasNotice | null;
   onDismissNotice?: () => void;
   segMode: boolean;
@@ -116,6 +118,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
   isAutoGenerating = false,
   isVerifying = false,
   isOptimizing = false,
+  executingAction = null,
   canvasNotice = null,
   onDismissNotice,
   segMode,
@@ -381,10 +384,47 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
         </div>
       )}
 
+      {/* Real-time Robot Path Execution Action Capsule Pill */}
+      {executingAction && (
+        <div
+          className={`absolute top-2 left-1/2 -translate-x-1/2 z-50 pointer-events-auto flex items-center gap-2 px-3.5 py-1.5 rounded-full border backdrop-blur-md shadow-2xl animate-hud-slide-in select-none max-w-[85%] transition-all ${
+            executingAction.isError
+              ? 'bg-slate-950/95 border-rose-500/50 text-rose-300 shadow-[0_0_25px_rgba(244,63,94,0.35)] ring-1 ring-rose-500/30'
+              : executingAction.isDone
+              ? 'bg-slate-950/95 border-emerald-500/50 text-emerald-300 shadow-[0_0_25px_rgba(16,185,129,0.35)] ring-1 ring-emerald-500/30'
+              : 'bg-slate-950/95 border-teal-500/50 text-teal-200 shadow-[0_0_25px_rgba(20,184,166,0.35)] ring-1 ring-teal-500/30'
+          }`}
+        >
+          {/* Status Indicator Dot / Icon */}
+          <div className="shrink-0 flex items-center justify-center">
+            {executingAction.isError ? (
+              <AlertOctagon size={13} className="text-rose-400" />
+            ) : executingAction.isDone ? (
+              <CheckCircle2 size={13} className="text-emerald-400" />
+            ) : (
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-teal-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-teal-400"></span>
+              </span>
+            )}
+          </div>
+
+          {/* Action Text */}
+          <span className="truncate max-w-[360px] text-[11px] font-medium tracking-wide leading-none text-slate-100">
+            {executingAction.text}
+          </span>
+
+          {/* Activity Spinner if running */}
+          {!executingAction.isDone && !executingAction.isError && (
+            <RefreshCw size={11} className="animate-spin text-teal-400 shrink-0 ml-0.5" />
+          )}
+        </div>
+      )}
+
       {/* Floating In-Canvas HUD Notification (Compact Pill) */}
       {canvasNotice && (
         <div
-          className={`absolute top-2 left-1/2 -translate-x-1/2 z-50 pointer-events-auto flex items-center gap-1.5 px-3 py-1 rounded-full border backdrop-blur-md shadow-lg animate-hud-slide-in select-none max-w-[80%] transition-all ${
+          className={`absolute ${executingAction ? 'top-11' : 'top-2'} left-1/2 -translate-x-1/2 z-50 pointer-events-auto flex items-center gap-1.5 px-3 py-1 rounded-full border backdrop-blur-md shadow-lg animate-hud-slide-in select-none max-w-[80%] transition-all ${
             canvasNotice.type === 'success'
               ? 'bg-slate-900/90 border-emerald-500/40 text-emerald-300'
               : canvasNotice.type === 'error'

@@ -36,6 +36,8 @@ interface TemplateFileListProps {
   robotConnected?: boolean;
   isVerifying?: boolean;
   isOptimizing?: boolean;
+  isExecuting?: boolean;
+  isRobotMoving?: boolean;
   onDeleteFile: (f: string) => void;
   onVerifyPath: (state: PathStateType) => void;
   onOptimizePath: (state: PathStateType) => void;
@@ -61,6 +63,8 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
   robotConnected = false,
   isVerifying = false,
   isOptimizing = false,
+  isExecuting = false,
+  isRobotMoving = false,
   onDeleteFile,
   onVerifyPath,
   onOptimizePath,
@@ -144,7 +148,7 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
   };
 
   const canExecuteFile = (fileName: string | null) => {
-    if (!fileName || !isPathYaml(fileName) || !robotConnected) return false;
+    if (!fileName || !isPathYaml(fileName) || !robotConnected || isExecuting || isRobotMoving) return false;
     const st = getFileState(fileName);
     return !!st && hasRunnablePaths(fileName) && isStateVerifiedPass(st) && hasSimTrajectory(st);
   };
@@ -160,8 +164,8 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
   // Validation: Simulation requires valid trajectory & not failed
   const canSim = hasWaypoints && isPass && hasSim;
 
-  // Validation: Physical robot execution strictly requires robot connected + waypoints + verification PASS + trajectory
-  const canExec = robotConnected && hasWaypoints && isPass && hasSim;
+  // Validation: Physical robot execution strictly requires robot connected + waypoints + verification PASS + trajectory + not executing + not moving
+  const canExec = robotConnected && hasWaypoints && isPass && hasSim && !isExecuting && !isRobotMoving;
 
   const simTooltip = !hasWaypoints
     ? 'No Waypoints to Simulate'
@@ -173,6 +177,10 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
 
   const execTooltip = !robotConnected
     ? 'Robot Not Connected'
+    : isExecuting
+    ? 'Path Execution in Progress...'
+    : isRobotMoving
+    ? 'Robot is Currently Moving'
     : !hasWaypoints
     ? 'No Waypoints to Execute'
     : isFailed
@@ -372,10 +380,14 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
                 if (canExec && onExecutePath) onExecutePath(fileName, effectiveState, null);
               }}
               className={`w-6 h-6 rounded flex items-center justify-center transition-all ${
-                canExec ? 'text-emerald-300 hover:bg-emerald-500/20 hover:text-emerald-200' : 'text-slate-600 cursor-not-allowed opacity-40'
+                isExecuting
+                  ? 'bg-emerald-500/20 text-emerald-400 cursor-wait'
+                  : canExec
+                  ? 'text-emerald-300 hover:bg-emerald-500/20 hover:text-emerald-200'
+                  : 'text-slate-600 cursor-not-allowed opacity-40'
               }`}
             >
-              <Zap size={11} />
+              {isExecuting ? <RefreshCw size={11} className="animate-spin text-emerald-400" /> : <Zap size={11} />}
             </button>
             <div className="absolute top-full mt-2 right-0 hidden group-hover:flex flex-col items-end pointer-events-none z-50">
               <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">

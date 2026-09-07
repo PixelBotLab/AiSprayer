@@ -8,7 +8,7 @@ import shutil
 import logging
 import cv2
 import numpy as np
-import yaml
+from core.utils.fast_yaml import fast_yaml_load, fast_yaml_dump
 from core.config import sprayer_config
 from core.hardware.robot.base_driver import RobotPose, is_spraying_on
 from apps.camera.services.camera_service import camera_service
@@ -236,8 +236,8 @@ def capture_template_data(name: str):
             }
         }
         params_path = os.path.join(template_path, "scan.params.yaml")
-        with open(params_path, 'w') as f:
-            yaml.dump(meta, f, default_flow_style=False)
+        with open(params_path, 'w', encoding='utf-8') as f:
+            fast_yaml_dump(meta, f)
         logger.info(f"Saved camera metadata: {params_path}")
             
         logger.info(f"Successfully completed all captures for template '{name}'.")
@@ -796,7 +796,7 @@ def get_yaml_paths_info(name: str, file_name: str):
     
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
-            data = yaml.safe_load(f) or {}
+            data = fast_yaml_load(f) or {}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to parse YAML file: {e}")
 
@@ -832,16 +832,20 @@ def execute_yaml_path(name: str, req: ExecuteYamlPathRequest):
     """
     if not robot_service.is_connected():
         raise HTTPException(status_code=400, detail="Robot is not connected. Please connect robot first in control panel.")
+    if robot_service.is_moving():
+        raise HTTPException(status_code=409, detail="Robot is currently moving. Please wait for the current motion to complete.")
 
     template_path = os.path.join(TEMPLATE_GROUP_DIR, name)
     file_path = os.path.join(template_path, req.file_name)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail=f"Path file '{req.file_name}' not found in template '{name}'")
 
+    robot_service.broadcast_exec_status(action="Parsing trajectory data & safety check...", stage="preparing")
     try:
         with open(file_path, 'r', encoding='utf-8') as f:
-            data = yaml.safe_load(f) or {}
+            data = fast_yaml_load(f) or {}
     except Exception as e:
+        robot_service.broadcast_exec_status(action=f"Failed to read path file: {e}", stage="error")
         raise HTTPException(status_code=500, detail=f"Failed to read YAML file: {e}")
 
     raw_paths = data.get("paths", [])
@@ -857,6 +861,7 @@ def execute_yaml_path(name: str, req: ExecuteYamlPathRequest):
             "Only paths verified with status 'PASS' can be executed on the physical robot."
         )
         logger.error(f"❌ [Robot Execution] {err_msg}")
+        robot_service.broadcast_exec_status(action=f"Path kinematics verification failed ({ver_status or 'UNVERIFIED'})", stage="error")
         raise HTTPException(status_code=400, detail=err_msg)
 
     # 筛选待执行的路径
@@ -879,6 +884,7 @@ def execute_yaml_path(name: str, req: ExecuteYamlPathRequest):
     acc_j = req.acc_j if req.acc_j is not None else curr_acc_j
 
     # 0. 自动根据配置文件中的 robot_tcp_id 设置机械臂工具坐标系，并读取喷涂 DO 端子编号
+    robot_service.broadcast_exec_status(action="Configuring robot tool TCP...", stage="configuring")
     sprayer_config.reload()
     target_tool_id = sprayer_config.robot_tcp_id
     target_tcp_name = sprayer_config.robot_tcp
@@ -887,14 +893,6 @@ def execute_yaml_path(name: str, req: ExecuteYamlPathRequest):
     tool_ok, tool_err = robot_service.set_tool(target_tool_id)
     if not tool_ok:
         logger.warning(f"execute_yaml_path: Warning when setting robot tool to ID {target_tool_id}: {tool_err}")
-
-    # 1. 在执行 path 之前先回到 Home 姿态 (使用 MoveJ 关节运动参数)
-    logger.info(f"execute_yaml_path: Moving robot to Home position (speed_j={speed_j}%, acc_j={acc_j}%) before trajectory execution...")
-    home_ok, home_err = robot_service.go_home(speed=speed_j, acc=acc_j)
-    if not home_ok:
-        raise HTTPException(status_code=500, detail=f"Failed to go home before path execution: {home_err}")
-
-    logger.info(f"execute_yaml_path: Robot has moved to Home position.")
 
     total_executed_pts = 0
     executed_names = []
@@ -907,6 +905,15 @@ def execute_yaml_path(name: str, req: ExecuteYamlPathRequest):
     waypoints_done = 0
 
     try:
+        # 1. 在执行 path 之前先回到 Home 姿态 (使用 MoveJ 关节运动参数)
+        robot_service.broadcast_exec_status(action="Moving robot to Home position...", stage="moving_home")
+        logger.info(f"execute_yaml_path: Moving robot to Home position (speed_j={speed_j}%, acc_j={acc_j}%) before trajectory execution...")
+        home_ok, home_err = robot_service.go_home(speed=speed_j, acc=acc_j)
+        if not home_ok:
+            raise HTTPException(status_code=500, detail=f"Failed to go home before path execution: {home_err}")
+
+        logger.info("execute_yaml_path: Robot has moved to Home position.")
+
         for p_idx, path in enumerate(target_paths):
             pts = path.get("points", [])
             valid_items = []
@@ -934,6 +941,7 @@ def execute_yaml_path(name: str, req: ExecuteYamlPathRequest):
             # 2. 第 1 条有效 path 的第 1 个 waypoint，使用 move_j 快速安全过渡过去 (关节参数，此时 DO 保持关闭)
             just_moved_j = False
             if not has_moved_j_to_start:
+                robot_service.broadcast_exec_status(action=f"Transitioning to start waypoint ({path_title})...", stage="moving_start")
                 first_pt = valid_items[0]["pose"]
                 first_pose = RobotPose.from_dict(first_pt).to_list()
                 logger.info(f"execute_yaml_path: MovJ to 1st waypoint of {path_title} -> {first_pt} "
@@ -953,6 +961,13 @@ def execute_yaml_path(name: str, req: ExecuteYamlPathRequest):
                 segments = _group_points_into_segments(exec_items)
                 logger.info(f"execute_yaml_path: Executing {len(exec_items)} waypoints in {len(segments)} segments on {path_title} "
                             f"(speed_l={speed_l} mm/s, acc_l={acc_l}%, cp={req.cp_ratio}, DO={target_do_index}, tool={target_tool_id})")
+                robot_service.broadcast_exec_status(
+                    action=f"Executing spray trajectory ({path_title}, pt {waypoints_done + 1}/{total_waypoints_all})...",
+                    stage="spraying",
+                    progress=waypoints_done / max(total_waypoints_all, 1),
+                    current_waypoint=waypoints_done,
+                    total_waypoints=total_waypoints_all,
+                )
                 # move_l_segments 只在最后一段等待轨迹真正执行完成，因此进度按整条 path 粒度上报
                 batch_ok, batch_err = robot_service.move_l_segments(
                     segments,
@@ -973,6 +988,19 @@ def execute_yaml_path(name: str, req: ExecuteYamlPathRequest):
                 path_idx=p_idx,
                 total_paths=len(target_paths)
             )
+
+        # 4. 轨迹全部执行完毕后回位至 Home
+        robot_service.broadcast_exec_status(action="Trajectory complete, returning to Home...", stage="returning_home")
+        logger.info(f"execute_yaml_path: Returning robot to Home position after trajectory (speed_j={speed_j}%, acc_j={acc_j}%)...")
+        home_ok, home_err = robot_service.go_home(speed=speed_j, acc=acc_j)
+        if not home_ok:
+            raise HTTPException(status_code=500, detail=f"Failed to go home after path execution: {home_err}")
+
+        robot_service.broadcast_exec_status(action="Spray task executed successfully", stage="done")
+    except Exception as e:
+        robot_service.broadcast_exec_status(action=f"Execution aborted: {str(e)}", stage="error")
+        logger.exception(f"execute_yaml_path: Trajectory execution failed: {e}")
+        raise
     finally:
         # 执行完成或异常中断时，强制安全关闭机械臂喷涂 DO (使用立即指令确保关喷)
         logger.info(f"execute_yaml_path: Setting robot spray DO (index {target_do_index}) to OFF (0)...")
@@ -983,12 +1011,6 @@ def execute_yaml_path(name: str, req: ExecuteYamlPathRequest):
             time.sleep(0.05)
         except Exception as e:
             logger.error(f"execute_yaml_path: Exception while turning off DO({target_do_index}, 0): {e}")
-
-    logger.info(f"execute_yaml_path: Returning robot to Home position after trajectory (speed_j={speed_j}%, acc_j={acc_j}%)...")
-    home_ok, home_err = robot_service.go_home(speed=speed_j, acc=acc_j)
-    if not home_ok:
-        raise HTTPException(status_code=500, detail=f"Failed to go home after path execution: {home_err}")
-
 
     return {
         "status": "success",

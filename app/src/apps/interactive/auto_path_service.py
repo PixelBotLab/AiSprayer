@@ -10,7 +10,7 @@ from typing import Any, Optional
 
 import numpy as np
 import trimesh
-import yaml
+from core.utils.fast_yaml import fast_yaml_load
 
 from apps.interactive.manual_path_service import manual_path_service
 from apps.interactive.reconstruction_service import reconstruction_service
@@ -156,7 +156,7 @@ class AutoPathService:
         if os.path.exists(params_path):
             try:
                 with open(params_path, "r", encoding="utf-8") as f:
-                    pdata = yaml.safe_load(f) or {}
+                    pdata = fast_yaml_load(f) or {}
                 cam = pdata.get("camera_params") or {}
                 k_list = cam.get("intrinsic_matrix")
                 if k_list:

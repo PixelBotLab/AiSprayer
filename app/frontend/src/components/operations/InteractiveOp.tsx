@@ -18,6 +18,7 @@ import type {
   PathStateType,
   SimulationState,
   CanvasNotice,
+  ExecutingAction,
 } from './interactive/types';
 import { STATE_THEMES, pathSourceOf } from './interactive/types';
 import { computeNormalClientSide } from './interactive/normalComputation';
@@ -184,6 +185,10 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
 
   // ─── 9. Robot Real-Time State (via WebSocket) ──────────────────────────
   const [robotConnected, setRobotConnected] = useState<boolean>(false);
+  const [robotStatus, setRobotStatus] = useState<number | null>(null);
+  const [isExecutingPath, setIsExecutingPath] = useState<boolean>(false);
+  const [executingAction, setExecutingAction] = useState<ExecutingAction | null>(null);
+  const execActionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const robotWsRef = useRef<WebSocket | null>(null);
   // Ref for per-WS-message projection of real TCP → pixel (avoids stale closure)
   const sessionDataRef = useRef<typeof sessionData>(null);
@@ -213,6 +218,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
           if (msg.type === 'robot_state') {
             // Mark robot as connected any time we get a valid state push
             setRobotConnected(true);
+            if (typeof msg.data?.status === 'number') {
+              setRobotStatus(msg.data.status);
+            }
 
             // In real-exec mode: drive currentPixel + currentJoints from real TCP
             setSimulationState((prev) => {
@@ -271,12 +279,42 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
                 isPlaying: !isDone,
               };
             });
+          } else if (msg.type === 'exec_status') {
+            // Real-time execution action status broadcast from backend
+            const d = msg.data as {
+              action: string;
+              stage: string;
+              detail?: string;
+              progress?: number;
+            };
+            if (execActionTimerRef.current) {
+              clearTimeout(execActionTimerRef.current);
+              execActionTimerRef.current = null;
+            }
+            const isDone = d.stage === 'done';
+            const isError = d.stage === 'error';
+            setExecutingAction({
+              text: d.action,
+              stage: d.stage,
+              isDone,
+              isError,
+              progress: d.progress,
+            });
+            if (isDone || isError) {
+              setIsExecutingPath(false);
+              execActionTimerRef.current = setTimeout(() => {
+                setExecutingAction(null);
+              }, isDone ? 3000 : 5000);
+            } else {
+              setIsExecutingPath(true);
+            }
           }
         } catch {}
       };
       ws.onclose = () => {
         // When WS closes, robot might be disconnected
         setRobotConnected(false);
+        setRobotStatus(null);
         reconnectTimer = setTimeout(connect, 3000);
       };
     };
@@ -284,6 +322,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     connect();
     return () => {
       if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (execActionTimerRef.current) clearTimeout(execActionTimerRef.current);
       ws?.close();
     };
   }, []);
@@ -535,7 +574,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       // 后端已按面积降序，[0] 即画面主体
       const box: number[] | undefined = data.detections?.[0]?.box;
       if (!box) {
-        if (!silent) showNotice('info', '未检出目标，请手动点选分割');
+        if (!silent) showNotice('info', 'No target detected. Please click to segment manually');
         return;
       }
       setCurrentBox(box);
@@ -546,7 +585,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       }
     } catch (err: any) {
       console.warn('Auto-detect error:', err);
-      if (!silent) showNotice('error', `自动检测失败: ${err.message}`);
+      if (!silent) showNotice('error', `Auto detection failed: ${err.message}`);
     } finally {
       setIsDetecting(false);
     }
@@ -1098,7 +1137,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
 
   // ─── Direct Robot Path Execution with 2D Live Progress ────────────────────
   const handleDirectExecutePath = async (fileName: string, stateType?: PathStateType, pathId?: number | null) => {
-    if (!activeTemplate) return;
+    if (!activeTemplate || isExecutingPath || robotStatus === 1) return;
     const targetState = stateType || activeState;
     handleSelectActiveState(targetState);
 
@@ -1108,6 +1147,18 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       showNotice('warning', `Unverified: Verify ${targetState.toUpperCase()} first`);
       return;
     }
+
+    // Lock execution button immediately and initiate action HUD
+    setIsExecutingPath(true);
+    if (execActionTimerRef.current) {
+      clearTimeout(execActionTimerRef.current);
+      execActionTimerRef.current = null;
+    }
+    setExecutingAction({
+      text: 'Initializing spray trajectory...',
+      stage: 'preparing',
+      progress: 0,
+    });
 
     // Count total waypoints in the target paths for progress state initialisation
     const srcPaths = pathsForState(targetState);
@@ -1143,11 +1194,31 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         }),
       });
       if (!res.ok) {
-        const err = await res.json();
+        const err = await res.json().catch(() => ({ detail: 'Execution failed' }));
         console.error('Robot path execution error:', err.detail || 'Execution failed');
+        setExecutingAction({
+          text: `Execution failed: ${err.detail || 'Execution error'}`,
+          stage: 'error',
+          isError: true,
+        });
+        setIsExecutingPath(false);
+        if (execActionTimerRef.current) clearTimeout(execActionTimerRef.current);
+        execActionTimerRef.current = setTimeout(() => {
+          setExecutingAction(null);
+        }, 5000);
       }
     } catch (err: any) {
       console.error('Failed to execute path on robot:', err);
+      setExecutingAction({
+        text: `Execution failed: ${err.message || 'Network connection error'}`,
+        stage: 'error',
+        isError: true,
+      });
+      setIsExecutingPath(false);
+      if (execActionTimerRef.current) clearTimeout(execActionTimerRef.current);
+      execActionTimerRef.current = setTimeout(() => {
+        setExecutingAction(null);
+      }, 5000);
     } finally {
       // Mark done when HTTP completes (WS exec_progress should have already done this)
       setSimulationState((prev) => prev?.isRealExec ? { ...prev, isPlaying: false } : prev);
@@ -1344,6 +1415,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
           isAutoGenerating={isAutoGenerating}
           isVerifying={isVerifying}
           isOptimizing={isOptimizing}
+          executingAction={executingAction}
           canvasNotice={canvasNotice}
           onDismissNotice={() => setCanvasNotice(null)}
           segMode={segMode}
@@ -1563,6 +1635,8 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
               robotConnected={robotConnected}
               isVerifying={isVerifying}
               isOptimizing={isOptimizing}
+              isExecuting={isExecutingPath}
+              isRobotMoving={robotStatus === 1}
               onVerifyPath={handleVerifyPath}
               onOptimizePath={handleOptimizePath}
               onSimulatePath={(st, pId) => startSimulation(st, pId)}

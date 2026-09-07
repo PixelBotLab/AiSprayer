@@ -97,6 +97,15 @@ export interface PoiConfig {
   anchor_source?: 'home' | 'live' | 'manual' | 'raw';
 }
 
+export interface ExecutingAction {
+  text: string;
+  stage?: 'preparing' | 'configuring' | 'moving_home' | 'moving_start' | 'spraying' | 'returning_home' | 'done' | 'error' | string;
+  isDone?: boolean;
+  isError?: boolean;
+  progress?: number;
+}
+
+
 export interface SimulationState {
   isPlaying: boolean;
   progress: number; // 0.0 to 1.0

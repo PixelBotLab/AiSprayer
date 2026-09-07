@@ -156,6 +156,20 @@ class RobotService:
     def is_connected(self) -> bool:
         return self._is_connected
 
+    def get_running_state(self) -> int:
+        """获取机械臂运行状态 (0=Idle, 1=Moving)"""
+        if not self._driver or not self._is_connected:
+            return 0
+        try:
+            return int(self._driver.get_running_state())
+        except Exception as e:
+            logger.warning(f"Error getting running state from driver: {e}")
+            return 0
+
+    def is_moving(self) -> bool:
+        """检查机械臂是否正在运动中"""
+        return self.get_running_state() == 1
+
     def get_speed(self) -> tuple[float, float, float, float]:
         return self._speed_l, self._acc_l, self._speed_j, self._acc_j
 
@@ -535,6 +549,31 @@ class RobotService:
                 "path_idx": path_idx,
                 "total_paths": total_paths,
                 "progress": current_waypoint / max(total_waypoints, 1),
+            }
+        }
+        for cb in self._ws_callbacks:
+            try:
+                cb(payload)
+            except Exception:
+                pass
+
+    def broadcast_exec_status(
+        self,
+        action: str,
+        stage: str = "running",
+        progress: Optional[float] = None,
+        current_waypoint: int = 0,
+        total_waypoints: int = 0
+    ):
+        """向所有 WebSocket 客户端广播机械臂任务执行状态与动作描述 (用于前端主图胶囊显示)。"""
+        payload = {
+            "type": "exec_status",
+            "data": {
+                "action": action,
+                "stage": stage,  # "preparing", "configuring", "moving_home", "moving_start", "spraying", "returning_home", "done", "error"
+                "progress": progress,
+                "current_waypoint": current_waypoint,
+                "total_waypoints": total_waypoints,
             }
         }
         for cb in self._ws_callbacks:
