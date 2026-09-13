@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Play, FolderPlus, Trash2, Image as ImageIcon, Camera, ChevronLeft, ChevronRight, RotateCw } from 'lucide-react';
 import { CustomModal, type ModalConfig } from '../common/CustomModal';
+import { TOOLTIP_BASE_CLASS, Tooltip } from '../common/Tooltip';
 import { API_BASE } from '../../config';
 
 type MountCatalog = {
@@ -40,6 +41,7 @@ const CalibrationOp: React.FC = () => {
   const [isRunning, setIsRunning] = useState(false);
   const [isResampling, setIsResampling] = useState(false);
   const [progressData, setProgressData] = useState<{current: number, total: number, status: string, message?: string} | null>(null);
+  const [hoveredSessionDelete, setHoveredSessionDelete] = useState<{ x: number; y: number } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const minSamples = sessionData.min_samples ?? 3;
@@ -352,25 +354,29 @@ const CalibrationOp: React.FC = () => {
       {/* TOP BAR: Sessions */}
       <div className="h-9 bg-slate-900 border-b border-slate-800 flex items-center px-2 justify-between select-none shrink-0 z-10 gap-1.5">
         {/* Left Action: New Session Button */}
-        <button
-          onClick={handleCreateSession}
-          className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-sky-400 border border-slate-700 shrink-0 transition-colors flex items-center gap-1 text-xs font-medium px-2"
-          title={`Create New ${MOUNT_LABELS[selectedMount] || selectedMount} Session`}
-        >
-          <FolderPlus size={13} />
-          <span>New</span>
-        </button>
+        <div className="relative group flex items-center shrink-0">
+          <button
+            onClick={handleCreateSession}
+            className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-sky-400 border border-slate-700 shrink-0 transition-colors flex items-center gap-1 text-xs font-medium px-2"
+          >
+            <FolderPlus size={13} />
+            <span>New</span>
+          </button>
+          <Tooltip text={`Create New ${MOUNT_LABELS[selectedMount] || selectedMount} Session`} side="bottom" />
+        </div>
 
         <div className="h-4 w-[1px] bg-slate-800 shrink-0" />
 
         {/* Left Scroll Arrow */}
-        <button
-          onClick={() => scrollTabs('left')}
-          className="p-1 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded transition-colors shrink-0"
-          title="Scroll Left"
-        >
-          <ChevronLeft size={15} />
-        </button>
+        <div className="relative group flex items-center shrink-0">
+          <button
+            onClick={() => scrollTabs('left')}
+            className="p-1 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded transition-colors"
+          >
+            <ChevronLeft size={15} />
+          </button>
+          <Tooltip text="Scroll Left" side="bottom" />
+        </div>
         
         {/* Center Sessions Container */}
         <div
@@ -390,29 +396,48 @@ const CalibrationOp: React.FC = () => {
                 onClick={() => setActiveSession(session)}
               >
                 <span>{session}</span>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    handleDeleteSession(session);
-                  }}
-                  className="opacity-0 group-hover:opacity-100 hover:text-rose-400 p-0.5 rounded transition-opacity"
-                  title="Delete Session"
-                >
-                  <Trash2 size={11} />
-                </button>
+                <div className="relative flex items-center">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setHoveredSessionDelete(null);
+                      handleDeleteSession(session);
+                    }}
+                    onMouseEnter={(e) => {
+                      const r = e.currentTarget.getBoundingClientRect();
+                      setHoveredSessionDelete({ x: r.left + r.width / 2, y: r.bottom + 6 });
+                    }}
+                    onMouseLeave={() => setHoveredSessionDelete(null)}
+                    className="opacity-0 group-hover:opacity-100 hover:text-rose-400 p-0.5 rounded transition-opacity"
+                  >
+                    <Trash2 size={11} />
+                  </button>
+                </div>
               </div>
             );
           })}
         </div>
 
         {/* Right Scroll Arrow */}
-        <button
-          onClick={() => scrollTabs('right')}
-          className="p-1 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded transition-colors shrink-0"
-          title="Scroll Right"
-        >
-          <ChevronRight size={15} />
-        </button>
+        <div className="relative group flex items-center shrink-0">
+          <button
+            onClick={() => scrollTabs('right')}
+            className="p-1 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded transition-colors"
+          >
+            <ChevronRight size={15} />
+          </button>
+          <Tooltip text="Scroll Right" side="bottom" />
+        </div>
+
+        {/* Fixed Unclipped Tooltip for Session Delete */}
+        {hoveredSessionDelete && (
+          <div
+            className={`fixed pointer-events-none z-[100] -translate-x-1/2 ${TOOLTIP_BASE_CLASS}`}
+            style={{ left: hoveredSessionDelete.x, top: hoveredSessionDelete.y }}
+          >
+            Delete Session
+          </div>
+        )}
       </div>
 
       {/* MAIN CONTENT: 3 Columns */}
@@ -508,43 +533,62 @@ const CalibrationOp: React.FC = () => {
             
             {/* Hand-Eye Mount: selectable for a new session, locked once bound */}
             <div className="flex justify-between items-center gap-1.5 bg-slate-900 border border-slate-800 rounded px-2 py-1 shadow-inner">
-              <span className="text-[9px] text-slate-500 uppercase tracking-wider font-bold shrink-0"
-                    title={activeSession
+              <div className="relative group flex items-center shrink-0">
+                <span className="text-[9px] text-slate-500 uppercase tracking-wider font-bold cursor-help">
+                  Mount
+                </span>
+                <Tooltip
+                  multiline
+                  text={
+                    activeSession
                       ? "Bound at session creation. Pick a different mount and press New to start a new session."
-                      : "Camera mounting for the next session created by New."}>
-                Mount
-              </span>
+                      : "Camera mounting for the next session created by New."
+                  }
+                  side="bottom"
+                />
+              </div>
               <div className="flex items-center gap-0.5 p-0.5 bg-slate-800/60 rounded-md border border-slate-700">
                 {(mountCatalog?.mounts || ['eye-to-hand', 'eye-in-hand']).map((m) => {
                   const bound = activeSession ? activeMount : selectedMount;
                   const isBoundCurrent = !!activeSession;
                   const active = bound === m;
                   return (
-                    <button
-                      key={m}
-                      disabled={isBoundCurrent}
-                      onClick={() => setSelectedMount(m)}
-                      title={`${MOUNT_LABELS[m] || m}: ${MOUNT_HINTS[m] || m}`}
-                      aria-label={MOUNT_LABELS[m] || m}
-                      className={`px-1.5 py-1 rounded text-[9px] font-mono font-bold uppercase tracking-wide transition-colors border ${
-                        active
-                          ? m === 'eye-in-hand'
-                            ? 'text-indigo-300 bg-indigo-950/40 border-indigo-700/60'
-                            : 'text-emerald-400 bg-emerald-950/40 border-emerald-700/60'
-                          : 'text-slate-500 border-transparent hover:text-slate-200 hover:bg-slate-700/60'
-                      } ${isBoundCurrent ? 'cursor-not-allowed' : ''}`}
-                    >
-                      {MOUNT_ABBREV[m] || m}
-                    </button>
+                    <div key={m} className="relative group flex items-center">
+                      <button
+                        disabled={isBoundCurrent}
+                        onClick={() => setSelectedMount(m)}
+                        aria-label={MOUNT_LABELS[m] || m}
+                        className={`px-1.5 py-1 rounded text-[9px] font-mono font-bold uppercase tracking-wide transition-colors border ${
+                          active
+                            ? m === 'eye-in-hand'
+                              ? 'text-indigo-300 bg-indigo-950/40 border-indigo-700/60'
+                              : 'text-emerald-400 bg-emerald-950/40 border-emerald-700/60'
+                            : 'text-slate-500 border-transparent hover:text-slate-200 hover:bg-slate-700/60'
+                        } ${isBoundCurrent ? 'cursor-not-allowed' : ''}`}
+                      >
+                        {MOUNT_ABBREV[m] || m}
+                      </button>
+                      <Tooltip
+                        text={`${MOUNT_LABELS[m] || m}: ${MOUNT_HINTS[m] || m}`}
+                        side="bottom"
+                        align={m === 'eye-in-hand' ? 'end' : 'start'}
+                        multiline
+                        maxWidthClass="max-w-[240px]"
+                      />
+                    </div>
                   );
                 })}
               </div>
             </div>
 
             {quality?.degenerate && (
-              <div className="bg-rose-950/40 border border-rose-900/60 rounded px-2 py-1 text-[8.5px] text-rose-300 leading-tight"
-                   title="All samples rotate about nearly the same axis, so the hand-eye transform is not uniquely observable. Capture waypoints with the flange rotated about clearly different axes.">
+              <div className="relative group bg-rose-950/40 border border-rose-900/60 rounded px-2 py-1 text-[8.5px] text-rose-300 leading-tight cursor-help">
                 Rotation degenerate (axis coverage {quality.axis_coverage?.toFixed(2)}): result may be unreliable.
+                <Tooltip
+                  multiline
+                  text="All samples rotate about nearly the same axis, so the hand-eye transform is not uniquely observable. Capture waypoints with the flange rotated about clearly different axes."
+                  side="top"
+                />
               </div>
             )}
 
@@ -562,13 +606,19 @@ const CalibrationOp: React.FC = () => {
                 {/* Errors */}
                 <div className="bg-slate-900 border border-slate-800 rounded p-2 grid grid-cols-3 gap-1 shadow-inner text-[9px]">
                   <div className="flex flex-col">
-                    <span className="text-slate-500 text-[8.5px]" title="Mean corner reprojection error in pixels">Reproj</span>
+                    <div className="relative group inline-flex items-center">
+                      <span className="text-slate-500 text-[8.5px] cursor-help">Reproj</span>
+                      <Tooltip text="Mean corner reprojection error in pixels" side="top" />
+                    </div>
                     <span className="text-xs font-mono text-emerald-400 font-bold leading-tight">
                       {reprojPx != null ? `${reprojPx.toFixed(2)} px` : 'N/A'}
                     </span>
                   </div>
-                  <div className="flex flex-col" title="Mean board-position residual of the fitted model in mm">
-                    <span className="text-slate-500 text-[8.5px]">Residual</span>
+                  <div className="flex flex-col">
+                    <div className="relative group inline-flex items-center">
+                      <span className="text-slate-500 text-[8.5px] cursor-help">Residual</span>
+                      <Tooltip text="Mean board-position residual of the fitted model in mm" side="top" />
+                    </div>
                     <span className="text-xs font-mono text-emerald-400 font-bold leading-tight">
                       {reprojMm != null ? `${reprojMm.toFixed(2)} mm` : 'N/A'}
                     </span>
@@ -663,11 +713,11 @@ const CalibrationOp: React.FC = () => {
                 >
                   <Camera size={14} className={isCapturing ? "animate-pulse text-sky-400" : "text-slate-300"} />
                 </button>
-                <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-                  <div className="bg-slate-950/80 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
-                    {isCapturing ? 'Capturing Sample...' : 'Capture Single Sample at Current Pose'}
-                  </div>
-                </div>
+                <Tooltip
+                  text={isCapturing ? 'Capturing Sample...' : 'Capture Single Sample at Current Pose'}
+                  side="top"
+                  align="start"
+                />
               </div>
               
               {/* 2. Resample & Calibrate Button */}
@@ -679,11 +729,11 @@ const CalibrationOp: React.FC = () => {
                 >
                   <RotateCw size={14} className={isResampling ? "animate-spin text-sky-400" : "text-slate-300"} />
                 </button>
-                <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-                  <div className="bg-slate-950/80 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
-                    {isResampling ? 'Resampling Waypoints...' : 'Resample All Waypoints & Calibrate'}
-                  </div>
-                </div>
+                <Tooltip
+                  text={isResampling ? 'Resampling Waypoints...' : 'Resample All Waypoints & Calibrate'}
+                  side="top"
+                  align="center"
+                />
               </div>
 
               {/* 3. Calibrate Button */}
@@ -695,11 +745,11 @@ const CalibrationOp: React.FC = () => {
                 >
                   <Play size={14} fill="currentColor" className={isRunning ? "animate-pulse text-sky-400" : "text-slate-300"} />
                 </button>
-                <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-                  <div className="bg-slate-950/80 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
-                    {isRunning ? 'Solving Calibration...' : 'Calculate Calibration from Samples'}
-                  </div>
-                </div>
+                <Tooltip
+                  text={isRunning ? 'Solving Calibration...' : 'Calculate Calibration from Samples'}
+                  side="top"
+                  align="center"
+                />
               </div>
 
               {/* 4. Delete Session Button */}
@@ -711,11 +761,11 @@ const CalibrationOp: React.FC = () => {
                 >
                   <Trash2 size={14} className="text-slate-300 group-hover:text-red-400 transition-colors" />
                 </button>
-                <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-                  <div className="bg-slate-950/80 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
-                    Delete Current Session
-                  </div>
-                </div>
+                <Tooltip
+                  text="Delete Current Session"
+                  side="top"
+                  align="end"
+                />
               </div>
             </div>
           </div>

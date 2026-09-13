@@ -1,11 +1,5 @@
 import React, { useState, useEffect, useRef, type MouseEvent } from 'react';
 import { API_BASE, WS_BASE } from '../../config';
-import {
-  Play,
-  Pause,
-  X,
-} from 'lucide-react';
-
 import type {
   FileItem,
   Point,
@@ -20,13 +14,14 @@ import type {
   CanvasNotice,
   ExecutingAction,
 } from './interactive/types';
-import { STATE_THEMES, pathSourceOf } from './interactive/types';
+import { pathSourceOf } from './interactive/types';
 import { computeNormalClientSide } from './interactive/normalComputation';
 import { InteractiveCanvas } from './interactive/InteractiveCanvas';
 import { TemplateTopBar } from './interactive/TemplateFileManager';
 import { TemplateFileList } from './interactive/TemplateFileList';
 import { FollowPanel } from './interactive/FollowPanel';
 import { InteractiveActionColumn } from './interactive/InteractiveActionColumn';
+import { SimulationPlaybackHUD } from './interactive/SimulationPlaybackHUD';
 
 interface InteractiveOpProps {
   externalActiveTemplate?: string | null;
@@ -35,6 +30,7 @@ interface InteractiveOpProps {
   onPathsUpdated?: () => void;
   onPathStateChange?: (state: PathStateType) => void;
   onSimulationJointsChange?: (joints: number[] | null) => void;
+  onSimulationSprayingChange?: (isSpraying: boolean) => void;
 }
 
 function projectBasePointToPixel(
@@ -69,6 +65,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
   onPathsUpdated,
   onPathStateChange,
   onSimulationJointsChange,
+  onSimulationSprayingChange,
 }) => {
   // ─── 1. Template & File State ──────────────────────────────────────────
   const [templates, setTemplates] = useState<string[]>([]);
@@ -143,6 +140,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       tcp: { x: number; y: number; z: number; rx: number; ry: number; rz: number };
       pixel: [number, number] | null;
       pathIdx: number;
+      spraying?: boolean;
     }>;
     stepIndex: number;
     speedMultiplier: number;
@@ -920,9 +918,11 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       tcp: { x: number; y: number; z: number; rx: number; ry: number; rz: number };
       pixel: [number, number] | null;
       pathIdx: number;
+      spraying: boolean;
     }> = [];
 
     if (rep?.path_reports && rep.path_reports.length > 0) {
+      const srcPaths = pathsForState(stateType);
       // Filter target path reports if a specific path is requested
       const targetReports = (targetPathId !== undefined && targetPathId !== null)
         ? rep.path_reports.filter((pr: any, idx: number) => (pr.path_id === targetPathId || idx + 1 === targetPathId))
@@ -930,6 +930,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
 
       targetReports.forEach((pr, pIdx) => {
         const realPIdx = rep.path_reports ? rep.path_reports.indexOf(pr) : pIdx;
+        const matchingPath = srcPaths.find((p: any) => p.path_id === pr.path_id) || srcPaths[realPIdx] || srcPaths[pIdx];
         const tq = pr.trajectory_q || [];
         const tt = pr.trajectory_tcp || [];
         const totalPSteps = Math.min(tq.length, tt.length);
@@ -947,6 +948,17 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
             rz: tcpArr[5],
           };
 
+          // Map step progress to matching waypoint spraying flag
+          let isSpraying = true;
+          if (matchingPath?.points && matchingPath.points.length > 0) {
+            const wpIdx = Math.min(
+              matchingPath.points.length - 1,
+              Math.floor((s / Math.max(1, totalPSteps - 1)) * matchingPath.points.length)
+            );
+            const wp = matchingPath.points[wpIdx];
+            isSpraying = wp.spraying !== 'off' && !wp.is_jump;
+          }
+
           // Project base 3D point to 2D pixel
           let pixelProj: [number, number] | null = null;
           if (sessionData) {
@@ -962,6 +974,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
             tcp: tcpPose,
             pixel: pixelProj,
             pathIdx: realPIdx >= 0 ? realPIdx : pIdx,
+            spraying: isSpraying,
           });
         }
       });
@@ -977,6 +990,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
         for (let i = 0; i < points.length; i++) {
           const pt = points[i];
           const nextPt = i < points.length - 1 ? points[i + 1] : null;
+          const isSpraying = pt.spraying !== 'off' && !pt.is_jump;
 
           // Dense interpolation between consecutive waypoints for smooth visualization (~10 sub-steps)
           const subSteps = nextPt ? 10 : 1;
@@ -1007,6 +1021,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
               tcp: interpTcp,
               pixel: pixelProj,
               pathIdx: path.path_id !== undefined ? path.path_id : pIdx,
+              spraying: isSpraying,
             });
           }
         }
@@ -1042,6 +1057,13 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       activeState: stateType,
     });
 
+    if (onSimulationJointsChange) {
+      onSimulationJointsChange(simSteps[0].q_deg);
+    }
+    if (onSimulationSprayingChange) {
+      onSimulationSprayingChange(simSteps[0].spraying ?? false);
+    }
+
     // Start 60 FPS animation loop
     let lastTime = performance.now();
     const animate = (time: number) => {
@@ -1049,7 +1071,10 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       lastTime = time;
 
       const sim = simDataRef.current;
-      if (!sim.isPlaying || sim.steps.length === 0) return;
+      if (!sim.isPlaying || sim.steps.length === 0) {
+        if (onSimulationSprayingChange) onSimulationSprayingChange(false);
+        return;
+      }
 
       // Advance step based on speed multiplier (nominal MoveL step rate ~ 60 steps/sec)
       const stepIncrement = Math.max(1, Math.round(60 * dt * sim.speedMultiplier));
@@ -1058,6 +1083,7 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       if (sim.stepIndex >= sim.steps.length) {
         sim.stepIndex = sim.steps.length - 1;
         sim.isPlaying = false;
+        if (onSimulationSprayingChange) onSimulationSprayingChange(false);
       }
 
       const curr = sim.steps[sim.stepIndex];
@@ -1079,6 +1105,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       if (onSimulationJointsChange) {
         onSimulationJointsChange(curr.q_deg);
       }
+      if (onSimulationSprayingChange) {
+        onSimulationSprayingChange(sim.isPlaying ? (curr.spraying ?? false) : false);
+      }
 
       simAnimFrameRef.current = requestAnimationFrame(animate);
     };
@@ -1090,6 +1119,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     if (simAnimFrameRef.current) cancelAnimationFrame(simAnimFrameRef.current);
     simDataRef.current.isPlaying = false;
     setSimulationState((prev) => (prev ? { ...prev, isPlaying: false } : null));
+    if (onSimulationSprayingChange) {
+      onSimulationSprayingChange(false);
+    }
   };
 
   const resumeSimulation = () => {
@@ -1132,6 +1164,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
       if (onSimulationJointsChange) {
         onSimulationJointsChange(curr.q_deg);
       }
+      if (onSimulationSprayingChange) {
+        onSimulationSprayingChange(curr.spraying ?? false);
+      }
 
       simAnimFrameRef.current = requestAnimationFrame(animate);
     };
@@ -1166,6 +1201,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     if (onSimulationJointsChange) {
       onSimulationJointsChange(curr.q_deg);
     }
+    if (onSimulationSprayingChange) {
+      onSimulationSprayingChange(curr.spraying ?? false);
+    }
   };
 
   const stopSimulation = () => {
@@ -1175,6 +1213,9 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
     setSimulationState(null);
     if (onSimulationJointsChange) {
       onSimulationJointsChange(null);
+    }
+    if (onSimulationSprayingChange) {
+      onSimulationSprayingChange(false);
     }
   };
 
@@ -1575,65 +1616,13 @@ const InteractiveOp: React.FC<InteractiveOpProps> = ({
 
         {/* 3D/2D Synchronized Simulation Floating Playback Control Bar (Feature 7) */}
         {simulationState && (
-          <div className="absolute top-4 left-1/2 -translate-x-1/2 z-40 bg-slate-950/90 backdrop-blur-md border border-sky-500/40 rounded-full px-4 py-1.5 shadow-2xl flex items-center gap-3 text-slate-200 text-xs select-none">
-            {/* Play/Pause Button */}
-            <button
-              onClick={simulationState.isPlaying ? pauseSimulation : resumeSimulation}
-              className="p-1.5 rounded-full bg-sky-600 hover:bg-sky-500 text-white shadow transition-all"
-              title={simulationState.isPlaying ? 'Pause Simulation' : 'Resume Simulation'}
-            >
-              {simulationState.isPlaying ? <Pause size={12} /> : <Play size={12} className="fill-white" />}
-            </button>
-
-            {/* State Badge */}
-            <span
-              className={`text-[9px] font-bold font-mono px-1.5 py-0.5 rounded border ${STATE_THEMES[simulationState.activeState].bg
-                } ${STATE_THEMES[simulationState.activeState].text} ${STATE_THEMES[simulationState.activeState].border}`}
-            >
-              {simulationState.activeState.toUpperCase()} SIM
-            </span>
-
-            {/* Step & Progress Scrubber */}
-            <div className="flex items-center gap-2">
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.002}
-                value={simulationState.progress}
-                onChange={(e) => seekSimulation(parseFloat(e.target.value))}
-                className="w-32 accent-sky-400 h-1.5 bg-slate-800 rounded cursor-pointer"
-              />
-              <span className="text-[10px] font-mono text-slate-400 w-16 text-right">
-                {Math.round(simulationState.progress * 100)}% ({simulationState.currentStep}/{simulationState.totalSteps})
-              </span>
-            </div>
-
-            {/* Speed Multiplier Options */}
-            <div className="flex items-center gap-1 bg-slate-900 rounded p-0.5 border border-slate-800 text-[9.5px] font-mono">
-              {[0.5, 1.0, 2.0, 5.0].map((spd) => (
-                <button
-                  key={spd}
-                  onClick={() => setSimulationSpeed(spd)}
-                  className={`px-1.5 py-0.5 rounded transition-all ${simulationState.speed === spd
-                      ? 'bg-sky-600 text-white font-bold'
-                      : 'text-slate-400 hover:text-slate-200'
-                    }`}
-                >
-                  {spd}x
-                </button>
-              ))}
-            </div>
-
-            {/* Close / Stop Button */}
-            <button
-              onClick={stopSimulation}
-              className="p-1 text-slate-400 hover:text-rose-400 transition-colors ml-1"
-              title="Stop Simulation"
-            >
-              <X size={14} />
-            </button>
-          </div>
+          <SimulationPlaybackHUD
+            simulationState={simulationState}
+            onPlayPause={simulationState.isPlaying ? pauseSimulation : resumeSimulation}
+            onSeek={seekSimulation}
+            onSpeedChange={setSimulationSpeed}
+            onStop={stopSimulation}
+          />
         )}
 
         {/* Right Side Panel (w-[320px]): Top Action Toolbar + File List */}

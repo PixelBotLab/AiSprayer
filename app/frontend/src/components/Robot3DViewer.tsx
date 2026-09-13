@@ -2,7 +2,7 @@ import React, { useEffect, useState, useRef } from 'react';
 import { Canvas, useFrame } from '@react-three/fiber';
 import { OrbitControls, Grid } from '@react-three/drei';
 import URDFLoader from 'urdf-loader';
-import { Maximize2, Minimize2, Eye, EyeOff, Box, Grid3X3, Route, Spline } from 'lucide-react';
+import { Maximize2, Minimize2, Eye, EyeOff, Box, Grid3X3, Route, Spline, Droplets } from 'lucide-react';
 import { API_BASE } from '../config';
 import {
   Object3D,
@@ -18,16 +18,25 @@ import {
   Color,
   DoubleSide,
   BufferGeometry,
+  BufferAttribute,
   InstancedInterleavedBuffer,
   InterleavedBufferAttribute,
   DynamicDrawUsage,
   Vector3,
   Euler,
+  Quaternion,
   ArrowHelper,
   Sprite,
   SpriteMaterial,
   CanvasTexture
 } from 'three';
+
+import { SprayParticleEmitter } from './spray/SprayParticleEmitter';
+import { SurfaceStainingEngine } from './spray/SurfaceStainingEngine';
+import { SpraySimulationOverlay } from './spray/SpraySimulationOverlay';
+import type { SpraySimConfig, SprayVisualMode, SprayCoverageStats } from './spray/sprayTypes';
+import { DEFAULT_SPRAY_CONFIG } from './spray/sprayTypes';
+import { TOOLTIP_BASE_CLASS } from './common/Tooltip';
 
 
 import { ColladaLoader } from 'three/examples/jsm/loaders/ColladaLoader.js';
@@ -49,8 +58,12 @@ interface RobotModelProps {
   isPathsVisible: boolean;
   isTraceVisible: boolean;
   pathState?: 'raw' | 'auto' | 'poi' | 'auto_poi';
+  isSpraying?: boolean;
+  sprayConfig: SpraySimConfig;
+  stainingEngineRef: React.MutableRefObject<SurfaceStainingEngine | null>;
   onMeshLoaded?: (vertexCount: number) => void;
   onPathsLoaded?: (pathCount: number, pointCount: number) => void;
+  onStatsUpdate?: (stats: SprayCoverageStats) => void;
 }
 
 
@@ -149,8 +162,12 @@ const RobotModel: React.FC<RobotModelProps> = ({
   isPathsVisible,
   isTraceVisible,
   pathState = 'raw',
+  isSpraying = false,
+  sprayConfig,
+  stainingEngineRef,
   onMeshLoaded,
   onPathsLoaded,
+  onStatsUpdate,
 }) => {
   const effectiveState = pathState;
 
@@ -171,6 +188,9 @@ const RobotModel: React.FC<RobotModelProps> = ({
   const traceCountRef = useRef<number>(0);
   const lastTracePointRef = useRef<Vector3 | null>(null);
   const tcpWorldPosRef = useRef<Vector3>(new Vector3());
+  const tcpWorldDirRef = useRef<Vector3>(new Vector3());
+  const tcpWorldQuatRef = useRef<Quaternion>(new Quaternion());
+  const statsFrameCounterRef = useRef<number>(0);
   const traceLocalPosRef = useRef<Vector3>(new Vector3());
 
   // 1. Load Robot URDF Model (dynamically synchronized with backend configs/aisprayer_config.yaml)
@@ -223,6 +243,21 @@ const RobotModel: React.FC<RobotModelProps> = ({
       isCancelled = true;
     };
   }, []);
+
+  // 1b. Always resolve TCP tool link reference whenever robot or config updates
+  useEffect(() => {
+    if (!robot) {
+      tcpLinkRef.current = null;
+      return;
+    }
+    const r = robot as any;
+    const name = tcpLinkNameRef.current;
+    const tcpLink = (name && (r.links?.[name] || r.getObjectByName(name)))
+      || r.links?.['gripper_tip_link'] || r.getObjectByName('gripper_tip_link')
+      || r.links?.['laser_head_link'] || r.getObjectByName('laser_head_link')
+      || r.links?.['Link6'] || r.getObjectByName('Link6') || null;
+    tcpLinkRef.current = tcpLink;
+  }, [robot]);
 
   const targetStrokeRef = useRef<number>(gripperStroke ?? 0.0);
   const currentStrokeRef = useRef<number>(gripperStroke ?? 0.0);
@@ -309,6 +344,36 @@ const RobotModel: React.FC<RobotModelProps> = ({
           } else {
             lastTracePointRef.current = local.clone();
           }
+        }
+      }
+    }
+
+    // 4. Spray Particle Simulation & Surface Staining Step
+    if (sprayConfig.enabled && isSpraying && stainingEngineRef.current) {
+      if (!tcpLinkRef.current && robot) {
+        const r = robot as any;
+        const name = tcpLinkNameRef.current;
+        tcpLinkRef.current = (name && (r.links?.[name] || r.getObjectByName(name)))
+          || r.links?.['gripper_tip_link'] || r.getObjectByName('gripper_tip_link')
+          || r.links?.['laser_head_link'] || r.getObjectByName('laser_head_link')
+          || r.links?.['Link6'] || r.getObjectByName('Link6') || null;
+      }
+
+      if (tcpLinkRef.current) {
+        tcpLinkRef.current.getWorldPosition(tcpWorldPosRef.current);
+        tcpLinkRef.current.getWorldQuaternion(tcpWorldQuatRef.current);
+        tcpWorldDirRef.current.set(0, 0, 1).applyQuaternion(tcpWorldQuatRef.current).normalize();
+
+        const modified = stainingEngineRef.current.applySprayStep(
+          tcpWorldPosRef.current,
+          tcpWorldDirRef.current,
+          sprayConfig,
+          delta
+        );
+
+        statsFrameCounterRef.current = (statsFrameCounterRef.current + 1) % 10;
+        if (modified && statsFrameCounterRef.current === 0 && onStatsUpdate) {
+          onStatsUpdate(stainingEngineRef.current.computeStats(sprayConfig));
         }
       }
     }
@@ -443,12 +508,20 @@ const RobotModel: React.FC<RobotModelProps> = ({
         polygonOffset: true,
         polygonOffsetFactor: 1.0,
         polygonOffsetUnits: 1.0,
+        vertexColors: true, // [R1] Enable vertex colors for dynamic surface staining
       });
     }
 
     const attachGeometry = (geom: BufferGeometry) => {
       geom.computeVertexNormals();
       const count = geom.attributes.position ? geom.attributes.position.count : 0;
+
+      // [R1] Ensure vertex colors buffer attribute exists on workpiece mesh
+      if (!geom.attributes.color) {
+        const colors = new Float32Array(count * 3);
+        colors.fill(0.88);
+        geom.setAttribute('color', new BufferAttribute(colors, 3));
+      }
       
       const oldMesh = baseLink.getObjectByName('reconstructed_surface_mesh');
       if (oldMesh) {
@@ -464,6 +537,12 @@ const RobotModel: React.FC<RobotModelProps> = ({
 
       baseLink.add(mesh);
       surfaceMeshRef.current = mesh;
+
+      // Attach new mesh to the staining engine
+      if (stainingEngineRef.current) {
+        stainingEngineRef.current.attachMesh(mesh);
+        stainingEngineRef.current.refreshAllColors(sprayConfig);
+      }
 
       if (onMeshLoaded) onMeshLoaded(count);
     };
@@ -790,7 +869,18 @@ const RobotModel: React.FC<RobotModelProps> = ({
   }, [isWireframe]);
 
   if (!robot) return null;
-  return <primitive object={robot} />;
+  return (
+    <>
+      <primitive object={robot} />
+      <SprayParticleEmitter
+        tcpLinkRef={tcpLinkRef}
+        isSpraying={!!isSpraying && sprayConfig.enabled}
+        sprayDistMm={sprayConfig.targetDistanceMm}
+        sprayWidthMm={sprayConfig.sprayWidthMm}
+        paintColor={sprayConfig.paintColor}
+      />
+    </>
+  );
 };
 
 interface Robot3DViewerProps {
@@ -800,9 +890,10 @@ interface Robot3DViewerProps {
   meshVersion?: number;
   pathsVersion?: number;
   pathState?: 'raw' | 'auto' | 'poi' | 'auto_poi';
+  isSpraying?: boolean;
 }
 
-const TOOLTIP_CLASSES = "bg-slate-950/90 backdrop-blur-md text-slate-200 text-[10px] font-medium px-2.5 py-1 rounded-md shadow-2xl border border-white/10 whitespace-nowrap z-50 pointer-events-none";
+const TOOLTIP_CLASSES = TOOLTIP_BASE_CLASS;
 
 const Robot3DViewer: React.FC<Robot3DViewerProps> = ({ 
   jointAngles = [0, 0, 0, 0, 0, 0],
@@ -811,6 +902,7 @@ const Robot3DViewer: React.FC<Robot3DViewerProps> = ({
   meshVersion = 0,
   pathsVersion = 0,
   pathState = 'raw',
+  isSpraying = false,
 }) => {
   const [isMaximized, setIsMaximized] = useState(false);
   const [isMeshVisible, setIsMeshVisible] = useState(true);
@@ -820,6 +912,38 @@ const Robot3DViewer: React.FC<Robot3DViewerProps> = ({
   const [meshVertexCount, setMeshVertexCount] = useState<number>(0);
   const [pathsCount, setPathsCount] = useState<number>(0);
   const [pointsCount, setPointsCount] = useState<number>(0);
+
+  // Spray Simulation State
+  const [sprayConfig, setSprayConfig] = useState<SpraySimConfig>(DEFAULT_SPRAY_CONFIG);
+  const [sprayStats, setSprayStats] = useState<SprayCoverageStats>({
+    totalVertices: 0,
+    coveredVertices: 0,
+    coveragePercentage: 0,
+    averageThickness: 0,
+    maxThickness: 0,
+    standardComplianceRate: 0,
+  });
+  const stainingEngineRef = useRef<SurfaceStainingEngine | null>(null);
+  if (!stainingEngineRef.current) {
+    stainingEngineRef.current = new SurfaceStainingEngine();
+  }
+
+  const handleToggleSprayEnabled = (enabled: boolean) => {
+    setSprayConfig((prev) => ({ ...prev, enabled }));
+  };
+
+  const handleModeChange = (mode: SprayVisualMode) => {
+    const next: SpraySimConfig = { ...sprayConfig, visualMode: mode };
+    setSprayConfig(next);
+    stainingEngineRef.current?.refreshAllColors(next);
+  };
+
+  const handleClearCoat = () => {
+    stainingEngineRef.current?.clearCoating();
+    if (stainingEngineRef.current) {
+      setSprayStats(stainingEngineRef.current.computeStats(sprayConfig));
+    }
+  };
 
   const containerClasses = isMaximized
     ? "fixed inset-0 z-[100] bg-slate-950/95 backdrop-blur-md p-4 flex flex-col items-center justify-center animate-in fade-in duration-200"
@@ -848,11 +972,15 @@ const Robot3DViewer: React.FC<Robot3DViewerProps> = ({
           isWireframe={isWireframe}
           isPathsVisible={isPathsVisible}
           isTraceVisible={isTraceVisible}
+          isSpraying={isSpraying}
+          sprayConfig={sprayConfig}
+          stainingEngineRef={stainingEngineRef}
           onMeshLoaded={(cnt) => setMeshVertexCount(cnt)}
           onPathsLoaded={(pCount, ptCount) => {
             setPathsCount(pCount);
             setPointsCount(ptCount);
           }}
+          onStatsUpdate={(newStats) => setSprayStats(newStats)}
         />
 
         <OrbitControls 
@@ -871,6 +999,15 @@ const Robot3DViewer: React.FC<Robot3DViewerProps> = ({
           fadeDistance={5} 
         />
       </Canvas>
+
+      {/* Floating Spray Process HUD (Centered at bottom to prevent toolbar clutter) */}
+      <SpraySimulationOverlay
+        config={sprayConfig}
+        stats={sprayStats}
+        isSprayingActive={!!isSpraying && sprayConfig.enabled}
+        onModeChange={handleModeChange}
+        onClearCoat={handleClearCoat}
+      />
 
       {/* Top Left: Compact Model Badges (CR5, Mesh, TCP Info) */}
       <div className="absolute top-2.5 left-2.5 flex items-center gap-1.5 z-10 pointer-events-none">
@@ -902,8 +1039,27 @@ const Robot3DViewer: React.FC<Robot3DViewerProps> = ({
         )}
       </div>
 
-      {/* Top Right: Compact Controls (Trace, TCP Paths, Mesh, Wireframe, Fullscreen) */}
-      <div className="absolute top-2.5 right-2.5 flex items-center gap-1 z-10">
+      {/* Top Right: Compact Controls (Spray Sim, Trace, TCP Paths, Mesh, Wireframe, Fullscreen) */}
+      <div className="absolute top-2.5 right-2.5 flex items-center gap-1.5 z-10">
+        {/* Spray Sim Toggle Button */}
+        <div className="relative group flex items-center">
+          <button
+            onClick={() => handleToggleSprayEnabled(!sprayConfig.enabled)}
+            className={`h-6 px-2 rounded-full text-[9px] font-medium border flex items-center gap-1 backdrop-blur-md transition-all shadow-sm ${
+              sprayConfig.enabled
+                ? 'bg-cyan-950/70 hover:bg-cyan-900/80 border-cyan-500/50 text-cyan-300 shadow-[0_0_10px_rgba(6,182,212,0.3)]'
+                : 'bg-slate-950/50 hover:bg-slate-900/70 border-white/10 text-slate-400 hover:text-slate-200'
+            }`}
+          >
+            <Droplets size={11} className={sprayConfig.enabled ? 'text-cyan-400 animate-pulse' : 'text-slate-400'} />
+            <span>Spray</span>
+          </button>
+          <div className="absolute top-full mt-1.5 right-0 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
+            <div className={TOOLTIP_CLASSES}>
+              {sprayConfig.enabled ? 'Disable 3D Spray Simulation' : 'Enable 3D Spray Simulation'}
+            </div>
+          </div>
+        </div>
         {/* TCP Motion Trace Toggle Button — tool-tip trail from the configured tools selection */}
         <div className="relative group flex items-center">
           <button

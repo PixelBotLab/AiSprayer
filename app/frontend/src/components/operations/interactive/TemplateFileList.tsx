@@ -18,6 +18,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import type { FileItem, PathStateType, ManualPathItem, VerificationReport } from './types';
+import { Tooltip } from '../../common/Tooltip';
 
 interface TemplateFileListProps {
   files: FileItem[];
@@ -332,11 +333,13 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
             >
               {isVerifying ? <RefreshCw size={12} className="animate-spin text-sky-400" /> : <CheckCheck size={12} />}
             </button>
-            <div className="absolute top-full mt-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
-                {hasWaypoints ? `Verify Kinematics & Trajectory (${effectiveState.toUpperCase()})` : 'No Waypoints to Verify'}
-              </div>
-            </div>
+            <Tooltip
+              text={hasWaypoints ? `Verify Kinematics & Trajectory (${effectiveState.toUpperCase()})` : 'No Waypoints to Verify'}
+              side="bottom"
+              align="start"
+              multiline
+              maxWidthClass="max-w-[220px]"
+            />
           </div>
 
           {/* Button 2: Optimize POI */}
@@ -355,11 +358,13 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
             >
               {isOptimizing ? <RefreshCw size={12} className="animate-spin text-emerald-400" /> : <Sparkles size={12} />}
             </button>
-            <div className="absolute top-full mt-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
-                {hasWaypoints ? `Optimize POI Orientations (${effectiveState.toUpperCase()})` : 'No Waypoints to Optimize'}
-              </div>
-            </div>
+            <Tooltip
+              text={hasWaypoints ? `Optimize POI Orientations (${effectiveState.toUpperCase()})` : 'No Waypoints to Optimize'}
+              side="bottom"
+              align="start"
+              multiline
+              maxWidthClass="max-w-[220px]"
+            />
           </div>
 
           <div className="w-[1px] h-3 bg-slate-700 mx-0.5" />
@@ -369,7 +374,6 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
             <button
               type="button"
               onClick={toggleBypass}
-              title={isBypass ? 'Bypass Verification: ON (Direct Execution)' : 'Bypass Verification: OFF (Require PASS)'}
               className={`h-5 px-1.5 rounded-full flex items-center gap-1.5 border transition-all select-none ${
                 isBypass
                   ? 'bg-amber-500/20 border-amber-500/60 text-amber-300 shadow-xs shadow-amber-500/20 hover:bg-amber-500/30'
@@ -387,13 +391,17 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
                 {isBypass ? 'Bypass' : 'Check'}
               </span>
             </button>
-            <div className="absolute top-full mt-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
-                {isBypass
-                  ? 'Bypass Verification: ON (Simulate & Execute directly without PASS check)'
-                  : 'Bypass Verification: OFF (Require Kinematics Verification PASS before execution)'}
-              </div>
-            </div>
+            <Tooltip
+              text={
+                isBypass
+                  ? 'Bypass ON: Direct simulation & execution without PASS check'
+                  : 'Check ON: Kinematics verification PASS required before execution'
+              }
+              side="bottom"
+              align="end"
+              multiline
+              maxWidthClass="max-w-[230px]"
+            />
           </div>
 
           {/* Button 3: Simulate */}
@@ -410,11 +418,13 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
             >
               <Play size={11} className={canSim ? 'fill-sky-300' : ''} />
             </button>
-            <div className="absolute top-full mt-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
-                {simTooltip}
-              </div>
-            </div>
+            <Tooltip
+              text={simTooltip}
+              side="bottom"
+              align="end"
+              multiline
+              maxWidthClass="max-w-[240px]"
+            />
           </div>
 
           {/* Button 4: Execute on Robot */}
@@ -436,11 +446,13 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
             >
               {isExecuting ? <RefreshCw size={11} className="animate-spin text-emerald-400" /> : <Zap size={11} />}
             </button>
-            <div className="absolute top-full mt-2 right-0 hidden group-hover:flex flex-col items-end pointer-events-none z-50">
-              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
-                {execTooltip}
-              </div>
-            </div>
+            <Tooltip
+              text={execTooltip}
+              side="bottom"
+              align="end"
+              multiline
+              maxWidthClass="max-w-[250px]"
+            />
           </div>
 
           <div className="w-[1px] h-3 bg-slate-700 mx-0.5" />
@@ -471,15 +483,19 @@ export const TemplateFileList: React.FC<TemplateFileListProps> = ({
               )}
             </button>
             {!confirmClean && (
-              <div className="absolute top-full mt-2 right-0 hidden group-hover:flex flex-col items-end pointer-events-none z-50">
-                <div className="bg-slate-950/80 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
-                  {!templateName
+              <Tooltip
+                text={
+                  !templateName
                     ? 'Select a template to clean files'
                     : !hasCleanableFiles
                     ? 'No generated files to clean'
-                    : 'Clean Generated Files (Keep Photo & Params)'}
-                </div>
-              </div>
+                    : 'Clean Generated Files (Keep Photo & Params)'
+                }
+                side="bottom"
+                align="end"
+                multiline
+                maxWidthClass="max-w-[220px]"
+              />
             )}
 
             {/* Inline Confirmation Card (no modal dialog) */}

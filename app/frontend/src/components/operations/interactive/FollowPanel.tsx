@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Play, Crosshair, Square, Radio, RefreshCw } from 'lucide-react';
 import { API_BASE, WS_BASE } from '../../../config';
+import { Tooltip } from '../../common/Tooltip';
 
 /**
  * FollowPanel：文件列表底下那一排三个按钮 + 一行实时读数。
@@ -226,14 +227,6 @@ export const FollowPanel: React.FC<FollowPanelProps> = ({ isReplaying, onFollowJ
   const disabledZero = busy || !active || isReplaying;
   const disabledStop = busy || (!active && !snap?.enabled);
 
-  const tip = (text: string) => (
-    <div className="absolute top-full mt-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-      <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
-        {text}
-      </div>
-    </div>
-  );
-
   const dtMm = deltaTransMm(snap);
   const dRdeg = deltaRotDeg(snap);
   const sigmaT = snap?.sigma_t_mm?.[2] ?? null;
@@ -268,9 +261,19 @@ export const FollowPanel: React.FC<FollowPanelProps> = ({ isReplaying, onFollowJ
             >
               {pending === 'start' ? <RefreshCw size={12} className="animate-spin text-emerald-400" /> : <Play size={11} />}
             </button>
-            {tip(isReplaying ? 'Playback active: Stop playback first'
-                : active ? 'Follow is running'
-                : 'Start: Home arm + Teach from camera view')}
+            <Tooltip
+              text={
+                isReplaying
+                  ? 'Playback active: Stop playback first'
+                  : active
+                  ? 'Follow is running'
+                  : 'Start: Home arm + Teach from camera view'
+              }
+              side="bottom"
+              align="end"
+              multiline
+              maxWidthClass="max-w-[240px]"
+            />
           </div>
 
           {/* Zero */}
@@ -287,7 +290,13 @@ export const FollowPanel: React.FC<FollowPanelProps> = ({ isReplaying, onFollowJ
             >
               {pending === 'zero' ? <RefreshCw size={12} className="animate-spin text-sky-400" /> : <Crosshair size={12} />}
             </button>
-            {tip('Zero: Re-teach and reset follow baseline to current arm pose (Δ=0)')}
+            <Tooltip
+              text="Zero: Re-teach and reset follow baseline to current arm pose (Δ=0)"
+              side="bottom"
+              align="end"
+              multiline
+              maxWidthClass="max-w-[240px]"
+            />
           </div>
 
           <div className="w-[1px] h-3 bg-slate-700 mx-0.5" />
@@ -306,75 +315,125 @@ export const FollowPanel: React.FC<FollowPanelProps> = ({ isReplaying, onFollowJ
             >
               {pending === 'stop' ? <RefreshCw size={12} className="animate-spin text-rose-400" /> : <Square size={11} />}
             </button>
-            {tip('Stop: Revert camera stream & return arm to physical status')}
+            <Tooltip
+              text="Stop: Revert camera stream & return arm to physical status"
+              side="bottom"
+              align="end"
+              multiline
+              maxWidthClass="max-w-[240px]"
+            />
           </div>
         </div>
       </div>
 
       {/* Real-time Telemetry Display */}
       <div className="px-2.5 pb-1.5 flex flex-col gap-1">
-        <div className="flex items-center gap-1.5 text-[10px] font-mono text-slate-400 overflow-hidden whitespace-nowrap">
+        <div className="flex items-center gap-1.5 text-[10px] font-mono text-slate-400 whitespace-nowrap">
           <span className={running ? 'text-emerald-300' : 'text-slate-500'}>
             {(snap?.status ?? 'idle')}{snap?.estimator && snap.estimator !== 'none' ? `·${snap.estimator}` : ''}
             {holding && <span className="text-amber-400/90"> ·Hold</span>}
           </span>
           <span className="text-slate-600">|</span>
-          <span title="Camera displacement relative to taught pose (pre-base mapping)">Δt {fmt(dtMm)} mm</span>
-          <span title="Rotation increment from delta_r trace">ΔR {fmt(dRdeg, 2)}°</span>
+          <div className="relative group inline-flex items-center">
+            <span className="cursor-help">Δt {fmt(dtMm)} mm</span>
+            <Tooltip text="Camera displacement relative to taught pose (pre-base mapping)" side="top" />
+          </div>
+          <div className="relative group inline-flex items-center">
+            <span className="cursor-help">ΔR {fmt(dRdeg, 2)}°</span>
+            <Tooltip text="Rotation increment from delta_r trace" side="top" />
+          </div>
           {snap?.rot_frozen && (
-            <span
-              className="text-sky-400/90"
-              title={`Gyro stationary, rotation channel frozen for ${fmt(snap.frozen_ms, 0)}ms. Translation updating.`}
-            >
-              ·Frozen {fmt(snap.frozen_ms, 0)}ms
-            </span>
+            <div className="relative group inline-flex items-center">
+              <span className="text-sky-400/90 cursor-help">
+                ·Frozen {fmt(snap.frozen_ms, 0)}ms
+              </span>
+              <Tooltip text={`Gyro stationary, rotation channel frozen for ${fmt(snap.frozen_ms, 0)}ms. Translation updating.`} side="top" />
+            </div>
           )}
           <span className="text-slate-600">|</span>
-          <span title="1σ repeatability along optical axis; — indicates no dense solution">σz {fmt(sigmaT, 2)} mm</span>
-          <span title={`${snap?.fps ?? 0} fps, frames ${snap?.frames ?? 0}, dropped ${snap?.dropped ?? 0}/rejected ${snap?.rejected ?? 0}`}>
-            {fmt(snap?.fps, 0)}fps
-          </span>
-          {snap?.rot_gated ? <span title={`Outlier gate rejected ${snap.rot_gated} frames: vision-gyro disagreement`}>Rej {snap.rot_gated}</span> : null}
+          <div className="relative group inline-flex items-center">
+            <span className="cursor-help">σz {fmt(sigmaT, 2)} mm</span>
+            <Tooltip text="1σ repeatability along optical axis; — indicates no dense solution" side="top" />
+          </div>
+          <div className="relative group inline-flex items-center">
+            <span className="cursor-help">{fmt(snap?.fps, 0)}fps</span>
+            <Tooltip text={`${snap?.fps ?? 0} fps, frames ${snap?.frames ?? 0}, dropped ${snap?.dropped ?? 0}/rejected ${snap?.rejected ?? 0}`} side="top" />
+          </div>
+          {snap?.rot_gated ? (
+            <div className="relative group inline-flex items-center">
+              <span className="cursor-help">Rej {snap.rot_gated}</span>
+              <Tooltip text={`Outlier gate rejected ${snap.rot_gated} frames: vision-gyro disagreement`} side="top" />
+            </div>
+          ) : null}
         </div>
 
         {running && snap?.gyro && snap.gyro.time_ready === false && (
-          <div className="text-[9px] truncate text-rose-400/90"
-               title="Device timestamp offset uncalibrated: gyro samples discarded, using vision-only.">
-            Gyro Clock Uncalibrated · Rotation Degraded
+          <div className="relative group inline-flex items-center">
+            <div className="text-[9px] truncate text-rose-400/90 cursor-help">
+              Gyro Clock Uncalibrated · Rotation Degraded
+            </div>
+            <Tooltip
+              multiline
+              text="Device timestamp offset uncalibrated: gyro samples discarded, using vision-only."
+              side="top"
+            />
           </div>
         )}
         {running && snap?.gyro && (snap.gyro.dead_frames ?? 0) > 0 && (
-          <div className="text-[9px] truncate text-rose-400/90"
-               title={`Buffer ${snap.gyro.buf ?? 0}, window ${snap.gyro.samples ?? 0}: Frames and gyro out of sync.`}>
-            Gyro Window Idle {snap.gyro.dead_frames} Frames · Buf {snap.gyro.buf ?? 0} / Win {snap.gyro.samples ?? 0}
+          <div className="relative group inline-flex items-center">
+            <div className="text-[9px] truncate text-rose-400/90 cursor-help">
+              Gyro Window Idle {snap.gyro.dead_frames} Frames · Buf {snap.gyro.buf ?? 0} / Win {snap.gyro.samples ?? 0}
+            </div>
+            <Tooltip
+              multiline
+              text={`Buffer ${snap.gyro.buf ?? 0}, window ${snap.gyro.samples ?? 0}: Frames and gyro out of sync.`}
+              side="top"
+            />
           </div>
         )}
         {running && snap?.gyro && snap.gyro.time_ready && snap.gyro.extrinsics_loaded === false && (
-          <div className="text-[9px] truncate text-amber-400/80"
-               title="T_cam_gyro extrinsics Identity: stationary gate may fail.">
-            Gyro Extrinsics Identity · Gate May Fail
+          <div className="relative group inline-flex items-center">
+            <div className="text-[9px] truncate text-amber-400/80 cursor-help">
+              Gyro Extrinsics Identity · Gate May Fail
+            </div>
+            <Tooltip
+              multiline
+              text="T_cam_gyro extrinsics Identity: stationary gate may fail."
+              side="top"
+            />
           </div>
         )}
         {(error || state?.last_error || snap?.reason) && (
-          <div
-            className={`text-[9px] truncate ${error || heldByIk ? 'text-amber-400/90' : 'text-slate-500'}`}
-            title={error || state?.last_error || snap?.reason || ''}
-          >
-            {error || (heldByIk ? 'IK Failed: Holding Last Target' : (snap?.reason || state?.last_error))}
+          <div className="relative group inline-flex items-center">
+            <div
+              className={`text-[9px] truncate cursor-help ${error || heldByIk ? 'text-amber-400/90' : 'text-slate-500'}`}
+            >
+              {error || (heldByIk ? 'IK Failed: Holding Last Target' : (snap?.reason || state?.last_error))}
+            </div>
+            <Tooltip
+              multiline
+              text={error || state?.last_error || snap?.reason || ''}
+              side="top"
+            />
           </div>
         )}
         {running && (
-          <div className="text-[9px] text-slate-600 truncate" title={state?.r_cb_source || ''}>
+          <div className="text-[9px] text-slate-600 whitespace-nowrap">
             {`${snap?.capture_width ?? 0}x${snap?.capture_height ?? 0} ${snap?.align ?? ''}`}
             {snap?.teach_capture_width && snap.teach_capture_width !== snap.capture_width
               ? ` (Teach ${snap.teach_capture_width}x${snap.teach_capture_height})` : ''}
             {` · Baseline ${state?.arm_baseline_deg ? state.arm_baseline_deg.map((v) => v.toFixed(1)).join(',') : '—'}`}
-            {state?.data_plane_mode === 'push'
-              ? <span title="Pose pushed via SSE from camera service; polling on standby"> · Push</span>
-              : state?.data_plane_mode === 'poll'
-                ? <span className="text-amber-400/80"
-                        title={state.data_plane_reason || 'Pose acquired via backend polling'}> · Polling Fallback</span>
-                : null}
+            {state?.data_plane_mode === 'push' ? (
+              <div className="relative group inline-flex items-center">
+                <span className="cursor-help"> · Push</span>
+                <Tooltip text="Pose pushed via SSE from camera service; polling on standby" side="top" />
+              </div>
+            ) : state?.data_plane_mode === 'poll' ? (
+              <div className="relative group inline-flex items-center">
+                <span className="text-amber-400/80 cursor-help"> · Polling Fallback</span>
+                <Tooltip text={state.data_plane_reason || 'Pose acquired via backend polling'} side="top" />
+              </div>
+            ) : null}
           </div>
         )}
       </div>

@@ -12,6 +12,7 @@ import {
   ArrowDown
 } from 'lucide-react';
 import { WS_BASE } from '../config';
+import { Tooltip } from './common/Tooltip';
 
 export interface LogEntry {
   time: string;
@@ -256,12 +257,12 @@ const ConsoleLogZone: React.FC = () => {
     // Priority 1: Unread Errors (Red Blinking Light & Red Badge)
     if (stats.error > 0) {
       return (
-        <span
-          className="flex items-center gap-1 ml-1.5 px-1.5 py-0.5 rounded-full bg-red-500/20 border border-red-500/50 text-red-400 text-[10px] font-mono font-bold shadow-[0_0_8px_rgba(239,68,68,0.6)] animate-pulse"
-          title={`${stats.error} unread errors`}
-        >
-          <span className="w-1.5 h-1.5 rounded-full bg-red-500"></span>
-          <span>{stats.error}</span>
+        <span className="relative group flex items-center ml-1.5">
+          <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-red-500/20 border border-red-500/50 text-red-400 text-[10px] font-mono font-bold shadow-[0_0_8px_rgba(239,68,68,0.6)] animate-pulse cursor-help">
+            <span className="w-1.5 h-1.5 rounded-full bg-red-500"></span>
+            <span>{stats.error}</span>
+          </span>
+          <Tooltip text={`${stats.error} unread errors`} side="bottom" />
         </span>
       );
     }
@@ -269,12 +270,12 @@ const ConsoleLogZone: React.FC = () => {
     // Priority 2: Unread Warnings (Yellow Light & Yellow Badge)
     if (stats.warn > 0) {
       return (
-        <span
-          className="flex items-center gap-1 ml-1.5 px-1.5 py-0.5 rounded-full bg-amber-500/20 border border-amber-500/50 text-amber-400 text-[10px] font-mono font-semibold"
-          title={`${stats.warn} unread warnings`}
-        >
-          <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
-          <span>{stats.warn}</span>
+        <span className="relative group flex items-center ml-1.5">
+          <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-amber-500/20 border border-amber-500/50 text-amber-400 text-[10px] font-mono font-semibold cursor-help">
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-400"></span>
+            <span>{stats.warn}</span>
+          </span>
+          <Tooltip text={`${stats.warn} unread warnings`} side="bottom" />
         </span>
       );
     }
@@ -282,12 +283,12 @@ const ConsoleLogZone: React.FC = () => {
     // Priority 3: Unread Normal Info (Green Dot / Count)
     if (stats.info > 0) {
       return (
-        <span
-          className="flex items-center gap-1 ml-1 px-1.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[9px] font-mono"
-          title={`${stats.info} new logs`}
-        >
-          <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
-          <span>{stats.info}</span>
+        <span className="relative group flex items-center ml-1">
+          <span className="flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[9px] font-mono cursor-help">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400"></span>
+            <span>{stats.info}</span>
+          </span>
+          <Tooltip text={`${stats.info} new logs`} side="bottom" />
         </span>
       );
     }
@@ -371,35 +372,41 @@ const ConsoleLogZone: React.FC = () => {
           </div>
 
           {/* Mark All Read Button */}
-          <button
-            onClick={handleMarkAllRead}
-            className="p-1.5 text-slate-500 hover:text-slate-300 hover:bg-slate-800 rounded transition-colors"
-            title="Mark all as read (Dismiss indicators)"
-          >
-            <CheckCheck size={14} />
-          </button>
+          <div className="relative group flex items-center">
+            <button
+              onClick={handleMarkAllRead}
+              className="p-1.5 text-slate-500 hover:text-slate-300 hover:bg-slate-800 rounded transition-colors"
+            >
+              <CheckCheck size={14} />
+            </button>
+            <Tooltip text="Mark all as read (Dismiss indicators)" side="bottom" align="end" />
+          </div>
 
           {/* Clear Logs Button */}
-          <button
-            onClick={clearLogs}
-            className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-slate-800 rounded transition-colors"
-            title="Clear console logs"
-          >
-            <Trash2 size={14} />
-          </button>
+          <div className="relative group flex items-center">
+            <button
+              onClick={clearLogs}
+              className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-slate-800 rounded transition-colors"
+            >
+              <Trash2 size={14} />
+            </button>
+            <Tooltip text="Clear console logs" side="bottom" align="end" />
+          </div>
 
           {/* Maximize / Minimize Button */}
-          <button
-            onClick={() => setIsMaximized(!isMaximized)}
-            className={`transition-all flex items-center gap-1 text-xs rounded-md ${
-              isMaximized
-                ? 'px-2 py-1 bg-blue-600 hover:bg-blue-500 text-white font-medium shadow-md shadow-blue-900/30'
-                : 'p-1.5 text-slate-400 hover:text-white hover:bg-slate-800'
-            }`}
-            title={isMaximized ? 'Exit Fullscreen' : 'Fullscreen Console'}
-          >
-            {isMaximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-          </button>
+          <div className="relative group flex items-center">
+            <button
+              onClick={() => setIsMaximized(!isMaximized)}
+              className={`transition-all flex items-center gap-1 text-xs rounded-md ${
+                isMaximized
+                  ? 'px-2 py-1 bg-blue-600 hover:bg-blue-500 text-white font-medium shadow-md shadow-blue-900/30'
+                  : 'p-1.5 text-slate-400 hover:text-white hover:bg-slate-800'
+              }`}
+            >
+              {isMaximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+            </button>
+            <Tooltip text={isMaximized ? 'Exit Fullscreen' : 'Fullscreen Console'} side="bottom" align="end" />
+          </div>
         </div>
       </div>
 

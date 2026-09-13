@@ -15,9 +15,10 @@ import {
   RefreshCw,
   Sparkles,
   Info,
-  LocateFixed
+  LocateFixed,
 } from 'lucide-react';
 import { API_BASE, WS_BASE } from '../config';
+import { Tooltip } from '../components/common/Tooltip';
 
 interface ConfigOption {
   value: any;
@@ -465,27 +466,32 @@ const ConfigView: React.FC = () => {
               <span className="text-[10px] font-mono text-slate-500">
                 Unit: degrees (°)
               </span>
-              <button
-                type="button"
-                disabled={!robotConnected || isCapturing}
-                onClick={() => handleCaptureCurrentPosition(item.key, item.label)}
-                title={
-                  robotConnected
-                    ? 'Capture live joint positions from connected robot'
-                    : 'Robot must be connected to read current position'
-                }
-                className={`px-2 py-0.5 rounded text-[11px] font-medium flex items-center gap-1.5 transition-all border ${
-                  robotConnected
-                    ? 'bg-blue-600/15 hover:bg-blue-600/25 text-blue-300 border-blue-500/30 hover:border-blue-500/50 cursor-pointer shadow-xs'
-                    : 'bg-slate-900/50 text-slate-600 border-slate-800 cursor-not-allowed opacity-60'
-                }`}
-              >
-                <LocateFixed size={12} className={isCapturing ? 'animate-spin text-blue-400' : ''} />
-                <span>{isCapturing ? 'Capturing...' : 'Get Current Position'}</span>
-                {robotConnected && (
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                )}
-              </button>
+              <div className="relative group flex items-center">
+                <button
+                  type="button"
+                  disabled={!robotConnected || isCapturing}
+                  onClick={() => handleCaptureCurrentPosition(item.key, item.label)}
+                  className={`px-2 py-0.5 rounded text-[11px] font-medium flex items-center gap-1.5 transition-all border ${
+                    robotConnected
+                      ? 'bg-blue-600/15 hover:bg-blue-600/25 text-blue-300 border-blue-500/30 hover:border-blue-500/50 cursor-pointer shadow-xs'
+                      : 'bg-slate-900/50 text-slate-600 border-slate-800 cursor-not-allowed opacity-60'
+                  }`}
+                >
+                  <LocateFixed size={12} className={isCapturing ? 'animate-spin text-blue-400' : ''} />
+                  <span>{isCapturing ? 'Capturing...' : 'Get Current Position'}</span>
+                  {robotConnected && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                  )}
+                </button>
+                <Tooltip
+                  text={
+                    robotConnected
+                      ? 'Capture live joint positions from connected robot'
+                      : 'Robot must be connected to read current position'
+                  }
+                  side="top"
+                />
+              </div>
             </div>
           </div>
         );
@@ -614,20 +620,22 @@ const ConfigView: React.FC = () => {
               )}
             </div>
 
-            <button
-              onClick={() =>
-                setResetConfirmModal({
-                  isOpen: true,
-                  type: 'all',
-                  targetName: 'All System Settings',
-                })
-              }
-              title="Reset all dynamic overrides back to YAML baseline defaults"
-              className="px-2.5 py-1 rounded-md text-xs font-medium bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-slate-300 hover:text-white transition-all flex items-center gap-1.5 shadow-sm"
-            >
-              <RotateCcw size={12} className="text-slate-400" />
-              Reset All
-            </button>
+            <div className="relative group flex items-center shrink-0">
+              <button
+                onClick={() =>
+                  setResetConfirmModal({
+                    isOpen: true,
+                    type: 'all',
+                    targetName: 'All System Settings',
+                  })
+                }
+                className="px-2.5 py-1 rounded-md text-xs font-medium bg-slate-900 hover:bg-slate-800 border border-slate-700/80 text-slate-300 hover:text-white transition-all flex items-center gap-1.5 shadow-sm"
+              >
+                <RotateCcw size={12} className="text-slate-400" />
+                Reset All
+              </button>
+              <Tooltip text="Reset all dynamic overrides back to YAML baseline defaults" side="bottom" />
+            </div>
 
             <button
               onClick={handleSaveAll}
@@ -746,21 +754,23 @@ const ConfigView: React.FC = () => {
                     </div>
                   </div>
 
-                  <button
-                    onClick={() =>
-                      setResetConfirmModal({
-                        isOpen: true,
-                        type: 'category',
-                        target: cat.id,
-                        targetName: cat.title,
-                      })
-                    }
-                    title={`Reset all ${cat.title} parameters to YAML baseline`}
-                    className="text-[10px] text-slate-400 hover:text-amber-400 flex items-center gap-1 transition-colors px-2 py-0.5 rounded bg-slate-950/80 border border-slate-800 hover:border-slate-700 shrink-0"
-                  >
-                    <RotateCcw size={10} />
-                    Reset
-                  </button>
+                  <div className="relative group flex items-center shrink-0">
+                    <button
+                      onClick={() =>
+                        setResetConfirmModal({
+                          isOpen: true,
+                          type: 'category',
+                          target: cat.id,
+                          targetName: cat.title,
+                        })
+                      }
+                      className="text-[10px] text-slate-400 hover:text-amber-400 flex items-center gap-1 transition-colors px-2 py-0.5 rounded bg-slate-950/80 border border-slate-800 hover:border-slate-700 shrink-0"
+                    >
+                      <RotateCcw size={10} />
+                      Reset
+                    </button>
+                    <Tooltip text={`Reset all ${cat.title} parameters to YAML baseline`} side="bottom" align="end" />
+                  </div>
                 </div>
 
                 {/* 2-Column Field Grid inside Card */}
@@ -788,12 +798,12 @@ const ConfigView: React.FC = () => {
                               {item.label}
                             </label>
                             {item.description && (
-                              <span
-                                title={item.description}
-                                className="text-slate-500 hover:text-slate-300 cursor-help shrink-0"
-                              >
-                                <Info size={11} />
-                              </span>
+                              <div className="relative group flex items-center shrink-0">
+                                <span className="text-slate-500 hover:text-slate-300 cursor-help flex items-center">
+                                  <Info size={11} />
+                                </span>
+                                <Tooltip text={item.description} side="top" align="start" multiline />
+                              </div>
                             )}
                           </div>
 
@@ -809,13 +819,15 @@ const ConfigView: React.FC = () => {
                             ) : null}
 
                             {isOverridden && (
-                              <button
-                                onClick={() => executeReset('key', item.key)}
-                                title="Reset to YAML baseline default"
-                                className="text-[10px] text-slate-500 hover:text-amber-300 flex items-center gap-0.5 transition-colors px-1 py-0.5 rounded hover:bg-slate-800"
-                              >
-                                <RotateCcw size={9} />
-                              </button>
+                              <div className="relative group flex items-center shrink-0">
+                                <button
+                                  onClick={() => executeReset('key', item.key)}
+                                  className="text-[10px] text-slate-500 hover:text-amber-300 flex items-center gap-0.5 transition-colors px-1 py-0.5 rounded hover:bg-slate-800"
+                                >
+                                  <RotateCcw size={9} />
+                                </button>
+                                <Tooltip text="Reset to YAML baseline default" side="top" align="end" />
+                              </div>
                             )}
                           </div>
                         </div>

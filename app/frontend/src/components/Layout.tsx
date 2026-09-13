@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Settings, Crosshair, Route, ListTodo, Maximize2, Minimize2, Camera } from 'lucide-react';
 import { WS_BASE } from '../config';
+import { TOOLTIP_BASE_CLASS } from './common/Tooltip';
 
 interface LayoutProps {
   children: React.ReactNode;
@@ -151,7 +152,7 @@ const Layout: React.FC<LayoutProps> = ({
     }
   };
 
-  const tooltipClass = "absolute left-14 px-3 py-1.5 bg-slate-800 text-slate-100 text-xs font-medium rounded shadow-xl border border-slate-700 backdrop-blur-md opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all whitespace-nowrap z-[100]";
+  const tooltipClass = `absolute left-14 ${TOOLTIP_BASE_CLASS} opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all`;
 
   return (
     <div className="flex h-screen bg-slate-950 font-sans text-white overflow-hidden relative">

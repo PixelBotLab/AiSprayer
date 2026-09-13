@@ -2,6 +2,7 @@ import React from 'react';
 import { Compass, Pencil, Route, Wand2 } from 'lucide-react';
 import type { PathSource, PathStage, PathStateType } from './types';
 import { composePathState, pathSourceOf, pathStageOf } from './types';
+import { Tooltip } from '../../common/Tooltip';
 
 interface PathStateSwitcherProps {
   activeState: PathStateType;
@@ -34,17 +35,20 @@ export const PathStateSwitcher: React.FC<PathStateSwitcherProps> = ({
     title: string,
     icon: React.ReactNode,
     activeClass: string,
+    align: 'center' | 'start' | 'end' = 'center',
   ) => (
-    <button
-      type="button"
-      onClick={onClick}
-      title={title}
-      className={`p-1 rounded transition-colors ${
-        active ? activeClass : 'text-slate-500 hover:text-slate-300 hover:bg-white/10'
-      }`}
-    >
-      {icon}
-    </button>
+    <div className="relative group flex items-center">
+      <button
+        type="button"
+        onClick={onClick}
+        className={`p-1 rounded transition-colors ${
+          active ? activeClass : 'text-slate-500 hover:text-slate-300 hover:bg-white/10'
+        }`}
+      >
+        {icon}
+      </button>
+      <Tooltip text={title} side="bottom" align={align} />
+    </div>
   );
 
   const sourceManual = iconBtn(
@@ -53,6 +57,7 @@ export const PathStateSwitcher: React.FC<PathStateSwitcherProps> = ({
     'Manual path',
     <Pencil size={11} />,
     'bg-slate-500/25 text-slate-200',
+    'start',
   );
   const sourceAuto = iconBtn(
     source === 'auto',
@@ -60,6 +65,7 @@ export const PathStateSwitcher: React.FC<PathStateSwitcherProps> = ({
     'Auto path',
     <Wand2 size={11} />,
     'bg-violet-500/25 text-violet-300',
+    'center',
   );
   const stagePath = iconBtn(
     stage === 'orig',
@@ -67,6 +73,7 @@ export const PathStateSwitcher: React.FC<PathStateSwitcherProps> = ({
     'Original path',
     <Route size={11} />,
     source === 'auto' ? 'bg-violet-500/25 text-violet-300' : 'bg-slate-500/25 text-slate-200',
+    'center',
   );
   const stagePoi = iconBtn(
     stage === 'poi',
@@ -74,6 +81,7 @@ export const PathStateSwitcher: React.FC<PathStateSwitcherProps> = ({
     'POI pose',
     <Compass size={11} />,
     source === 'auto' ? 'bg-teal-500/25 text-teal-300' : 'bg-emerald-500/25 text-emerald-300',
+    'end',
   );
 
   return (

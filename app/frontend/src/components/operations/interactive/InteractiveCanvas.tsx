@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, type MouseEvent, type WheelEvent } from 'react';
+import React, { useRef, useEffect, useState, type MouseEvent, type WheelEvent } from 'react';
 import {
   RefreshCw,
   ZoomIn,
@@ -39,6 +39,7 @@ import { PathStateSwitcher } from './PathStateSwitcher';
 import { SamMaskOverlay } from './SamMaskOverlay';
 import { PathSvgOverlay } from './PathSvgOverlay';
 import { ToolbarTip, TOOLBAR_TIP_CLASS } from './ToolbarTip';
+import { Tooltip, TOOLTIP_BASE_CLASS } from '../../common/Tooltip';
 
 interface InteractiveCanvasProps {
   imageUrl: string | null;
@@ -179,6 +180,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const panStartRef = useRef({ startX: 0, startY: 0, initialX: 0, initialY: 0 });
+  const [hoveredPathChip, setHoveredPathChip] = useState<{ id: number; x: number; y: number } | null>(null);
 
   // Global mouse dragging listeners
   useEffect(() => {
@@ -255,55 +257,65 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
     >
       {/* 1. Floating Top-Left Zoom & Layer Controls (Ultra-compact h-6 at left-2 top-2) */}
       <div className="absolute left-2 top-2 z-20 flex items-center gap-0.5 bg-slate-950/70 hover:bg-slate-950/85 backdrop-blur-md border border-white/10 rounded-md px-1 py-0.5 shadow-xl text-slate-300 h-6 select-none transition-all">
-        <button
-          onClick={() => setZoom((z) => Math.min(15, z * 1.25))}
-          className="p-1 hover:bg-white/10 rounded text-slate-400 hover:text-slate-200 transition-colors"
-          title="Zoom In"
-        >
-          <ZoomIn size={11} />
-        </button>
-        <button
-          onClick={() => setZoom((z) => Math.max(0.2, z * 0.8))}
-          className="p-1 hover:bg-white/10 rounded text-slate-400 hover:text-slate-200 transition-colors"
-          title="Zoom Out"
-        >
-          <ZoomOut size={11} />
-        </button>
-        <button
-          onClick={() => {
-            setZoom(1);
-            setPan({ x: 0, y: 0 });
-          }}
-          className="px-1 hover:bg-white/10 rounded font-mono text-[9px] text-slate-300 hover:text-white transition-colors"
-          title="Reset Zoom & Pan"
-        >
-          {(zoom * 100).toFixed(0)}%
-        </button>
+        <div className="relative group flex items-center">
+          <button
+            onClick={() => setZoom((z) => Math.min(15, z * 1.25))}
+            className="p-1 hover:bg-white/10 rounded text-slate-400 hover:text-slate-200 transition-colors"
+          >
+            <ZoomIn size={11} />
+          </button>
+          <Tooltip text="Zoom In" side="bottom" align="start" />
+        </div>
+        <div className="relative group flex items-center">
+          <button
+            onClick={() => setZoom((z) => Math.max(0.2, z * 0.8))}
+            className="p-1 hover:bg-white/10 rounded text-slate-400 hover:text-slate-200 transition-colors"
+          >
+            <ZoomOut size={11} />
+          </button>
+          <Tooltip text="Zoom Out" side="bottom" />
+        </div>
+        <div className="relative group flex items-center">
+          <button
+            onClick={() => {
+              setZoom(1);
+              setPan({ x: 0, y: 0 });
+            }}
+            className="px-1 hover:bg-white/10 rounded font-mono text-[9px] text-slate-300 hover:text-white transition-colors"
+          >
+            {(zoom * 100).toFixed(0)}%
+          </button>
+          <Tooltip text="Reset Zoom & Pan" side="bottom" />
+        </div>
         <div className="w-[1px] h-2.5 bg-white/10 mx-0.5" />
-        <button
-          onClick={onToggleMasksOverlay}
-          disabled={savedMasks.length === 0 && committedMasks.length === 0}
-          className={`p-1 rounded transition-colors ${
-            savedMasks.length === 0 && committedMasks.length === 0
-              ? 'text-slate-700 cursor-not-allowed'
-              : showMasksOverlay ? 'bg-sky-500/25 text-sky-300' : 'text-slate-500 hover:text-slate-300'
-          }`}
-          title={savedMasks.length === 0 && committedMasks.length === 0 ? 'No masks available' : 'Toggle Mask Overlay'}
-        >
-          {showMasksOverlay ? <Eye size={11} /> : <EyeOff size={11} />}
-        </button>
-        <button
-          onClick={onToggleManualPathsOverlay}
-          disabled={manualPaths.length === 0}
-          className={`p-1 rounded transition-colors ${
-            manualPaths.length === 0
-              ? 'text-slate-700 cursor-not-allowed'
-              : showManualPathsOverlay ? 'bg-amber-500/25 text-amber-300' : 'text-slate-500 hover:text-slate-300'
-          }`}
-          title={manualPaths.length === 0 ? 'No paths available' : 'Toggle Manual Paths Overlay'}
-        >
-          <Route size={11} />
-        </button>
+        <div className="relative group flex items-center">
+          <button
+            onClick={onToggleMasksOverlay}
+            disabled={savedMasks.length === 0 && committedMasks.length === 0}
+            className={`p-1 rounded transition-colors ${
+              savedMasks.length === 0 && committedMasks.length === 0
+                ? 'text-slate-700 cursor-not-allowed'
+                : showMasksOverlay ? 'bg-sky-500/25 text-sky-300' : 'text-slate-500 hover:text-slate-300'
+            }`}
+          >
+            {showMasksOverlay ? <Eye size={11} /> : <EyeOff size={11} />}
+          </button>
+          <Tooltip text={savedMasks.length === 0 && committedMasks.length === 0 ? 'No masks available' : 'Toggle Mask Overlay'} side="bottom" />
+        </div>
+        <div className="relative group flex items-center">
+          <button
+            onClick={onToggleManualPathsOverlay}
+            disabled={manualPaths.length === 0}
+            className={`p-1 rounded transition-colors ${
+              manualPaths.length === 0
+                ? 'text-slate-700 cursor-not-allowed'
+                : showManualPathsOverlay ? 'bg-amber-500/25 text-amber-300' : 'text-slate-500 hover:text-slate-300'
+            }`}
+          >
+            <Route size={11} />
+          </button>
+          <Tooltip text={manualPaths.length === 0 ? 'No paths available' : 'Toggle Manual Paths Overlay'} side="bottom" />
+        </div>
       </div>
 
       {onSelectActiveState && activeState && (
@@ -444,13 +456,15 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
             {canvasNotice.message}
           </span>
           {onDismissNotice && (
-            <button
-              onClick={onDismissNotice}
-              className="shrink-0 p-0.5 text-slate-400 hover:text-white rounded-full hover:bg-white/10 transition-colors ml-0.5"
-              title="Dismiss"
-            >
-              <X size={11} />
-            </button>
+            <div className="relative group flex items-center shrink-0 ml-0.5">
+              <button
+                onClick={onDismissNotice}
+                className="shrink-0 p-0.5 text-slate-400 hover:text-white rounded-full hover:bg-white/10 transition-colors"
+              >
+                <X size={11} />
+              </button>
+              <Tooltip text="Dismiss" side="bottom" />
+            </div>
           )}
         </div>
       )}
@@ -575,8 +589,14 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 bg-slate-950/70 hover:bg-slate-950/85 backdrop-blur-md border border-sky-500/30 rounded-full px-2.5 h-7 flex items-center gap-1.5 shadow-2xl z-30 transition-all select-none">
           {/* Prompt indicators */}
           <div className="flex items-center gap-1 px-1 border-r border-white/10 text-[10px]">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block animate-pulse" title="Left Click: Foreground" />
-            <span className="w-1.5 h-1.5 rounded-full bg-rose-400 inline-block ml-0.5" title="Right Click: Background" />
+            <div className="relative group flex items-center">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block animate-pulse cursor-help" />
+              <Tooltip text="Left Click: Foreground" side="top" />
+            </div>
+            <div className="relative group flex items-center">
+              <span className="w-1.5 h-1.5 rounded-full bg-rose-400 inline-block ml-0.5 cursor-help" />
+              <Tooltip text="Right Click: Background" side="top" />
+            </div>
           </div>
 
           {/* Auto Detect: 用 wissight 出框当初始 prompt */}
@@ -691,18 +711,32 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
                   <div
                     key={p.path_id}
                     onClick={() => onSelectPathForEdit && onSelectPathForEdit(p.path_id)}
-                    className={`flex items-center gap-1 px-2 py-0.2 rounded-full border text-[9px] cursor-pointer select-none transition-all ${
+                    onMouseEnter={(e) => {
+                      const r = e.currentTarget.getBoundingClientRect();
+                      setHoveredPathChip({ id: p.path_id, x: r.left + r.width / 2, y: r.top - 6 });
+                    }}
+                    onMouseLeave={() => setHoveredPathChip(null)}
+                    className={`relative flex items-center gap-1 px-2 py-0.2 rounded-full border text-[9px] cursor-pointer select-none transition-all ${
                       isSelected
                         ? 'bg-amber-950/90 border-amber-400 text-amber-100 shadow-md ring-1 ring-amber-400/50'
                         : 'bg-slate-900/90 border-white/10 text-slate-300 hover:border-slate-500 hover:text-white'
                     }`}
-                    title={`Click to edit Path ${p.path_id}`}
                   >
                     <span className="w-1.5 h-1.5 rounded-full" style={{ backgroundColor: color }} />
                     <span className="font-bold">P{p.path_id}</span>
                   </div>
                 );
               })}
+            </div>
+          )}
+
+          {/* Fixed Unclipped Tooltip for Manual Path Chips */}
+          {hoveredPathChip && (
+            <div
+              className={`fixed pointer-events-none z-[100] -translate-x-1/2 -translate-y-full ${TOOLTIP_BASE_CLASS}`}
+              style={{ left: hoveredPathChip.x, top: hoveredPathChip.y }}
+            >
+              Click to edit Path {hoveredPathChip.id}
             </div>
           )}
 
@@ -716,7 +750,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
               <Undo2 size={12} />
             </button>
             <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
+              <div className={TOOLBAR_TIP_CLASS}>
                 Undo Waypoint
               </div>
             </div>
@@ -732,7 +766,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
               <RefreshCw size={12} />
             </button>
             <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
+              <div className={TOOLBAR_TIP_CLASS}>
                 Clear Current Points
               </div>
             </div>
@@ -748,7 +782,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
               <Check size={12} />
             </button>
             <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
+              <div className={TOOLBAR_TIP_CLASS}>
                 {selectedPathIdForEdit ? 'Update Path' : 'Commit New Path'}
               </div>
             </div>
@@ -766,7 +800,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
                 <Trash2 size={12} />
               </button>
               <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-                <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
+                <div className={TOOLBAR_TIP_CLASS}>
                   Delete Path {selectedPathIdForEdit}
                 </div>
               </div>
@@ -783,7 +817,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
               <Save size={12} />
             </button>
             <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
+              <div className={TOOLBAR_TIP_CLASS}>
                 Save Paths to YAML
               </div>
             </div>
@@ -798,7 +832,7 @@ export const InteractiveCanvas: React.FC<InteractiveCanvasProps> = ({
               <X size={12} />
             </button>
             <div className="absolute bottom-full mb-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-              <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
+              <div className={TOOLBAR_TIP_CLASS}>
                 Exit Manual TCP
               </div>
             </div>

@@ -1,5 +1,6 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { FolderPlus, Trash2, ChevronLeft, ChevronRight, Check, X } from 'lucide-react';
+import { Tooltip, TOOLTIP_BASE_CLASS } from '../../common/Tooltip';
 
 interface TemplateTopBarProps {
   templates: string[];
@@ -21,6 +22,7 @@ export const TemplateTopBar: React.FC<TemplateTopBarProps> = ({
   const [isCreating, setIsCreating] = useState(false);
   const [newTemplateName, setNewTemplateName] = useState('');
   const [deletingTemplate, setDeletingTemplate] = useState<string | null>(null);
+  const [hoveredTabDelete, setHoveredTabDelete] = useState<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     if (isCreating && inputRef.current) {
@@ -74,42 +76,50 @@ export const TemplateTopBar: React.FC<TemplateTopBarProps> = ({
             className="bg-transparent text-xs text-sky-200 outline-none w-36 font-mono"
             placeholder="Template name"
           />
-          <button
-            onClick={handleCommitCreate}
-            className="p-0.5 text-emerald-400 hover:text-emerald-300 transition-colors"
-            title="Confirm (Enter)"
-          >
-            <Check size={12} />
-          </button>
-          <button
-            onClick={handleCancelCreate}
-            className="p-0.5 text-slate-400 hover:text-slate-200 transition-colors"
-            title="Cancel (Esc)"
-          >
-            <X size={12} />
-          </button>
+          <div className="relative group flex items-center">
+            <button
+              onClick={handleCommitCreate}
+              className="p-0.5 text-emerald-400 hover:text-emerald-300 transition-colors"
+            >
+              <Check size={12} />
+            </button>
+            <Tooltip text="Confirm (Enter)" side="bottom" />
+          </div>
+          <div className="relative group flex items-center">
+            <button
+              onClick={handleCancelCreate}
+              className="p-0.5 text-slate-400 hover:text-slate-200 transition-colors"
+            >
+              <X size={12} />
+            </button>
+            <Tooltip text="Cancel (Esc)" side="bottom" />
+          </div>
         </div>
       ) : (
-        <button
-          onClick={handleStartCreate}
-          className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-sky-400 border border-slate-700 shrink-0 transition-colors flex items-center gap-1 text-xs font-medium px-2"
-          title="Create New Template"
-        >
-          <FolderPlus size={13} />
-          <span>New</span>
-        </button>
+        <div className="relative group flex items-center shrink-0">
+          <button
+            onClick={handleStartCreate}
+            className="p-1 rounded bg-slate-800 hover:bg-slate-700 text-sky-400 border border-slate-700 shrink-0 transition-colors flex items-center gap-1 text-xs font-medium px-2"
+          >
+            <FolderPlus size={13} />
+            <span>New</span>
+          </button>
+          <Tooltip text="Create New Template" side="bottom" />
+        </div>
       )}
 
       <div className="h-4 w-[1px] bg-slate-800 shrink-0" />
 
       {/* Left Scroll Arrow */}
-      <button
-        onClick={() => scrollTabs('left')}
-        className="p-1 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded transition-colors shrink-0"
-        title="Scroll Left"
-      >
-        <ChevronLeft size={15} />
-      </button>
+      <div className="relative group flex items-center shrink-0">
+        <button
+          onClick={() => scrollTabs('left')}
+          className="p-1 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded transition-colors shrink-0"
+        >
+          <ChevronLeft size={15} />
+        </button>
+        <Tooltip text="Scroll Left" side="bottom" />
+      </div>
 
       {/* Center Template Tabs Container */}
       <div
@@ -134,14 +144,12 @@ export const TemplateTopBar: React.FC<TemplateTopBarProps> = ({
                     setDeletingTemplate(null);
                   }}
                   className="px-1.5 py-0.2 bg-rose-600 hover:bg-rose-500 text-white rounded text-[10px] font-bold"
-                  title="Confirm Delete"
                 >
                   Yes
                 </button>
                 <button
                   onClick={() => setDeletingTemplate(null)}
                   className="px-1.5 py-0.2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded text-[10px]"
-                  title="Cancel"
                 >
                   No
                 </button>
@@ -160,29 +168,48 @@ export const TemplateTopBar: React.FC<TemplateTopBarProps> = ({
               onClick={() => onSelectTemplate(t)}
             >
               <span>{t}</span>
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  setDeletingTemplate(t);
-                }}
-                className="opacity-0 group-hover:opacity-100 hover:text-rose-400 p-0.5 rounded transition-opacity"
-                title="Delete Template"
-              >
-                <Trash2 size={11} />
-              </button>
+              <div className="relative flex items-center">
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setHoveredTabDelete(null);
+                    setDeletingTemplate(t);
+                  }}
+                  onMouseEnter={(e) => {
+                    const r = e.currentTarget.getBoundingClientRect();
+                    setHoveredTabDelete({ x: r.left + r.width / 2, y: r.bottom + 6 });
+                  }}
+                  onMouseLeave={() => setHoveredTabDelete(null)}
+                  className="opacity-0 group-hover:opacity-100 hover:text-rose-400 p-0.5 rounded transition-opacity"
+                >
+                  <Trash2 size={11} />
+                </button>
+              </div>
             </div>
           );
         })}
       </div>
 
       {/* Right Scroll Arrow */}
-      <button
-        onClick={() => scrollTabs('right')}
-        className="p-1 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded transition-colors shrink-0"
-        title="Scroll Right"
-      >
-        <ChevronRight size={15} />
-      </button>
+      <div className="relative group flex items-center shrink-0">
+        <button
+          onClick={() => scrollTabs('right')}
+          className="p-1 hover:bg-slate-800 text-slate-400 hover:text-slate-200 rounded transition-colors shrink-0"
+        >
+          <ChevronRight size={15} />
+        </button>
+        <Tooltip text="Scroll Right" side="bottom" />
+      </div>
+
+      {/* Fixed Unclipped Tooltip for Tab Delete */}
+      {hoveredTabDelete && (
+        <div
+          className={`fixed pointer-events-none z-[100] -translate-x-1/2 ${TOOLTIP_BASE_CLASS}`}
+          style={{ left: hoveredTabDelete.x, top: hoveredTabDelete.y }}
+        >
+          Delete Template
+        </div>
+      )}
     </div>
   );
 };

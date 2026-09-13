@@ -49,6 +49,7 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({
 }) => {
   const [robotState, setRobotState] = useState<RobotState>({ pose: [0,0,0,0,0,0], joint: [0,0,0,0,0,0] });
   const [simJoints, setSimJoints] = useState<number[] | null>(null);
+  const [simSpraying, setSimSpraying] = useState<boolean>(false);
   const [activeTemplate, setActiveTemplate] = useState<string | null>(null);
   const [activePathState, setActivePathState] = useState<'raw' | 'auto' | 'poi' | 'auto_poi'>('raw');
   const [meshVersion, setMeshVersion] = useState<number>(Date.now());
@@ -95,7 +96,11 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({
             onMeshUpdated={() => setMeshVersion(Date.now())}
             onPathsUpdated={() => setPathsVersion(Date.now())}
             onPathStateChange={(st) => setActivePathState(st)}
-            onSimulationJointsChange={(joints) => setSimJoints(joints)}
+            onSimulationJointsChange={(joints) => {
+              setSimJoints(joints);
+              if (!joints) setSimSpraying(false);
+            }}
+            onSimulationSprayingChange={(isSpraying) => setSimSpraying(isSpraying)}
           />
         );
       case 'task':
@@ -141,6 +146,7 @@ const WorkspaceView: React.FC<WorkspaceViewProps> = ({
             meshVersion={meshVersion}
             pathsVersion={pathsVersion}
             pathState={activePathState}
+            isSimulationSpraying={activeTab === 'interactive' ? simSpraying : false}
           />
         </div>
       </div>

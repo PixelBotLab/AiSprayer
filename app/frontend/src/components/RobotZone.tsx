@@ -2,6 +2,7 @@ import React from 'react';
 import Robot3DViewer from './Robot3DViewer';
 import JogControlPanel from './JogControlPanel';
 import { API_BASE } from '../config';
+import { Tooltip } from './common/Tooltip';
 
 interface RobotState {
   pose: number[];
@@ -38,6 +39,7 @@ interface RobotZoneProps {
   meshVersion?: number;
   pathsVersion?: number;
   pathState?: 'raw' | 'auto' | 'poi' | 'auto_poi';
+  isSimulationSpraying?: boolean;
 }
 
 const formatNum = (val?: number, decimals: number = 1, threshold: number = 0.05): string => {
@@ -91,8 +93,14 @@ const RobotZone: React.FC<RobotZoneProps> = ({
   meshVersion = 0,
   pathsVersion = 0,
   pathState = 'raw',
+  isSimulationSpraying = false,
 }) => {
   const [pendingDos, setPendingDos] = React.useState<Record<number, boolean>>({});
+
+  // DO 1 is the primary spraying solenoid valve (configured in aisprayer_config.yaml)
+  const sprayDoIndex = 1;
+  const isOnlineSpraying = (robotState.status === 1) && !!(robotState.digital_outputs && robotState.digital_outputs[sprayDoIndex - 1] === 1);
+  const isSprayingActive = isSimulationSpraying || isOnlineSpraying;
 
   const handleToggleDo = async (doIndex: number, currentVal: number) => {
     if (pendingDos[doIndex]) return;
@@ -158,6 +166,7 @@ const RobotZone: React.FC<RobotZoneProps> = ({
           meshVersion={meshVersion}
           pathsVersion={pathsVersion}
           pathState={pathState}
+          isSpraying={isSprayingActive}
         />
 
         {/* Centered Error Overlay */}
@@ -201,7 +210,7 @@ const RobotZone: React.FC<RobotZoneProps> = ({
         )}
 
         {/* Live Robot Speed HUD (Bottom-Left Ultra-Transparent HUD Overlay) */}
-        <div className="absolute bottom-2.5 left-2.5 z-10 pointer-events-none flex flex-col gap-0.5 px-2 py-1 font-mono text-[10px] select-none drop-shadow-[0_1px_3px_rgba(0,0,0,0.95)]">
+        <div className="absolute bottom-2.5 left-2.5 z-30 pointer-events-none flex flex-col gap-0.5 px-2 py-1 font-mono text-[10px] select-none drop-shadow-[0_1px_3px_rgba(0,0,0,0.95)]">
           {/* TCP Speed Row */}
           {(() => {
             const { mag, vec } = formatTcpSpeed(robotState.tcp_speed_actual, robotState.tcp_speed_mm_s);
@@ -277,32 +286,37 @@ const RobotZone: React.FC<RobotZoneProps> = ({
                     const isOn = val === 1;
                     const isPending = !!pendingDos[doIndex];
                     return (
-                      <button
-                        key={idx}
-                        type="button"
-                        onClick={() => handleToggleDo(doIndex, val)}
-                        disabled={!isConnected || isPending}
-                        title={
-                          !isConnected
-                            ? `DO ${doIndex}: ${isOn ? 'ON (1)' : 'OFF (0)'} (Robot offline)`
-                            : isPending
-                            ? `DO ${doIndex}: Switching...`
-                            : `DO ${doIndex}: ${isOn ? 'ON (1) - Click to turn OFF' : 'OFF (0) - Click to turn ON'}`
-                        }
-                        className={`w-[15px] h-[15px] min-w-[15px] text-[8px] flex items-center justify-center rounded-full font-mono leading-none font-bold transition-all duration-150 ${
-                          isOn
-                            ? 'bg-emerald-500/30 text-emerald-300 border border-emerald-400/80 shadow-[0_0_6px_rgba(16,185,129,0.5)]'
-                            : 'bg-slate-900/70 text-slate-400/70 border border-slate-700/50'
-                        } ${
-                          isConnected
-                            ? 'cursor-pointer hover:scale-115 hover:border-sky-400 hover:text-white active:scale-90'
-                            : 'cursor-not-allowed opacity-50'
-                        } ${
-                          isPending ? 'animate-pulse ring-1 ring-sky-400 border-sky-400' : ''
-                        } ${idx === 7 ? 'mr-1.5' : ''}`}
-                      >
-                        {doIndex}
-                      </button>
+                      <div key={idx} className="relative group flex items-center">
+                        <button
+                          type="button"
+                          onClick={() => handleToggleDo(doIndex, val)}
+                          disabled={!isConnected || isPending}
+                          className={`w-[15px] h-[15px] min-w-[15px] text-[8px] flex items-center justify-center rounded-full font-mono leading-none font-bold transition-all duration-150 ${
+                            isOn
+                              ? 'bg-emerald-500/30 text-emerald-300 border border-emerald-400/80 shadow-[0_0_6px_rgba(160,185,129,0.5)]'
+                              : 'bg-slate-900/70 text-slate-400/70 border border-slate-700/50'
+                          } ${
+                            isConnected
+                              ? 'cursor-pointer hover:scale-115 hover:border-sky-400 hover:text-white active:scale-90'
+                              : 'cursor-not-allowed opacity-50'
+                          } ${
+                            isPending ? 'animate-pulse ring-1 ring-sky-400 border-sky-400' : ''
+                          } ${idx === 7 ? 'mr-1.5' : ''}`}
+                        >
+                          {doIndex}
+                        </button>
+                        <Tooltip
+                          side="top"
+                          align={idx < 8 ? 'start' : 'end'}
+                          text={
+                            !isConnected
+                              ? `DO ${doIndex}: ${isOn ? 'ON (1)' : 'OFF (0)'} (Robot offline)`
+                              : isPending
+                              ? `DO ${doIndex}: Switching...`
+                              : `DO ${doIndex}: ${isOn ? 'ON (1) - Click to turn OFF' : 'OFF (0) - Click to turn ON'}`
+                          }
+                        />
+                      </div>
                     );
                   })}
                 </div>

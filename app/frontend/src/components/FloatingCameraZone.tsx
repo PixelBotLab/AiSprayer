@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Camera, Maximize2, Minimize2, Crosshair, GripHorizontal, X, Zap } from 'lucide-react';
 import mpegts from 'mpegts.js';
 import { API_BASE } from '../config';
+import { Tooltip } from './common/Tooltip';
 
 interface FloatingCameraZoneProps {
   onClose?: () => void;
@@ -218,24 +219,34 @@ const FloatingCameraZone: React.FC<FloatingCameraZoneProps> = ({ onClose }) => {
         </div>
 
         <div className="flex items-center gap-1.5 text-slate-400">
-          <button
-            onClick={() => setIsMaximized(!isMaximized)}
-            className={`transition-colors rounded p-1 hover:bg-slate-700 hover:text-white ${
-              isMaximized ? 'bg-blue-600/30 text-blue-300' : ''
-            }`}
-            title={isMaximized ? 'Exit Fullscreen' : 'Fullscreen'}
-          >
-            {isMaximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
-          </button>
+          <div className="relative group flex items-center">
+            <button
+              onClick={() => setIsMaximized(!isMaximized)}
+              className={`transition-colors rounded p-1 hover:bg-slate-700 hover:text-white ${
+                isMaximized ? 'bg-blue-600/30 text-blue-300' : ''
+              }`}
+            >
+              {isMaximized ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
+            </button>
+            <Tooltip text={isMaximized ? 'Exit Fullscreen' : 'Fullscreen'} side="bottom" align="end" />
+          </div>
 
           {onClose && (
-            <button
-              onClick={onClose}
-              className="p-1 hover:bg-slate-700 hover:text-white rounded transition-colors"
-              title="Close Live Stream (Can reopen from Left Sidebar)"
-            >
-              <X size={14} />
-            </button>
+            <div className="relative group flex items-center">
+              <button
+                onClick={onClose}
+                className="p-1 hover:bg-slate-700 hover:text-white rounded transition-colors"
+              >
+                <X size={14} />
+              </button>
+              <Tooltip
+                text="Close Live Stream (Can reopen from Left Sidebar)"
+                side="bottom"
+                align="end"
+                multiline
+                maxWidthClass="max-w-[220px]"
+              />
+            </div>
           )}
 
           {!isMaximized && <GripHorizontal size={14} className="opacity-50" />}

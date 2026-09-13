@@ -2,13 +2,14 @@ import React from 'react';
 import {
   Camera,
   Sparkles,
-  Route,
   Box,
   RefreshCw,
   X,
   Wand2,
+  Route,
   MousePointer2,
 } from 'lucide-react';
+import { Tooltip } from '../../common/Tooltip';
 
 interface InteractiveActionColumnProps {
   hasImage: boolean;
@@ -74,11 +75,13 @@ export const InteractiveActionColumn: React.FC<InteractiveActionColumnProps> = (
         >
           {isCapturing ? <RefreshCw size={14} className="animate-spin text-sky-400" /> : <Camera size={14} className="text-slate-300" />}
         </button>
-        <div className="absolute top-full mt-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-          <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
-            {!activeTemplate ? 'Select or create a template first' : 'Capture 2D Color + 3D Depth Data'}
-          </div>
-        </div>
+        <Tooltip
+          text={!activeTemplate ? 'Select or create a template first' : 'Capture 2D Color + 3D Depth Data'}
+          side="bottom"
+          align="start"
+          multiline
+          maxWidthClass="max-w-[200px]"
+        />
       </div>
 
       {/* 2. Segment Button */}
@@ -94,11 +97,13 @@ export const InteractiveActionColumn: React.FC<InteractiveActionColumnProps> = (
         >
           {segMode ? <X size={14} className="text-rose-400" /> : <Sparkles size={14} className="text-sky-400" />}
         </button>
-        <div className="absolute top-full mt-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-          <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
-            {!hasImage ? 'Capture RGB image first' : (segMode ? 'Exit Segmentation Mode' : 'MobileSAM Interactive Segmentation')}
-          </div>
-        </div>
+        <Tooltip
+          text={!hasImage ? 'Capture RGB image first' : (segMode ? 'Exit Segmentation Mode' : 'MobileSAM Interactive Segmentation')}
+          side="bottom"
+          align="start"
+          multiline
+          maxWidthClass="max-w-[200px]"
+        />
       </div>
 
       {/* 3. Reconstruct Button */}
@@ -110,15 +115,19 @@ export const InteractiveActionColumn: React.FC<InteractiveActionColumnProps> = (
         >
           {isReconstructing ? <RefreshCw size={14} className="animate-spin text-sky-400" /> : <Box size={14} className="text-indigo-400" />}
         </button>
-        <div className="absolute top-full mt-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-          <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
-            {!hasImage
+        <Tooltip
+          text={
+            !hasImage
               ? 'Capture RGB & depth first'
               : !hasMask
               ? 'Segment mask required to reconstruct 3D'
-              : 'Surface Poisson 3D Mesh Reconstruction'}
-          </div>
-        </div>
+              : 'Surface Poisson 3D Mesh Reconstruction'
+          }
+          side="bottom"
+          align="center"
+          multiline
+          maxWidthClass="max-w-[200px]"
+        />
       </div>
 
       {/* 4. Auto Waypoint Path Button */}
@@ -130,17 +139,21 @@ export const InteractiveActionColumn: React.FC<InteractiveActionColumnProps> = (
         >
           {isAutoGenerating ? <RefreshCw size={14} className="animate-spin text-emerald-400" /> : <AutoPathIcon size={16} className="text-emerald-400" />}
         </button>
-        <div className="absolute top-full mt-2 hidden group-hover:flex flex-col items-center pointer-events-none z-50">
-          <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
-            {!hasImage
+        <Tooltip
+          text={
+            !hasImage
               ? 'Capture RGB & depth first'
               : !hasMask
               ? 'Segment mask required to generate path'
               : !hasMesh
               ? '3D mesh required to generate path'
-              : 'Auto Generate Spray Paths from Mesh + Mask'}
-          </div>
-        </div>
+              : 'Auto Generate Spray Paths from Mesh + Mask'
+          }
+          side="bottom"
+          align="end"
+          multiline
+          maxWidthClass="max-w-[200px]"
+        />
       </div>
 
       {/* 5. Manual TCP Path Button */}
@@ -156,17 +169,21 @@ export const InteractiveActionColumn: React.FC<InteractiveActionColumnProps> = (
         >
           {manualPathMode ? <X size={14} className="text-rose-400" /> : <ManualPathIcon size={14} className="text-amber-400" />}
         </button>
-        <div className="absolute top-full mt-2 right-0 hidden group-hover:flex flex-col items-end pointer-events-none z-50">
-          <div className="bg-slate-950/70 backdrop-blur-md border border-white/10 rounded-md px-1.5 py-0.5 shadow-xl text-[9px] text-slate-300 whitespace-nowrap">
-            {!hasImage
+        <Tooltip
+          text={
+            !hasImage
               ? 'Capture RGB & depth first'
               : !hasMesh
               ? '3D mesh required for manual path design'
               : manualPathMode
               ? 'Exit Manual TCP Design'
-              : 'Manual TCP Path & Normal Design'}
-          </div>
-        </div>
+              : 'Manual TCP Path & Normal Design'
+          }
+          side="bottom"
+          align="end"
+          multiline
+          maxWidthClass="max-w-[200px]"
+        />
       </div>
     </div>
   );

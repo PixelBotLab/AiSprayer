@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Cpu, Crosshair, Home, Pause, Play, AlertOctagon, Minimize2, ChevronDown, ChevronUp, Hand } from 'lucide-react';
 import { API_BASE, WS_BASE } from '../config';
+import { Tooltip } from './common/Tooltip';
 
 interface GripperSpecs {
   model?: string;
@@ -532,17 +533,19 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
           >
             <Crosshair size={12} className="shrink-0" /> <span>Zero</span>
           </button>
-          <button
-            onClick={handleFold}
-            disabled={disableMotion}
-            title="Move robot to configured Fold position"
-            className={`px-1.5 h-7 text-[11px] whitespace-nowrap rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors border ${activeAction === 'fold'
-                ? 'bg-purple-600/20 text-purple-400 border-purple-500/50 animate-pulse shadow-[0_0_8px_rgba(168,85,247,0.5)] cursor-not-allowed'
-                : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border-slate-700/50 disabled:opacity-50 disabled:cursor-not-allowed'
-              }`}
-          >
-            <Minimize2 size={12} className="shrink-0" /> <span>Fold</span>
-          </button>
+          <div className="relative group flex items-center shrink-0">
+            <button
+              onClick={handleFold}
+              disabled={disableMotion}
+              className={`px-1.5 h-7 text-[11px] whitespace-nowrap rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors border ${activeAction === 'fold'
+                  ? 'bg-purple-600/20 text-purple-400 border-purple-500/50 animate-pulse shadow-[0_0_8px_rgba(168,85,247,0.5)] cursor-not-allowed'
+                  : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border-slate-700/50 disabled:opacity-50 disabled:cursor-not-allowed'
+                }`}
+            >
+              <Minimize2 size={12} className="shrink-0" /> <span>Fold</span>
+            </button>
+            <Tooltip text="Move robot to configured Fold position" side="top" />
+          </div>
           <button
             onClick={handlePause}
             disabled={!robotConnected}
@@ -558,20 +561,22 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
             <Play size={12} className="shrink-0" /> <span>Resume</span>
           </button>
           {/* Gripper Quick Toggle: open when closed / close when open; state synced from live gripper telemetry */}
-          <button
-            onClick={gripperIsOpen ? handleGripperClamp : handleGripperOpen}
-            disabled={disableGripper}
-            title="Toggle gripper open/close (state synced from live gripper telemetry)"
-            className={`px-1.5 h-7 text-[11px] whitespace-nowrap rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors border ${
-              gripperOperating
-                ? 'bg-amber-600/20 text-amber-400 border-amber-500/50 animate-pulse cursor-not-allowed'
-                : gripperIsOpen
-                ? 'bg-amber-600/20 text-amber-300 hover:bg-amber-600 hover:text-white border-amber-600/30'
-                : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border-slate-700/50 disabled:opacity-50 disabled:cursor-not-allowed'
-            }`}
-          >
-            <Hand size={12} className="shrink-0" /> <span>{gripperIsOpen ? 'Close' : 'Open'}</span>
-          </button>
+          <div className="relative group flex items-center shrink-0">
+            <button
+              onClick={gripperIsOpen ? handleGripperClamp : handleGripperOpen}
+              disabled={disableGripper}
+              className={`px-1.5 h-7 text-[11px] whitespace-nowrap rounded-md flex items-center justify-center gap-1 shrink-0 transition-colors border ${
+                gripperOperating
+                  ? 'bg-amber-600/20 text-amber-400 border-amber-500/50 animate-pulse cursor-not-allowed'
+                  : gripperIsOpen
+                  ? 'bg-amber-600/20 text-amber-300 hover:bg-amber-600 hover:text-white border-amber-600/30'
+                  : 'bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white border-slate-700/50 disabled:opacity-50 disabled:cursor-not-allowed'
+              }`}
+            >
+              <Hand size={12} className="shrink-0" /> <span>{gripperIsOpen ? 'Close' : 'Open'}</span>
+            </button>
+            <Tooltip text="Toggle gripper open/close (state synced from live gripper telemetry)" side="top" />
+          </div>
           <button
             onClick={handleEstop}
             disabled={!robotConnected}
@@ -582,13 +587,15 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
         </div>
 
         {/* Panel Collapse Toggle: fold the body to maximize the 3D viewer area */}
-        <button
-          onClick={() => setCollapsed((c) => !c)}
-          title={collapsed ? 'Expand control panel' : 'Collapse control panel'}
-          className="shrink-0 w-6 h-6 flex items-center justify-center rounded-md bg-slate-800/80 border border-slate-700/50 text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
-        >
-          {collapsed ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
-        </button>
+        <div className="relative group flex items-center shrink-0">
+          <button
+            onClick={() => setCollapsed((c) => !c)}
+            className="shrink-0 w-6 h-6 flex items-center justify-center rounded-md bg-slate-800/80 border border-slate-700/50 text-slate-400 hover:text-white hover:bg-slate-700 transition-colors"
+          >
+            {collapsed ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+          </button>
+          <Tooltip text={collapsed ? 'Expand control panel' : 'Collapse control panel'} side="top" align="end" />
+        </div>
       </div>
 
       {/* Three-Column Body: Cartesian Axes | Joint Axes | Speed Dynamics + Gripper */}
@@ -759,18 +766,20 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
 
               {/* Primary Stroke: Clamp / Slider / Open */}
               <div className="flex items-center gap-1.5">
-                <button
-                  onClick={handleGripperClamp}
-                  disabled={disableGripper}
-                  className={`px-1.5 py-1 text-[9px] font-semibold rounded border transition-colors select-none shrink-0 ${
-                    disableGripper
-                      ? 'bg-slate-900 border-slate-800 text-slate-600 cursor-not-allowed'
-                      : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
-                  }`}
-                  title="Clamp to 0mm"
-                >
-                  CLAMP
-                </button>
+                <div className="relative group flex items-center shrink-0">
+                  <button
+                    onClick={handleGripperClamp}
+                    disabled={disableGripper}
+                    className={`px-1.5 py-1 text-[9px] font-semibold rounded border transition-colors select-none shrink-0 ${
+                      disableGripper
+                        ? 'bg-slate-900 border-slate-800 text-slate-600 cursor-not-allowed'
+                        : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
+                    }`}
+                  >
+                    CLAMP
+                  </button>
+                  <Tooltip text="Clamp to 0mm" side="top" align="start" />
+                </div>
 
                 <input
                   type="range"
@@ -787,18 +796,20 @@ const JogControlPanel: React.FC<JogControlPanelProps> = ({ robotState }) => {
                   }`}
                 />
 
-                <button
-                  onClick={handleGripperOpen}
-                  disabled={disableGripper}
-                  className={`px-1.5 py-1 text-[9px] font-semibold rounded border transition-colors select-none shrink-0 ${
-                    disableGripper
-                      ? 'bg-slate-900 border-slate-800 text-slate-600 cursor-not-allowed'
-                      : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
-                  }`}
-                  title={`Open to ${maxStrokeMm}mm`}
-                >
-                  OPEN
-                </button>
+                <div className="relative group flex items-center shrink-0">
+                  <button
+                    onClick={handleGripperOpen}
+                    disabled={disableGripper}
+                    className={`px-1.5 py-1 text-[9px] font-semibold rounded border transition-colors select-none shrink-0 ${
+                      disableGripper
+                        ? 'bg-slate-900 border-slate-800 text-slate-600 cursor-not-allowed'
+                        : 'bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700'
+                    }`}
+                  >
+                    OPEN
+                  </button>
+                  <Tooltip text={`Open to ${maxStrokeMm}mm`} side="top" align="end" />
+                </div>
               </div>
 
               {/* Gripper Speed & Grip Force Setting Sliders */}
