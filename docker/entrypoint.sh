@@ -47,6 +47,12 @@ echo "  * Backend API:  http://0.0.0.0:8000"
 echo "  * Web Stream:   http://0.0.0.0:8008"
 echo "  * RTSP Server:  rtsp://0.0.0.0:8554"
 echo "  * HTTP Control: http://0.0.0.0:18080"
+
+# Start Web UI static server on port 5173 if frontend dist exists
+if [[ -d "${APP_ROOT}/app/frontend/dist" && -f "${APP_ROOT}/app/frontend/dist/index.html" ]]; then
+    echo "  * Web UI:       http://0.0.0.0:5173"
+    python3 -m http.server 5173 --directory "${APP_ROOT}/app/frontend/dist" >/dev/null 2>&1 &
+fi
 echo "============================================================"
 
 # Execute Python FastAPI backend (which internally starts C++ Camera Service and MobileSAM)

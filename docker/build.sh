@@ -31,6 +31,9 @@ TARGET_PLATFORM="${DEFAULT_PLATFORM}"
 CUSTOM_TAG=""
 NO_CACHE=""
 PUSH=false
+CLEAN=false
+BUILD_MISSING=false
+SKIP_INSTALL=false
 
 show_help() {
     cat <<EOF
@@ -39,12 +42,16 @@ Usage: docker/build.sh [OPTIONS]
 选项:
   --platform <rk3588|x86_64>  目标平台（默认自动检测: ${DEFAULT_PLATFORM}）
   -t, --tag <tag>             自定义镜像标签（默认根据平台生成）
+  -c, --clean                 全新干净构建（清理现有 install/ 目录重新归档，并禁用 Docker 构建缓存）
+  -b, --build-missing         若 C++ 产物或前端产物缺失，自动调用编译脚本构建
   --no-cache                  构建时禁用 Docker 缓存
+  --skip-install              跳过 install/ 分发包的同步更新（仅使用现有 install/ 目录）
   --push                      构建完成后推送到远程镜像仓库
   -h, --help                  显示此帮助信息
 
 示例:
-  bash docker/build.sh                         # 按当前机器架构构建
+  bash docker/build.sh                         # 按当前机器架构构建（自动同步最新 Python、前端与配置）
+  bash docker/build.sh --clean                 # 全新清理后无缓存构建镜像
   bash docker/build.sh --platform rk3588       # 构建 RK3588 目标镜像
   bash docker/build.sh -t aisprayer:v1.0       # 自定义镜像 tag
 EOF
@@ -57,6 +64,16 @@ while [[ $# -gt 0 ]]; do
             TARGET_PLATFORM="$2"; shift 2 ;;
         -t|--tag)
             CUSTOM_TAG="$2"; shift 2 ;;
+        -c|--clean)
+            CLEAN=true
+            NO_CACHE="--no-cache"
+            shift ;;
+        -b|--build-missing)
+            BUILD_MISSING=true
+            shift ;;
+        --skip-install)
+            SKIP_INSTALL=true
+            shift ;;
         --no-cache)
             NO_CACHE="--no-cache"; shift ;;
         --push)
@@ -117,11 +134,17 @@ else
 fi
 
 section "准备独立分发包 (install/)"
-if [[ ! -d "install" || ! -f "install/bin/orbbec_camera_service" || ! -f "install/lib/libmotion_c.so" ]]; then
-    info "检测到 install/ 目录未就绪，正在自动调用 ./install.sh 生成分发包..."
-    bash ./install.sh
+if $SKIP_INSTALL; then
+    if [[ ! -d "install" ]]; then
+        error "指定了 --skip-install 但 install/ 目录不存在，请先执行 ./install.sh 或移除该选项！"
+    fi
+    info "已跳过 install/ 同步（使用现有目录: $(du -sh install | cut -f1)）。"
 else
-    info "独立分发包 install/ 已就绪 ($(du -sh install | cut -f1))。"
+    INSTALL_ARGS=()
+    $CLEAN && INSTALL_ARGS+=("--clean")
+    $BUILD_MISSING && INSTALL_ARGS+=("--build-missing")
+    info "正在同步最新代码与依赖至独立分发包 install/ (${INSTALL_ARGS[*]:-增量同步})..."
+    bash ./install.sh "${INSTALL_ARGS[@]}"
 fi
 
 section "执行 Docker 构建"

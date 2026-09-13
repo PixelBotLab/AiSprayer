@@ -97,8 +97,21 @@ done
 # 1.4 检查前端静态站点
 FRONTEND_DIST="${PROJECT_ROOT}/app/frontend/dist"
 if [[ ! -d "${FRONTEND_DIST}" || ! -f "${FRONTEND_DIST}/index.html" ]]; then
-    warn "前端构建目录 ${FRONTEND_DIST} 不存在或不完整！"
+    if $BUILD_MISSING && command -v npm &>/dev/null; then
+        info "未找到前端构建产物，正在自动执行编译 (npm run build)..."
+        (cd "${PROJECT_ROOT}/app/frontend" && npm run build)
+    else
+        warn "前端构建目录 ${FRONTEND_DIST} 不存在或不完整！"
+    fi
 else
+    # 若前端源码比 dist/index.html 更新，且 npm 可用，自动重新编译
+    if command -v npm &>/dev/null; then
+        NEWEST_SRC=$(find "${PROJECT_ROOT}/app/frontend/src" -type f -newer "${FRONTEND_DIST}/index.html" 2>/dev/null | head -n 1 || true)
+        if [[ -n "${NEWEST_SRC}" ]]; then
+            info "检测到前端源码有更新 (${NEWEST_SRC##*/})，正在重新编译前端 (npm run build)..."
+            (cd "${PROJECT_ROOT}/app/frontend" && npm run build)
+        fi
+    fi
     info "✔ Web 前端产物: ${FRONTEND_DIST}"
 fi
 
@@ -148,7 +161,7 @@ fi
 
 # 3.4 纯 Python 业务代码 (app/src/) — 严格剔除 C++ 源码、生成物、头文件、src 目录与 tests
 info "归档核心 Python 代码至 app/src/ (剔除 C++ 源码树、中间物、头文件与单测) ..."
-rsync -a --delete \
+rsync -a --delete --delete-excluded \
     --exclude="__pycache__" \
     --exclude="*.pyc" \
     --exclude="*.pyo" \
@@ -220,7 +233,7 @@ rsync -a --delete "${PROJECT_ROOT}/configs/" "${INSTALL_DIR}/configs/"
 # 3.8 独立工具脚本 (tools/)
 if [[ -d "${PROJECT_ROOT}/tools" ]]; then
     info "归档工具脚本至 tools/ ..."
-    rsync -a --delete \
+    rsync -a --delete --delete-excluded \
         --exclude="__pycache__" \
         --exclude="*.pyc" \
         "${PROJECT_ROOT}/tools/" "${INSTALL_DIR}/tools/"
@@ -285,6 +298,12 @@ echo "============================================================"
 # 清理遗留锁与孤儿进程
 rm -f "${SCRIPT_DIR}/.orbbec.lock" 2>/dev/null || true
 pkill -9 -x orbbec_camera_service 2>/dev/null || true
+
+# 若存在前端构建产物，后台启动 Web 静态服务 (端口 5173)
+if [[ -d "${SCRIPT_DIR}/app/frontend/dist" && -f "${SCRIPT_DIR}/app/frontend/dist/index.html" ]]; then
+    echo " Starting Web UI: http://0.0.0.0:5173"
+    python3 -m http.server 5173 --directory "${SCRIPT_DIR}/app/frontend/dist" >/dev/null 2>&1 &
+fi
 
 # 启动主服务
 exec python3 "${SCRIPT_DIR}/app/src/main.py" "$@"
