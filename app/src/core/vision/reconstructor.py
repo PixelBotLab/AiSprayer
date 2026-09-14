@@ -15,6 +15,7 @@ import numpy as np
 import open3d as o3d
 import trimesh
 
+from core.vision.mesh_utils import drop_non_finite_vertices
 from core.vision.types import depth_to_point_cloud, k_matrix_to_intrinsics
 
 logger = logging.getLogger(__name__)
@@ -198,10 +199,19 @@ class SurfaceReconstructor:
                 number_of_iterations=self.smooth_iterations
             )
 
-        vertices_cam = np.asarray(o3d_mesh.vertices)
-        faces = np.asarray(o3d_mesh.triangles)
+        vertices_cam = np.asarray(o3d_mesh.vertices, dtype=np.float64)
+        faces = np.asarray(o3d_mesh.triangles, dtype=np.int64)
+
+        # 剔除泊松/Taubin 偶发产生的非有限 (NaN/Inf) 顶点及其引用面，
+        # 避免把坏点写入 scan.mesh.ply 并污染下游 cKDTree 等要求全有限输入的算子。
+        vertices_cam, faces, n_bad = drop_non_finite_vertices(vertices_cam, faces)
+        if n_bad:
+            logger.warning(
+                "Dropped %d non-finite vertices from Poisson/Taubin output.", n_bad
+            )
+
         if vertices_cam.shape[0] == 0:
-            raise RuntimeError("Poisson reconstruction produced 0 vertices.")
+            raise RuntimeError("Poisson reconstruction produced 0 finite vertices.")
 
         # 5. 坐标系转换 (相机系 -> 机器人基座系)。T_camera_to_base=None 时保持相机系输出。
         if T_camera_to_base is not None:

@@ -121,6 +121,48 @@ class TestWaypointPlanner(unittest.TestCase):
             set(pts[0]["tcp_pose_base"]), {"x", "y", "z", "rx", "ry", "rz"}
         )
 
+    def test_non_finite_vertex_does_not_break_planning(self):
+        """回归测试：网格中混入未被任何面引用的 NaN 顶点时，规划仍能自愈成功。
+
+        复现现场事故：泊松/Taubin 输出一个孤儿 NaN 顶点，被 cKDTree 直接拒绝
+        (ValueError: data must be finite)。修复后应在建树前剔除坏点而非报错。
+        """
+        base = _two_leg_boxes()
+        verts = np.asarray(base.vertices, dtype=np.float64)
+        faces = np.asarray(base.faces, dtype=np.int64)
+        # 追加一个坐标全为 NaN 的顶点，且不被任何面引用（faces 索引不变）
+        verts_nan = np.vstack([verts, [np.nan, np.nan, np.nan]])
+        mesh = trimesh.Trimesh(vertices=verts_nan, faces=faces, process=False)
+
+        k = _identity_k(320, 240, 280.0)
+        t = _front_camera_T()
+        planner = WaypointPlanner(
+            spray_dist_mm=150.0,
+            row_spacing_mm=25.0,
+            point_spacing_mm=40.0,
+            image_size=(320, 240),
+            camera_intrinsics=k,
+            T_camera_to_base=t,
+            dedup_radius_mm=20.0,
+            align_outer_edge=True,
+        )
+
+        uv, z_ok = planner._project_vertices(verts, k, t)
+        good = uv[z_ok]
+        xs = np.clip(good[:, 0], 2, 317)
+        ys = np.clip(good[:, 1], 2, 237)
+        poly = [
+            [int(xs.min()), int(ys.min())],
+            [int(xs.max()), int(ys.min())],
+            [int(xs.max()), int(ys.max())],
+            [int(xs.min()), int(ys.max())],
+        ]
+        masks = {"masks": [{"polygons": [poly]}]}
+
+        out = planner.plan(mesh, masks)
+        pts = out["paths"][0]["points"]
+        self.assertGreater(len(pts), 4)
+
     def test_crotch_split(self):
         """验证 2D 裤裆凸缺陷识别与左右腿切分。"""
         mask = _synthetic_pants_mask()

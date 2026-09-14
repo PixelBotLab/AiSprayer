@@ -15,6 +15,8 @@ import trimesh
 from scipy.spatial import cKDTree
 from scipy.spatial.transform import Rotation as R_tool
 
+from core.vision.mesh_utils import drop_non_finite_vertices
+
 logger = logging.getLogger(__name__)
 
 LABEL_NONE = 0
@@ -277,6 +279,20 @@ class WaypointPlanner:
             or len(getattr(mesh, "faces", [])) < 1
         ):
             raise WaypointPlannerError("mesh is empty or too small")
+
+        # 消费侧防御：剔除历史网格中可能残留的非有限 (NaN/Inf) 顶点及其引用面。
+        # cKDTree 对全部顶点建树，单个坏点即可让整条自动路径规划失败 (fail-fast 之外的自愈)。
+        clean_verts, clean_faces, n_bad = drop_non_finite_vertices(
+            np.asarray(mesh.vertices, dtype=np.float64),
+            np.asarray(mesh.faces, dtype=np.int64),
+        )
+        if n_bad:
+            logger.warning(
+                "Ignoring %d non-finite vertices in input mesh before planning.", n_bad
+            )
+            mesh = trimesh.Trimesh(
+                vertices=clean_verts, faces=clean_faces, process=False
+            )
 
         n_faces0 = int(len(mesh.faces))
         verts_m = self._vertices_meters(mesh)
