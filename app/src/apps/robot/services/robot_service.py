@@ -288,6 +288,40 @@ class RobotService:
             logger.error(msg)
             return False, msg
 
+    def check_reachability(self, poses: List[Any]) -> tuple[bool, List[int], str]:
+        """
+        控制器逆解闸门 (Controller IK pre-flight gate)：逐点调用控制器 InverseSolution
+        判定笛卡尔位姿是否可解，纯查询、不下发任何运动指令、不使能、不移动机械臂。
+        以控制器自身判据 (含其私有隐藏限位/奇异保护区/有效工作空间) 作为唯一真理，
+        弥补离线 URDF 校验在贴边满伸展处误判可达 (假 PASS) 的缺口。
+        :param poses: PoseLike 列表 (RobotPose / dict / [x,y,z,a,b,c])，姿态按驱动约定
+        :return: (all_ok, failed_indices, message)。未连接或驱动不支持逆解查询时跳过
+                 检查并返回 all_ok=True，以免在无法核验的配置上阻断执行。
+        """
+        if not self._driver or not self._is_connected:
+            return True, [], "Robot not connected: controller reachability check skipped."
+        if not hasattr(self._driver, "is_reachable"):
+            return True, [], "Driver has no IK query capability: controller reachability check skipped."
+        try:
+            failed: List[int] = []
+            for idx, pose in enumerate(poses):
+                # is_reachable 内部按当前生效工具号 self.tool_num 逆解 (与真实执行同一坐标系)
+                if not self._driver.is_reachable(pose):
+                    failed.append(idx)
+            if failed:
+                msg = (
+                    f"Controller inverse-kinematics rejected {len(failed)} of {len(poses)} "
+                    f"waypoints (out of reach / near-singular on the real robot)."
+                )
+                logger.error(f"check_reachability: {msg} failed_indices={failed}")
+                return False, failed, msg
+            logger.info(f"check_reachability: all {len(poses)} waypoints are IK-solvable by the controller.")
+            return True, [], ""
+        except Exception as e:
+            msg = f"check_reachability: controller IK query failed: {e}"
+            logger.error(msg)
+            return True, [], msg  # 查询异常时不阻断执行 (交由执行期保护)，仅在日志中告警
+
     @property
     def tool_num(self) -> int:
         """当前生效的工具坐标系编号 (优先取驱动层实际值，否则回退到配置值)"""

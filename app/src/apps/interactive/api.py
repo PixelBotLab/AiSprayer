@@ -953,6 +953,38 @@ def execute_yaml_path(name: str, req: ExecuteYamlPathRequest):
     waypoints_done = 0
 
     try:
+        # 0.5 下发前可达性闸门 (Controller IK pre-flight gate)：用控制器自身逆解 InverseSolution
+        #     逐航点核验可达性。离线 URDF 校验在贴边满伸展姿态下会假 PASS，此处以控制器判据兜底；
+        #     任一点无逆解即中止，此时机械臂尚未移动且 finally 会强制关 DO (故障安全)，
+        #     避免执行到一半控制器报"无逆解"停在工件上方。放在 try 内以保证异常路径统一清理。
+        robot_service.broadcast_exec_status(action="Verifying waypoint reachability on controller...", stage="verifying")
+        gate_poses: List[dict] = []
+        gate_labels: List[str] = []
+        for _gp in target_paths:
+            _gp_title = _gp.get("name", f"Path {_gp.get('path_id', '?')}")
+            for _gw_i, _gpt in enumerate(_gp.get("points", [])):
+                _gtcp = _gpt.get("tcp_pose_base")
+                if not _gtcp:
+                    continue
+                gate_poses.append({
+                    "x": float(_gtcp.get("x", 0.0)), "y": float(_gtcp.get("y", 0.0)), "z": float(_gtcp.get("z", 0.0)),
+                    "rx": float(_gtcp.get("rx", 0.0)), "ry": float(_gtcp.get("ry", 0.0)), "rz": float(_gtcp.get("rz", 0.0)),
+                    "is_radians": False,
+                })
+                gate_labels.append(f"{_gp_title} pt#{_gw_i + 1}")
+        ik_ok, ik_failed, ik_msg = robot_service.check_reachability(gate_poses)
+        if not ik_ok:
+            _shown = ", ".join(gate_labels[i] for i in ik_failed[:10])
+            _more = f" (+{len(ik_failed) - 10} more)" if len(ik_failed) > 10 else ""
+            err_msg = (
+                f"Controller rejected {len(ik_failed)}/{len(gate_poses)} waypoints as unreachable "
+                f"(no inverse solution / near-singular on the real robot): [{_shown}{_more}]. "
+                "The trajectory was NOT executed. Pull the workpiece closer, shorten the tool, "
+                "reduce standoff, or shrink the spray area in these regions, then re-verify."
+            )
+            logger.error(f"execute_yaml_path: {err_msg} (reason: {ik_msg})")
+            raise HTTPException(status_code=400, detail=err_msg)
+
         # 1. 在执行 path 之前先回到 Home 姿态 (使用 MoveJ 关节运动参数)
         robot_service.broadcast_exec_status(action="Moving robot to Home position...", stage="moving_home")
         logger.info(f"execute_yaml_path: Moving robot to Home position (speed_j={speed_j}%, acc_j={acc_j}%) before trajectory execution...")
