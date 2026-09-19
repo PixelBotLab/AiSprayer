@@ -2,7 +2,7 @@
 
 > 模块路径：`app/src/core/teleop/`（按职责命名，主输入设备为八位堂手柄）
 > 状态：**设计阶段（Design / Not Implemented）**
-> 适用范围：使用标准 HID 游戏手柄（8BitDo Pro 2 / Ultimate / SN30 Pro 系列，X-Input / D-Input 模式）对 CR5 机械臂进行手动示教与点动遥操作。
+> 适用范围：使用 HID 游戏手柄（部署机型：8BitDo 猎户座2/Ultimate 2 NS 版，经 2.4G 接收器走 **Nintendo Switch Pro 协议**；亦兼容 X-Input/D-Input 后端）对 CR5 机械臂进行手动示教与点动遥操作。
 
 ---
 
@@ -71,7 +71,7 @@
 
 ```
 [1] 接入手柄 → [2] 设备枚举/绑定 → [3] 连接机械臂(robot_service) → [4] 手柄进入 IDLE
-   → [5] 按 Start 使能(需机械臂 Idle) → [6] ENABLED：按住 RB 使能键 + 拨杆点动
+   → [5] 按 Start 连接+上伺服(需机械臂 Idle) → [6] ENABLED：按住 RT 使能键 + 拨杆点动
    → [7] 松手/松开使能/异常 → 立即停止点动，回 IDLE/SAFE
    → [8] 任意时刻按 Y 急停 → E-STOP：立即关喷 DO + 机械臂 estop
 ```
@@ -85,7 +85,7 @@
 | S3 机械臂就绪 | 复用 `robot_service.is_connected()` 与 `get_running_state()` | 已连接且 `status==0(Idle)` | 未连接→禁止使能，LED 琥珀慢闪 |
 | S4 进入 IDLE | 装载键位映射（`configs/` 覆盖或默认表） | 配置校验通过 | 回退默认映射并告警 |
 | S5 使能握手 | 操作员按 **Start(+)** | 见 §5 状态机 ENABLE 前置条件 | 条件不满足→拒绝，LED 双闪提示 |
-| S6 点动控制 | 按住 **RB**(dead-man) + 拨杆 | 持续 armed、状态 Idle/允许点动 | 松 RB / 抖动越限→停 |
+| S6 点动控制 | 按住 **RT**(dead-man) + 拨杆 | 持续 armed、状态 Idle/允许点动 | 松 RT / 抖动越限→停 |
 | S7 关断/退出 | 断开、进程退出、看门狗超时 | — | **Fail-Close**：`set_do(spray,0,immediate=True)` + jog stop |
 
 > **看门狗（Heartbeat Watchdog）**：`teleop.py` 以固定周期（默认 100 ms）向 sink 发送心跳；连续 N 个周期（默认 3）收不到手柄事件（断连/休眠），视为失控，自动执行 §7 的安全停止。
@@ -94,163 +94,190 @@
 
 ## 4. 键位映射总表（从启动到控制）
 
-### 4.1 逻辑按键名（与物理报文解耦，作为配置键）
-| 逻辑名 | 物理含义（8BitDo 标准布局） |
-|---|---|
-| `LS_X` / `LS_Y` | 左摇杆 水平/垂直（模拟轴，`-1.0..1.0`） |
-| `RS_X` / `RS_Y` | 右摇杆 水平/垂直（模拟轴） |
-| `LT` / `RT` | 左/右扳机（单向模拟轴 `0..1`） |
-| `LB` / `RB` | 左/右肩键（数字键） |
-| `DP_UP/DOWN/LEFT/RIGHT` | 十字键 四向 |
-| `A` `B` `X` `Y` | 面键 |
-| `BACK` | Select / `−` |
-| `START` | Start / `+` |
-| `L3` / `R3` | 左/右摇杆按下 |
+> 部署实测设备：**8BitDo 猎户座2（Ultimate 2）NS 版**，经 **2.4G NS 接收器**走 **Nintendo Switch Pro 协议**（内核 `hid_nintendo`，`057E:2009`）。以下按键/轴/十字键/LED 均在本机 `evdev` + `/sys/class/leds` 实测确认；单一真实源见 §4.5 与 `map_linux_24g.py`。
 
-> 逻辑名到**具体原始索引**随平台/后端/手柄模式而变；§4.5 记录了参考手柄（8BitDo 猎户座2 NS 模式）的实测对照表，`mapping.py` 以此为初始单一真实源并按平台覆盖。
+### 4.0 底层硬约束：单轴点动（先读）
+点动链路 `RobotService.jog_continuous(axis, direction)` → `move_jog_cartesian/move_jog_joint` → Dobot `MoveJog(axis_id)`，其语义为：
+- **一个周期只能点动一个轴**（`axis_id` 单值，joint 与 cartesian 皆然）；
+- `direction` 仅为**正/负符号**（`+`/`-`），**不携带模拟比例速度**，`direction=0` 停止；
+- 因此摇杆**无法**比例调速，速度只来自**全局速率档**（`set_global_speed_factor`）与 `LT` 降速。
+- 遥操作层每周期从多路输入中取**主导单轴**（死后区绝对值最大者）下发一条 `MoveJog`；回中或松 `RT` → `direction=0` 停止。
+
+> 这是对早期"摇杆比例速度"设想的更正：真机为**符号式单轴点动**。
+
+### 4.1 逻辑按键名（与物理报文解耦，作为配置键）
+| 逻辑名 | 物理含义（本机 NS 2.4G 实测） |
+|---|---|
+| `LS_X` / `LS_Y` | 左摇杆 水平/垂直（模拟轴；`LS_Y` 上推为负，需取反） |
+| `RS_X` / `RS_Y` | 右摇杆 水平/垂直（模拟轴；`RS_Y` 上推为负，需取反） |
+| `LT` / `RT` | 左/右扳机（**Switch 协议下为数字键**，非模拟轴） |
+| `LB` / `RB` | 左/右肩键（数字键） |
+| `DP_UP/DOWN/LEFT/RIGHT` | 十字键四向（走 **HAT** `ABS_HAT0X/Y`，离散 -1/0/1） |
+| `A` `B` `X` `Y` | 面键（**Switch 协议内核名与丝印对角互换**，见 §4.5） |
+| `BACK` / `START` | `−` / `+` |
+| `HOME` | 机身 Home 键（`BTN_MODE`）：作 **Go Fold 收纳位**（需实测确认未被系统拦截） |
+| `CAPTURE` | 方形 Capture 键：作 **Go Home 回原点** |
+| `L3` / `R3` | 左/右摇杆按下（**实测可用**） |
+
+> 逻辑名到原始内核码见 §4.5；`mapping.py` 以 `map_linux_24g.py` 为单一真实源，加载时做**设备能力指纹校验**（轴/键/HAT/LED 缺失即拒绝启动并告警）。
 
 ### 4.2 系统与模式键（数字键，边沿触发）
 
+安全/系统键**在所有运动模式下含义固定**，不随模式漂移：
+
 | 按键 | 功能 | 触发 | 服务层映射 | 英文提示（广播/日志） |
 |---|---|---|---|---|
-| **START (+)** | 使能伺服 / 进入 ENABLED | 按下(边沿) | 校验后本地置 ENABLED | `Teleop enabled` |
-| **BACK (−)** | 单击=循环运动模式 Trans→Rot→Joint；**按住=夹爪/末端修饰键**（见 §4.4） | 单击(边沿) / 按住(修饰) | 本地状态 | `Motion mode: Translation/Rotation/Joint` |
-| **RB**（按住） | **使能/Dead-man**：仅此键按住时摇杆才动 | 按住=armed / 松开=stop | 松开→`jog_continuous(axis,0)` 停 | `Dead-man released, motion stopped` |
-| **LB**（按住） | **降速超控**：强制切到示教低速档 | 按住有效 | 临时速率因子 | `Reduced speed engaged` |
-| **A** | 喷涂 DO 手动开/关切换（立即指令） | 按下(边沿) | `set_do(spray, toggle, immediate=True)` | `Spray ON` / `Spray OFF` |
+| **START** | **开关机械臂**：连接+上伺服 ↔ 断开（复用服务层 `connect()`/`disconnect()`，即 EnableRobot/DisableRobot） | 按下(边沿) | `connect()` / 先关喷+停点动后 `disconnect()` | `Robot connected (servo enabled)` / `Robot disconnected` |
+| **BACK（单击）** | 循环运动模式 Trans→Rot→Joint | 单击(边沿) | 本地状态；模式经 §6 **绿灯常亮颗数(1/2/3)** 显示 | `Motion mode: Translation/Rotation/Joint` |
+| **RT（按住）** | **Dead-man**：仅此键按住时摇杆才动作 | 按住=armed/松开=stop | 松开→`jog_continuous(axis,0)` 停 | `Dead-man released, motion stopped` |
+| **LT（按住）** | **降速超控**：切示教低速档 | 按住有效 | 临时速率因子 | `Reduced speed engaged` |
+| **A** | 喷涂 DO 手动开/关（立即指令） | 按下(边沿) | `set_do(spray, toggle, immediate=True)` | `Spray ON` / `Spray OFF` |
 | **B** | 暂停/恢复（有队列轨迹时） | 按下(边沿) | `pause()` / `resume()` | `Motion paused` / `Motion resumed` |
+| **R3** | 夹爪 全开/全闭 一键切换（§4.4） | 按下(边沿) | `open_gripper()` / `clamp_gripper()` | `Gripper OPEN` / `Gripper CLOSE` |
 | **X** | 清报警/错误 | 按下(边沿) | `clear_error()` | `Alarm cleared` |
-| **Y** | **急停 E-STOP**（最高优先级） | 按下(边沿) | `estop()`（内部含立即关喷） | `EMERGENCY STOP` |
-| **DP_UP / DP_DOWN** | 速率档位 +/− （10/25/50/100%） | 按下(边沿) | `set_global_speed_factor(...)` | `Speed tier: N` |
-| **DP_LEFT / DP_RIGHT** | 坐标系循环 Base↔Tool↔User / Joint 模式选关节 J1..J6 | 按下(边沿) | 本地帧选择 + `set_tool_number` | `Frame: Base/Tool` / `Joint: Jn` |
-| **L3**（按住 RB+L3） | 回 Home 原点（需 Idle+armed，LED 双闪确认） | 组合按住 | `go_home()` | `Returning home...` |
-| **R3**（按住 RB+R3） | 回 Fold 收纳位（同上互锁） | 组合按住 | `go_fold()` | `Folding arm...` |
+| **Y** | **急停 E-STOP**（最高优先级） | 按下(边沿) | `estop()`（内部先立即关喷） | `EMERGENCY STOP` |
+| **CAPTURE** | 回 Home 原点（需 IDLE+armed 互锁） | 按下(边沿) | `go_home()` | `Returning home...` |
+| **HOME** | 回 Fold 收纳位（同上互锁；若 `BTN_MODE` 被系统拦截则改用组合兜底） | 按下(边沿) | `go_fold()` | `Folding arm...` |
+| **RB / LB** | 速率档 +/−（10/25/50/100%）**——仅 Trans/Rot 模式**（Joint 模式肩键让位给关节选择，见 §4.3） | 按下(边沿) | `set_global_speed_factor(...)` | `Speed tier: N` |
+| **DP_LEFT / DP_RIGHT** | 坐标系循环 Base↔Tool↔User（**仅 Trans/Rot**） | 按下(边沿) | 本地帧 + `set_tool_number` | `Frame: Base/Tool/User` |
 
-> ⚠ 参考手柄（猎户座2 NS 模式）**未测到 `L3/R3`**（见 §4.5），故 `RB+L3/R3`（Home/Fold）在该手柄不可用；需要时改用已确认存在的组合或经 8BitDo 软件 remap。
+> **面键 A/B/X/Y 按丝印命名**（§4.5 已修正 Switch 协议的内核名互换）：`A`=喷涂、`B`=暂停/恢复、`X`=清障、`Y`=急停（`Y` 在顶部，符合"上=急停"直觉）。`HOME`(316) 若实测触发桌面环境快捷键，则把 Fold 兜底改挂 `CAPTURE 双击` 或 `BACK+START` 组合，功能不丢。
 
 > **急停优先原则**：`Y` 与看门狗/异常路径**绕过一切业务判断**，直接调用服务层立即指令关喷并 `estop()`，符合 IEC 61317 / Skill「故障安全」。
 
-### 4.3 摇杆/扳机运动映射（模拟轴，按住比例点动）
+### 4.3 摇杆/十字键运动映射（单轴点动 + 模式）
 
-摇杆采用**比例速度控制**：`cmd_speed = speed_tier × scale(|axis_after_deadzone|)`，越推越快，回中即停；配合连续点动接口 `jog_continuous(axis, direction)`（内部 `move_jog_cartesian`/`move_jog_joint`），松手发 `direction=0` 停止。多轴按**最大绝对值优先**避免相互干扰。
+因 §4.0 硬约束，任一时刻**只驱动一个轴**。摇杆先过死区，再在候选轴里取**绝对值最大的主导轴**，以其符号下发 `MoveJog(axis, ±)`；回中/松 RT 立即停。速率档决定点动速度，`LT` 按住临时降速。
 
-**模式一：Translation（平移，默认）**
-| 控件 | 轴 | 方向 | 坐标系 |
+**模式一：Translation（平移，BACK 单击进入，默认）**
+| 控件 | → 轴 | 符号约定（实测取反后） | 坐标系 |
 |---|---|---|---|
-| `LS_X` ↔ | **X** ± | 右+/左− | Base / Tool |
-| `LS_Y` ↕ | **Y** ± | 上+/下− | Base / Tool |
-| `RS_Y` ↕ | **Z** ± | 上+/下− | Base / Tool |
-| `RS_X` ↔ | **Rz** ±（偏航） | 右+/左− | Tool |
+| `LS_Y` ↕（左摇杆 **上下**） | **X** ± | 上推=+X（前进），下拉=−X | Base/Tool |
+| `LS_X` ↔（左摇杆 **左右**） | **Y** ± | 右推=+Y，左推=−Y | Base/Tool |
+| `RS_Y` ↕（右摇杆 **上下**） | **Z** ± | 上推=+Z（抬升），下推=−Z | Base/Tool |
+| `RS_X` ↔（右摇杆 左右） | **Rz** ±（偏航） | 右=+ | Tool |
+> 从 `LS_X/LS_Y/RS_X/RS_Y` 四候选中取**主导单轴**（死后区绝对值最大）下发一条 `MoveJog`；`DP_UP/DOWN`=速率、`DP_LEFT/RIGHT`=坐标系（§4.2）。
 
 **模式二：Rotation（姿态，BACK 切到 Rot）**
-| 控件 | 轴 | 方向 |
+| 控件 | → 轴 | 符号 |
 |---|---|---|
-| `LS_X` ↔ | **Rx** ±（翻滚） | 右+/左− |
-| `LS_Y` ↕ | **Ry** ±（俯仰） | 上+/下− |
-| `RS_X` ↔ | **Rz** ±（偏航） | 右+/左− |
-| `RT` / `LT` | **Z** 精细 ±（上/下微调） | RT=Z+, LT=Z− |
+| `LS_X` ↔ | **Rx** ±（翻滚） | 右=+ |
+| `LS_Y` ↕ | **Ry** ±（俯仰） | 上=+（取反） |
+| `RS_X` ↔ | **Rz** ±（偏航） | 右=+ |
 
-**模式三：Joint（关节，BACK 切到 Joint）**
-| 控件 | 轴 | 说明 |
+> **注**：RT 已升为全局 dead-man、LT 为降速超控，Rotation 模式不再单独占用二者做 Z 微调；需要升降时切回 Translation 用右摇杆 `RS_Y`。
+
+**模式三：Joint（关节，BACK 切到 Joint）——按住即动（示教器惯例，无需“选择记忆”）**
+| 控件（左手 **按住不放**） | → 关节 | 说明 |
 |---|---|---|
-| `DP_LEFT/RIGHT` | 选关节 | 循环 J1..J6，LED 短闪次数提示序号 |
-| `LS_X` ↔ | 选中关节 ± | 比例点动，调用 `jog_continuous("Jn", dir)` |
-| `RS_X` ↔ | 选中关节 ±（粗调） | 与 LS 同轴，速率翻倍，便于大范围移动 |
+| `DP_UP / DP_DOWN / DP_LEFT / DP_RIGHT` | **J1 / J2 / J3 / J4** | 按住哪个 = 动哪个；松手立即停 |
+| `L3`（左摇杆按下） / `LB` | **J5 / J6** | 腕部两键（J6 用左肩 `LB`；与 Trans/Rot 的速度±按模式分时复用） |
+| `RS_Y` ↕（右摇杆 上下） | 当前按住关节的 ± | 上=+/下=−（内核取反后）；回中=停 |
+| `RT`（右扳机按住） | Dead-man 使能 | 不按住则任何关节键无效 |
+| `LT`（按住） | 示教低速 | 临时覆盖为最低速率档 |
+> **设计动机（行业不成文标准）**：工业示教器没有“先锁定某关节、再靠屏记住”的做法——你**正按住的那个键就是当前关节**，天然不会搞错，完全不依赖 HUD/屏。底层仍是 §4.0 单轴点动（一次只按住一个关节键 = 单轴）。
+> 按住瞬间 `state.py` 仍在 `player-1` 短闪 n 下作**二次确认**（可选）；§6 绿灯常亮颗数继续表示模式。`R3` 用作夹爪开/关切换（见 §4.4）。
+> 速率沿用 §4.2 设定档（Trans/Rot 下用 RB/LB 调）；Joint 模式内靠 `LT` 降速。
 
-> 每次运动命令下发前，`state.py` 必须读取 `robot_service.get_running_state()`：仅当 `status==0(Idle)` 才允许**启动**新的点动，运行中(`status==1`)拒绝并发提交（互锁，见 Skill「状态判定统一标准」）。停止命令(`direction=0`)任何时候都允许下发。
+> 每次启动新点动前，`state.py` 必须读 `robot_service.get_running_state()`：仅 `status==0(Idle)` 才允许**启动**，`status==1(Moving)` 拒绝并发（互锁，Skill「状态判定统一标准」）。停止(`direction=0`)任何时候允许。
 
-### 4.4 夹爪（Junduo EPG50，`min_stroke`=闭合 ~ `max_stroke`=全张）键位映射
+### 4.4 夹爪（Junduo EPG50）键位映射
 
-夹爪为**绝对位置指令**（服务层无连续点动 API），因此采用“点按到位 + 按住步进微调”。夹爪动作与机械臂点动相互独立，但同样受状态机门控（仅 `IDLE/ENABLED/MOVING` 允许，`E-STOP/DISCONNECTED` 拒绝）。
+夹爪当前实现为 **R3 一键切换全开/全闭**（绝对到位指令，非比例）：`teleop.py._toggle_gripper()` 维护 `gripper_open` 布尔，每按一次 R3 在"张开↔闭合"间翻转，分别经 `gripper_open()`/`gripper_close()` 下发服务层 `open_gripper()`（到 `max_stroke`）/ `clamp_gripper()`（到 `min_stroke`）；服务层按 `JunduoGripper.get_specs()` 自动限幅。
 
-**主映射（带背键的手柄：Pro 2 / Ultimate / SN30 Pro）**
-| 控件 | 功能 | 服务层映射 | 英文提示 |
+| 控件 | 功能 | sink 方法 → 服务层 | 灯语 | 英文提示 |
+|---|---|---|---|---|
+| `R3`（右摇杆按下，单击边沿） | 切换 夹爪 全开/全闭 | `gripper_open()`→`open_gripper()` / `gripper_close()`→`clamp_gripper()` | `player-5` 蓝**常亮**=已张开（灭=已闭合） | `Gripper OPEN` / `Gripper CLOSE` |
+
+> **为何用 R3**：`R3` 是本键位体系里唯一在**所有模式都空闲**的逻辑键（`L3/LB` 在 Joint 模式已作 J5/J6；背键 `P1/P2` 在 Switch/2.4G 协议下不上报，见 §4.5），挂 R3 不与他功能冲突。
+> **门控**：仅 `IDLE/ENABLED/MOVING` 响应，`E-STOP/DISCONNECTED` 拒绝（夹爪与喷涂同为末端动作；急停时**不主动改动夹持**，避免误丢已夹工件）。
+> **待扩展（暂不实现）**：低力夹紧、行程/力度步进微调（服务层 `move_gripper(stroke_mm, force_percent)` 已具备能力）——如需再另择空闲组合或引入"夹爪子模式"；本协议档无模拟扳机，比例连续扫动不可行。
+
+### 4.5 实测键位对照（部署真实源：Linux · evdev · 2.4G NS/Switch 协议）
+
+本机 `manual_map_evdev.py` 实测、`map_linux_24g.py` 固化的**逻辑名→内核码**表（**单一真实源**）：
+
+| 物理键/控件 | 逻辑名 | 内核码 (EV_KEY/ABS/HAT) | 类型/备注 |
 |---|---|---|---|
-| `P1`（背键1，点按） | 夹紧/闭合到 `min_stroke` | `clamp_gripper()` | `Gripper: clamp` |
-| `P2`（背键2，点按） | 完全张开到 `max_stroke` | `open_gripper()` | `Gripper: open` |
-| `LB`+`P1`（按住 LB 再夹紧） | 低力夹紧（软质工件/衣物） | `clamp_gripper(force_percent=低力档)` | `Gripper: low-force clamp` |
+| A / B / X / Y | `A`/`B`/`X`/`Y` | 305 / 304 / 307 / 308 | 数字键；**Switch 协议内核名与丝印对角互换**（`BTN_A(305)=物理A`, `BTN_B(304)=物理B`, `BTN_NORTH(307)=物理X`, `BTN_WEST(308)=物理Y`） |
+| 方形 Capture | `CAPTURE` | 309 `BTN_Z` | =Go Home |
+| L / R 肩键 | `LB` / `RB` | 310 / 311 | Joint J6 / 速度−·速度+（Trans/Rot） |
+| ZL / ZR 扳机 | `LT` / `RT` | 312 / 313 **数字** | LT=降速超控 / RT=dead-man；Switch 协议量化为键，**非模拟轴** |
+| − / + | `BACK` / `START` | 314 / 315 | 模式循环 / 使能 |
+| Home | `HOME` | 316 `BTN_MODE` | =Go Fold（需实测确认未被系统拦截） |
+| 摇杆按下 | `L3` / `R3` | 317 / 318 | **实测可用**（L3=Joint J5；R3=夹爪切换） |
+| 左摇杆 水平/垂直 | `LS_X` / `LS_Y` | ABS_X(0) / ABS_Y(1) | ±32767；右=+, **上=−（需取反）** |
+| 右摇杆 水平/垂直 | `RS_X` / `RS_Y` | ABS_RX(3) / ABS_RY(4) | 右=+, **上=−（需取反）** |
+| 十字 上/下/左/右 | `DP_UP/DOWN/LEFT/RIGHT` | HAT (17,-1)/(17,1)/(16,-1)/(16,1) | `ABS_HAT0Y=17`,`ABS_HAT0X=16`；Y **−1=上** |
+| 背键 L4/R4/PL/PR | — | **不上报** | Switch 协议无背键槽位 → §4.4 用 BACK+扳机回退 |
 
-> ⚠ **实测可用性**：参考手柄 8BitDo **猎户座2（Ultimate 2）在 NS/Switch 模式下背键 `P1/P2` 不上报**（Switch 协议按键集固定、无背键槽位，见 §4.5）。因此**该手柄须使用下方通用回退**；建议把“通用回退”作为**跨手柄默认主用**，背键仅在确认部署模式暴露时作为可选快捷方式。
-
-**通用回退（无背键手柄 / 默认主用）**：按住 `BACK`（此时 BACK 作为末端执行器修饰键）→ `LT`=夹紧、`RT`=张开；`BACK` 单击仍循环运动模式（§4.2）。
-
-**行程/力度微调（按住 `BACK` 期间）**
-| 控件 | 功能 | 服务层映射 | 英文提示 |
-|---|---|---|---|
-| `BACK`+`DP_UP/DP_DOWN` | 行程 ±2 mm 步进（限幅 `min~max`），≤2 Hz 节流连发 | `move_gripper(stroke_mm=当前±2)` | `Gripper stroke: N mm` |
-| `BACK`+`DP_LEFT/RIGHT` | 夹紧力 −/+ 5% 档（作用于下次 clamp） | 本地 `force_percent` 状态 | `Gripper force: N%` |
-| `BACK`+`RS_Y` ↕ | 行程连续比例扫动 | `move_gripper`（节流） | `Gripper stroke: N mm` |
-
-> 微调前从 `get_gripper_state()` 读当前行程作为增量基准；所有 stroke/force 均按 `JunduoGripper.get_specs()` 限幅，越界 Fail-fast。夹爪指令同样需 `robot_service.is_connected()`，否则服务层直接拒绝并回英文错误。
-
-### 4.5 实测按键索引（参考手柄：8BitDo 猎户座2 / Ultimate 2，NS·Switch 模式，macOS/SDL2 后端）
-
-用 `manual_verify_gamepad.py --buttons` 在 macOS 实测得到的 **物理键 → 逻辑名 → SDL 原始索引** 对照，作为 `mapping.py` 的初始单一真实源（其它平台/模式各自实测覆盖，见 §9）。
-
-| 物理按键 | 逻辑名 | SDL 原始索引 | 类型 |
-|---|---|---|---|
-| A / B / X / Y | `A` `B` `X` `Y` | button 0 / 1 / 2 / 3 | 数字键 |
-| `−` Create | `BACK` | button 4 | 数字键 |
-| Home (F) | `HOME` | button 5 | 数字键（系统键，慎用） |
-| `+` Pause | `START` | button 6 | 数字键 |
-| 左摇杆 X / Y | `LS_X` / `LS_Y` | axis 0 / axis 1 | 模拟轴 |
-| 右摇杆 X / Y | `RS_X` / `RS_Y` | axis 2 / axis 3 | 模拟轴 |
-| 左扳机 ZL | `LT` | axis 4 | 模拟轴 |
-| 右扳机 ZR | `RT` | axis 5 | 模拟轴 |
-| 左肩 L | `LB` | button 9 | 数字键 |
-| 右肩 R | `RB` | button 10 | 数字键 |
-| 十字 上/下/左/右 | `DP_UP/DOWN/LEFT/RIGHT` | button 11 / 12 / 13 / 14 | 数字键（hats=0，走按键） |
-| 方块 Capture | `CAPTURE` | button 15 | 数字键（系统键，慎用） |
-
-**实测确认的“未使用 / 不可用”**
-- `button 7 / 8`：本模式无任何映射（此前“7、8 没反应”符合预期，**非死键**）。
-- **背键 `L4 / R4 / PL / PR`（夹爪里的 `P1/P2`）**：Switch/Pro 协议按键集固定、**无背键槽位 → 不上报**；需 8BitDo 软件 remap 或换 DirectInput 模式才可用 → §4.4 夹爪以“肩+扳机组合”为默认主用。
-- **摇杆按下 `L3 / R3`**：NS 模式未测到，`RB+L3/R3`（Home/Fold）在该手柄不可用。
-- `LT/RT` 为**轴**（非按键），停止判定按轴回中处理。
-
-> 该手柄在 macOS/NS 模式**可稳定使用**的键：`A/B/X/Y`、`BACK(−)`、`START(+)`、`LB/RB`、`LT/RT`(轴)、`十字四向`；`HOME/Capture` 可能被系统拦截，**背键 / L3/R3 不可用**。落地 `mapping.py` 时对参考手柄优先使用“可稳定使用”集合。
+**实测要点（务必写入 `mapping.py` 覆盖层与指纹校验）**
+- **A/B↔X/Y 对角互换**：Switch 协议内核 `BTN_*` 语义与 Xbox 丝印不一致，`manual_map_evdev.py` 已按设备名（switch pro/8bitdo/nintendo）覆盖为物理真值，`mapping.py` 沿用逻辑名 `A/B/X/Y`（丝印）。
+- **摇杆方向**：`LS_X(0)+=右`、`LS_Y(1)−=上`、`RS_X(3)+=右`、`RS_Y(4)−=上`；Y 轴内核为"上=负"，遥操作层统一**取反**成"上=+"。
+- **十字键走 HAT**（非 button），左右变化只动 `ABS_HAT0X`；判定用离散方向符号，勿当连续轴。
+- **LT/RT 为数字键**（Switch 报告 ZL/ZR 各 1 bit）；要模拟扳机需切 PC/X-Input 协议（本方案**不切**，锁 NS 档）。
+- **玩家 LED 可控**：`/sys/class/leds/*:green:player-1..4` + `blue:player-5`，`max_brightness=1`（仅亮/灭），经 udev `RUN+=chmod` 免 sudo 写；**8BitDo 星键 RGB 固件自管、主机无设色通道，不可用于模式显示**（见 §6）。
+- 与 macOS/SDL(pygame) 后端的差异：SDL 会重排 index 且把 HAT 转 button，**两端各自实测覆盖**，不可共用一张表。
 
 ---
 
 ## 5. 遥操作状态机（State Machine）
 
 ```
-        open() 成功            robot Idle & START            RB 按住 & 有摇杆输入
- DISCONNECTED ──▶ IDLE ─────────────────────▶ ENABLED ─────────────────────▶ MOVING
-      ▲   ▲        │  ▲                          │  │  ▲                        │
-      │   │        │  │  RB 松开 / 摇杆回中        │  │  │                        │
-      │   │        │  └──────────────────────────┘  │  └──── 松手 / 看门狗 ───────┘
-      │   │        │                                 │
-      │   └────────┴───── 断连 / 校验失败 ◀───────────┤
-      │                                              │ 任意状态
+     START(connect+EnableRobot)          RB 按住           RB 按住 & 有摇杆输入
+ DISCONNECTED ──────────────▶ IDLE ───────────▶ ENABLED ────────────▶ MOVING
+      ▲  ▲                     │  ▲               │  │  ▲                  │
+      │  │   START(disconnect) │  │  松 RB         │  │  │                  │
+      │  └───────────────────┘  └─────────────┘  │  └─ 松手/回中/看门狗 ─┘
+      │  ◀── 断连 / 校验失败 / 被动掉线 ────────────┤
+      │                                            │ 任意状态
       └──────────── reset ──────────◀── E-STOP ◀─────┘（Y / 异常 / 看门狗超时）
                                             │
-                              estop()+立即关喷 DO + 停所有 jog；夹爪保持当前位 (Fail-Hold, 不张开)；需 X 清障 + START 重新握手
+                 estop()+立即关喷 DO + 停所有 jog（链路保留、不自动断伺服以防落臂）；夹爪保持当前位 (Fail-Hold)；需 X 清障
 ```
 
 | 状态 | 允许动作 | 进入条件 | 退出/停止条件 |
 |---|---|---|---|
-| `DISCONNECTED` | 无 | 初始/断连 | 设备+机器人均就绪 → IDLE |
-| `IDLE` | 模式/坐标系/速率切换（非运动） | 设备在线且机器人 Idle | START 握手成功 → ENABLED |
-| `ENABLED` | 点动待命（RB 未按时不动） | 已使能伺服 | RB+摇杆 → MOVING |
-| `MOVING` | 连续点动 | armed 且有轴输入 | 松 RB / 回中 / 看门狗 → ENABLED/IDLE |
-| `E-STOP` | 仅清障(X)+重启握手(START) | Y / 异常 / 超时 | 清障+确认 → IDLE |
+| `DISCONNECTED` | 仅 START 连接 | 初始 / START 断连 / 被动掉线 | START→`connect()` 成功 → IDLE |
+| `IDLE` | 已连接待命（模式/夹爪/速率可调，RB 未握） | START 连接成功 | RB 握下 → ENABLED；START 再按 → `disconnect()` 回 DISCONNECTED |
+| `ENABLED` | armed 待命（RB 按住但无摇杆输入） | 已连接 + RB | 摇杆输入 → MOVING；松 RB → IDLE |
+| `MOVING` | 连续点动 | armed 且有轴输入 | 松 RB / 回中 / 看门狗 → IDLE/ENABLED |
+| `E-STOP` | 仅清障(X)；START 仍可断连 | Y / 异常 / 超时 | 清障 → IDLE（链路保留） |
 
 ---
 
-## 6. LED / 操作员反馈约定（对齐 ISA-101 / IEC 62682）
+## 6. LED / 操作员反馈约定（player 灯 · 对齐 ISA-101 / IEC 62682）
 
-| 状态 | LED 表现（8BitDo 可编程灯） | 含义 |
-|---|---|---|
-| `DISCONNECTED` | 熄灭 | 手柄/机器人未就绪 |
-| `IDLE` | 绿色常亮 | 已连接，待使能 |
-| `ENABLED`（RB armed） | 绿色快闪 | 使能待命 |
-| `MOVING` | 琥珀色常亮 | 正在点动 |
-| `Reduced speed (LB)` | 琥珀色慢闪 | 示教低速档生效 |
-| `E-STOP` / 故障 | 红色双闪 | 急停生效，需清障 |
-| 看门狗超时预警 | 红/绿交替 | 输入丢失，即将自动停止 |
+**通道**：内核 `hid_nintendo` 暴露的 4 颗绿 `player-1..4` + 1 颗蓝 `player-5`（`/sys/class/leds`，仅亮/灭）。**闪烁由应用线程按自定节奏写 `brightness` 实现**（不依赖内核 `timer`）。蓝色 `player-5`：**双闪=急停/故障**（故障优先）；**常亮=夹爪已张开**（与故障双闪互斥）。
 
-若目标手柄型号不支持可编程 LED，退化为**机载蜂鸣/振动**（`LT/RT` 短脉冲）做等价提示；核心安全逻辑不依赖反馈通道（反馈失效仍保持 Fail-Close）。
+> **设计原则**：5 颗二值灯无法同时常显"模式+状态+关节+速率"。故分工——**绿灯亮几颗=当前模式**（随时可瞥见），**这几颗的闪动节奏=使能/运动状态**，**第 4 颗=低速标记**，**蓝=故障双闪/夹爪张开常亮**；**Joint 模式采用“按住即动”（§4.3），当前关节=正按住的键、自明，无需占用灯位显示关节**。
+
+**A. 模式（绿灯 `player-1..3` 常亮颗数——一眼可辨，连接期间一直成立）**
+| 模式 | 常亮绿 |
+|---|---|
+| Translation | 1（player-1） |
+| Rotation | 2（player-1,2） |
+| Joint | 3（player-1,2,3） |
+
+**B. 状态（在"模式绿"之上叠加的亮法；蓝=故障）**
+| 状态 | 模式绿表现 | player-4 | player-5(蓝) |
+|---|---|---|---|
+| `DISCONNECTED` | 全灭（不显模式） | 灭 | 灭 |
+| `IDLE`（未使能） | 常亮 | 灭 | 灭 |
+| `ENABLED`（RB armed） | 慢闪 ~1Hz | 灭 | 灭 |
+| `MOVING`（点动中） | 快闪 ~3Hz | 灭 | 灭 |
+| `Reduced speed`（LB 按住） | 维持当前节奏 | **额外常亮=低速灯** | 灭 |
+| 夹爪张开（R3，§4.4） | 维持 | 维持 | **蓝色常亮**（灭=已闭合） |
+| `E-STOP`/故障/看门狗 | 全灭 | 灭 | **蓝色双闪**（优先于夹爪常亮） |
+
+**C. 事件 ack 短闪（在 player-1 上闪 N 下，N=序号；仅切换瞬间）**
+| 事件 | 闪 N |
+|---|---|
+| 选中关节 J1..J6 | 1..6 |
+| 速率档 1..4（10/25/50/100%） | 1..4 |
+
+> **双保险**：player 灯给"离屏手感"确认；**HUD 徽章是权威真实源**（`MODE / ACTIVE(Jn|axis) / SPEED% / [RB ARMED]`），每次切模式、选关节、降速经 WebSocket 广播刷新。灯语只是冗余提示，反馈失效不影响 Fail-Close 安全逻辑。
+> 若现场需要**醒目大彩灯**：用手臂空闲 **DO 驱动外部三色灯塔**（teleop `set_do` 切色），而非手柄固件星灯。
 
 ---
 
@@ -276,9 +303,9 @@ hardware:
   teleop:
     enabled: true
     backend: evdev            # 目标板 RK3588=evdev；macOS 开发机=pygame（BaseTeleopInput 实现选择，见 §9）
-    vendor_id: 0x045e         # 2.4G 接收器经内核 xpad 呈 Xbox360 HID（RK3588 上 evdev 实际看到的 VID/PID）
-    product_id: 0x028e
-    device_name: "8BitDo"     # 兜底匹配：VID/PID 命中失败时按设备名子串匹配（跨协议/跨模式最稳，见 §9 指纹）
+    vendor_id: 0x057e         # NS 2.4G 接收器经内核 hid_nintendo 呈 Switch Pro（057E:2009，本机 evdev 实测）
+    product_id: 0x2009
+    device_name: "Controller" # 兜底：VID/PID 命中失败时按设备名子串匹配（含 "Pro Controller"/"8BitDo" 时启用 A/B↔X/Y 覆盖，最稳）
     deadzone: 0.12            # 摇杆死区 (0..0.5)
     watchdog_interval_ms: 100 # 心跳周期
     watchdog_miss: 3          # 连续丢失次数触发安全停止
@@ -331,21 +358,27 @@ hardware:
 ## 11. 键位速查卡（Cheat Sheet，可打印贴操作员台）
 
 ```
-[系统/模式]
-  START = Enable Servo        BACK tap=Mode / hold=Gripper modifier
-  RB(hold) = Dead-man Enable  LB(hold) = Reduced Speed
-  A = Spray ON/OFF            B = Pause/Resume
-  X = Clear Alarm             Y = E-STOP
-  D-Up/Dn = Speed +/-         D-Left/Rt = Frame / Select Joint
-  RB+L3 = Go Home             RB+R3 = Go Fold
+[系统/模式]  (所有运动模式下固定)
+  START = Enable Servo        BACK tap = Mode cycle (Trans>Rot>Joint)
+  BACK hold = Gripper modifier
+  RB(hold) = Dead-man Enable  LB(hold) = Reduced (teach-slow) Speed
+  A = Spray ON/OFF   B = Pause/Resume   X = Clear Alarm   Y = E-STOP
+  CAPTURE = Go Home        HOME = Go Fold
+  D-Up/Dn = Speed +/- (Trans/Rot only)   D-Left/Rt = Frame (Trans/Rot only)
 
-[Translation]  LS_X=X  LS_Y=Y  RS_Y=Z  RS_X=Rz
-[Rotation]     LS_X=Rx LS_Y=Ry RS_X=Rz RT/LT=Z fine
-[Joint]        D-L/R select Jn, LS_X=Jn jog, RS_X=Jn fast
+[TRANSLATION] dominant-axis, sign-only jog (no analog speed)
+  LS_Y=X(+Up)  LS_X=Y(+R)  RS_Y=Z(+Up)  RS_X=Rz(+R)
+[ROTATION]    LS_X=Rx  LS_Y=Ry  RS_X=Rz  RT/LT=Z fine(+/-)
+[JOINT]       hold-to-jog (industry teach-pendant convention):
+  HOLD J1..J4 = D-Up/Dn/L/R   HOLD J5 = L3   HOLD J6 = LT
+  RS_Y(up/down) = held joint +/-   RB(hold)=enable   release = stop
 
-[Gripper]      P1=Clamp  P2=Open  LB+P1=Low-force clamp
-               (no paddles: hold BACK + LT=Clamp / RT=Open)
-               hold BACK + D-Up/Dn = stroke +/-2mm, BACK + D-L/Rt = force -/+5%
+[Gripper]  hold BACK:  LT=Clamp  RT=Open  (D-Up/Dn stroke +/-2mm, D-L/Rt force -/+5%)
+           (no back paddles in NS mode)
 
-Safety: release RB => arm stop | watchdog lost => spray OFF + stop (gripper HOLDS)
+LED: green COUNT = mode (Trans 1 / Rot 2 / Joint 3), always visible
+     blink = state (solid idle / slow enabled / fast moving); player-4 on = LB slow
+     blue(player-5) double-blink = E-STOP/fault/watchdog
+     player-1 blinks N times = ack (joint# / speed tier#)
+Safety: release RB => jog stop | fault/watchdog => spray OFF + stop (gripper HOLDS)
 ```
