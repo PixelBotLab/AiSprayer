@@ -13,6 +13,21 @@ logger = logging.getLogger(__name__)
 camera_router = APIRouter(prefix="/api/camera", tags=["Camera"])
 
 
+def _default_board_params() -> dict:
+    """
+    标定板参数默认值 (rows/cols 为节点总数, 格子尺寸单位 mm)。
+
+    走 SprayerConfig 的受管 getter (SQLite 覆盖 > YAML > 代码默认) —— 与标定会话创建时
+    写进 calibration_info.yaml 的 board_params 是同一个口径, 否则推流叠加的 inner
+    pattern 会与求解器用的不是同一块板。
+    """
+    return {
+        "rows": sprayer_config.calib_board_rows,
+        "cols": sprayer_config.calib_board_cols,
+        "square_size_mm": sprayer_config.calib_board_square_size_mm,
+    }
+
+
 @camera_router.get("/stream_info")
 def get_stream_info(request: Request):
     """获取所有可用流媒体地址 (HTTP-FLV, RTSP)"""
@@ -62,34 +77,65 @@ def get_camera_status():
 
 @camera_router.post("/calibration_mode")
 def set_calibration_mode(req: CalibrationModeUpdate):
-    """开启/关闭相机标定模式 (标定模式下关闭深度流以降低CPU负载并开启角点检测)"""
-    camera_service.set_calibration_mode(req.enabled)
+    """
+    开启/关闭相机标定模式。
+
+    标定模式下 C++ 侧停用深度流与 D2C 对齐、改跑棋盘角点检测并把角点画进推流；
+    板参数直接决定 inner pattern size，请求未显式给定时回落到全局 calib.board 配置。
+    """
+    board = _default_board_params()
+    rows = req.rows or board["rows"]
+    cols = req.cols or board["cols"]
+    square_size_mm = req.square_size_mm or board["square_size_mm"]
+
+    applied = camera_service.set_calibration_mode(
+        req.enabled,
+        rows=rows,
+        cols=cols,
+        square_size_mm=square_size_mm,
+        board_type=req.board_type or "chessboard",
+        draw_corners=bool(req.draw_corners),
+    )
+    if not applied:
+        raise HTTPException(
+            status_code=503,
+            detail="Camera service unreachable, calibration mode unchanged")
     return {
         "status": "ok",
         "calibration_mode": req.enabled,
+        "board": {"rows": rows, "cols": cols, "square_size_mm": square_size_mm},
         "msg": "Calibration mode updated"
     }
 
 
 @camera_router.get("/intrinsics")
 def get_camera_intrinsics():
-    """获取相机内参与畸变参数"""
-    K, D = camera_service.get_intrinsics()
-    if K is None:
+    """
+    获取相机内参与畸变参数, 并给出它们对应的是哪张图 (width/height 像素)。
+
+    图像尺寸必须一起下发: 实时视频上点击的是**流分辨率**上的位置, 而反投影要吃的
+    是**内参分辨率**上的像素, 两者靠归一化坐标换算 (前端 cx = 归一化 x * width)。
+    取数走 get_intrinsics_dict 同一条通道 (与 live aim 服务同源), 不多一次 C++ 往返。
+    """
+    info = camera_service.get_intrinsics_dict()
+    K = info.get("intrinsic_matrix") or []
+    if len(K) != 3 or any(len(row) < 3 for row in K):
         raise HTTPException(status_code=404, detail="Camera intrinsics not available (camera offline)")
     return {
         "status": "ok",
-        "intrinsic_matrix": K.tolist() if hasattr(K, "tolist") else K,
-        "distortion_coeffs": D.tolist() if hasattr(D, "tolist") else D
+        "width": info.get("width"),
+        "height": info.get("height"),
+        "intrinsic_matrix": [list(row[:3]) for row in K],
+        "distortion_coeffs": info.get("distortion_coeffs") or []
     }
 
 
 @camera_router.get("/corners")
 def get_detected_corners():
-    """获取当前最新检测到的标定板角点"""
+    """获取当前最新检测到的标定板角点 (仅标定模式下角点检测线程才在跑)"""
     corners = camera_service.get_latest_corners()
     if corners is None:
-        return {"status": "ok", "found": False, "corners": []}
+        return {"status": "ok", "found": False, "count": 0, "corners": []}
     return {
         "status": "ok",
         "found": True,

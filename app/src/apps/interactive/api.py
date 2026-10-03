@@ -14,7 +14,10 @@ from core.hardware.robot.base_driver import RobotPose, is_spraying_on
 from apps.camera.services.camera_service import camera_service
 from apps.robot.services.robot_service import robot_service
 from apps.interactive.sam_service import sam_service
-from apps.interactive.reconstruction_service import reconstruction_service
+from apps.interactive.reconstruction_service import (
+    HandEyeCalibrationError,
+    reconstruction_service,
+)
 from apps.interactive.manual_path_service import manual_path_service
 from apps.interactive.auto_path_service import auto_path_service, AutoPathServiceError
 from apps.interactive.path_verification_service import path_verification_service, get_default_poi_tolerance_rpy_deg
@@ -222,8 +225,11 @@ def capture_template_data(name: str):
             raise HTTPException(status_code=500, detail="Hardware camera frame capture failed. The camera may be re-initializing, please try again.")
 
         # 2. 动态保存相机参数元数据 (无 hardcode，直接来自驱动/硬件配置)
+        #    hand_eye 块: 眼在手上时“采集时刻的法兰位姿”是这张图唯一的 3D 尺度来源，事后补
+        #    不出来 (臂一动相机就动)，所以必须在这一步落盘；拿不到就当场失败，不拍废图。
+        hand_eye = reconstruction_service.capture_hand_eye_provenance()
         meta = {
-            "version": "1.0",
+            "version": "1.1",
             "template_name": name,
             "timestamp": time.time(),
             "camera_params": {
@@ -233,7 +239,8 @@ def capture_template_data(name: str):
                 "width": intr_dict.get("width", 1280),
                 "height": intr_dict.get("height", 800),
                 "depth_scale": intr_dict.get("depth_scale", 1.0)
-            }
+            },
+            "hand_eye": hand_eye,
         }
         params_path = os.path.join(template_path, "scan.params.yaml")
         with open(params_path, 'w', encoding='utf-8') as f:
@@ -241,7 +248,11 @@ def capture_template_data(name: str):
         logger.info(f"Saved camera metadata: {params_path}")
             
         logger.info(f"Successfully completed all captures for template '{name}'.")
-        return {"message": "Data captured successfully", "template": name}
+        return {"message": "Data captured successfully", "template": name, "hand_eye": hand_eye}
+    except HandEyeCalibrationError as e:
+        # 生效结果是眼在手上但臂没连接 / 读不出关节: 现场能自己修, 用 409 说清
+        logger.warning(f"Capture rejected for template '{name}': {e}")
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         logger.error(f"Capture error for template '{name}': {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
@@ -357,6 +368,9 @@ def sample_point(name: str, req: SamplePointRequest):
         # Standoff (spray target distance) is config-driven only: spraying.spray_dist_mm
         result = manual_path_service.sample_point_pose(name, req.u, req.v, sprayer_config.spray_distance_mm)
         return result
+    except HandEyeCalibrationError as e:
+        logger.warning(f"Sample point rejected for '{name}' at ({req.u},{req.v}): {e}")
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         logger.warning(f"Sample point calculation failed for '{name}' at ({req.u},{req.v}): {e}")
         raise HTTPException(status_code=500, detail=f"Point sampling failed: {str(e)}")
@@ -433,7 +447,6 @@ def get_session_data(name: str):
     - calib_source: description string
     """
     import base64
-    from apps.interactive.reconstruction_service import reconstruction_service
 
     template_path = os.path.join(TEMPLATE_GROUP_DIR, name)
     if not os.path.exists(template_path):
@@ -456,7 +469,9 @@ def get_session_data(name: str):
 
     # Load calibration
     try:
-        T_cam_to_base_m, k_matrix, calib_desc = reconstruction_service.get_latest_calibration()
+        T_cam_to_base_m, k_matrix, calib_desc = reconstruction_service.get_latest_calibration(template_path)
+    except HandEyeCalibrationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to load calibration: {str(e)}")
 
@@ -590,9 +605,11 @@ def get_robot_anchor_pose(source: str = "home"):
     2. Robot Home pose TCP orientation
     """
     from apps.robot.services.robot_service import robot_service
-    from core.motion.kinematics import CR5Kinematics
+    from core.motion.kinematics import kinematics_from_config
 
-    solver = CR5Kinematics()
+    # POI 锚点吃控制器口径 (不补偿关节零位偏移): 这个接口的参照物是示教器/30004 的笛卡尔
+    # 回报 (live_pose), 两者必须同口径才能直接对比较; 执行侧的偏移补偿不在本轮改动范围。
+    solver = kinematics_from_config(use_joint_offsets=False)
     
     # 1. Dobot home joint angles from system configuration.
     # Use controller-frame FK here so POI Home anchor Rx/Ry/Rz matches Dobot TCP pose convention.

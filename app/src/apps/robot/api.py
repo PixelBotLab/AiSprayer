@@ -12,9 +12,10 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../..
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "app/src"))
 
 from apps.robot.models import (
-    ConnectRobotReq, GlobalSpeedReq, GripperActionReq, GripperMoveReq, HomeReq, JogContinuousReq, JogReq,
-    SetDoReq, SpeedReq,
+    AimAtPixelReq, ConnectRobotReq, GlobalSpeedReq, GripperActionReq, GripperMoveReq, HomeReq, JogContinuousReq, JogReq,
+    MarkCrossReq, SetDoReq, SpeedReq, UiLogReq,
 )
+from apps.robot.services.live_aim_service import LiveAimError, live_aim_service
 from apps.robot.services.robot_service import robot_service
 from services.setting_service import SettingService
 
@@ -83,6 +84,84 @@ def robot_home(req: HomeReq):
     success, msg = robot_service.go_home(speed=req.speed, acc=req.acc)
     if not success:
         raise HTTPException(status_code=400, detail=msg)
+    return {"status": "ok"}
+
+
+@robot_router.post("/aim_at_pixel")
+def aim_at_pixel(req: AimAtPixelReq):
+    """
+    Aim the tool axis (a virtual laser beam) onto the sight line of a clicked pixel (single-pose MovJ, no capture / no 3D rebuild).
+
+    A single pixel back-projects to a ray, and the clicked point P is taken on it at the **measured** depth of that
+    pixel (`depth_source: measured`), or at `distance_mm` (default spraying.aim_distance_mm, `depth_source: config`)
+    when the depth reading is unusable. Two candidate families both put the beam through P, and which one is tried
+    first follows from how P was obtained:
+    - `swing` (preferred when the depth was measured): the nozzle stays exactly where it is and only the wrist turns,
+      so aiming is a pure orientation problem — no reach requirement at all, like a pan-tilt laser. Reported with
+      `depth_locked: true` because the hit is locked to that one depth (a measured depth makes this ~1 mm; a guessed
+      one would make it tens of centimetres, which is why it is never preferred then).
+    - `on-ray` (preferred when the depth is unavailable): the nozzle is also placed on the ray, so the beam is
+      **collinear** with the line of sight and hits it at any depth; the nozzle is kept at least the spray standoff in
+      front of the lens and never past the clicked point. This one does depend on reach, because positioning the
+      nozzle next to the workpiece is a spraying-process requirement, not an aiming one.
+    Both families stay in the same batch, so a wrist limit or a near-singular pose degrades to the other family
+    instead of failing the request.
+    Spraying is always turned off (immediate DO) before the move; the DO is
+    switched back on after a successful arrival only when spraying.aim_do_on_arrive is enabled (laser-pointer rig).
+    Eye-in-hand aiming additionally requires the clicked image to be paired with the current arm pose: the
+    request is refused while the arm has been still for less than spraying.aim_frame_settle_s, or while the
+    video stream is stalled/restarting, because the sight ray is composed from the pose of the frame that was
+    clicked (a stale image would aim at a direction the camera never saw).
+    `beam_angle_deg` is the tracking error against the planned beam direction (not against the sight line: a swing
+    solution deliberately aims off the sight line). The true landing-point miss is verified separately by the
+    operator marking the laser cross centre by eye (see `/aim_mark_cross`), which is more reliable than the
+    previous automatic blob detector.
+    """
+    try:
+        return live_aim_service.aim_at_pixel(
+            req.u_px, req.v_px,
+            distance_mm=req.distance_mm, speed=req.speed, acc=req.acc)
+    except LiveAimError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception(f"aim_at_pixel failed unexpectedly: {e}")
+        raise HTTPException(status_code=500, detail=f"Live aiming failed: {e}")
+
+
+@robot_router.post("/aim_mark_cross")
+def aim_mark_cross(req: MarkCrossReq):
+    """
+    Mark the centre of the laser cross by eye (bypassing the fragile blob detector) to measure the true miss.
+
+    The camera is hand-mounted (eye-in-hand), so the frame you clicked for the target and the frame you are
+    marking the cross in were taken at two different flange poses. Each pixel is back-projected through its own
+    capture-time camera pose (composed from the current joints via the eye-in-hand extrinsic) into one common
+    base frame, so the two are directly comparable. Reports, in the base frame: the marked cross centre as a
+    3D point (pixel + that pixel's measured depth), the spatial miss versus the aimed target point split into
+    lateral and depth components, the angle between the two sight lines, and the perpendicular gap of the real
+    hit off the modelled beam line (through the arrived TCP along tool +Z) — a non-zero gap means the physical
+    laser axis is not the tool +Z axis the planner assumes. Requires the robot idle with the live image settled,
+    and an aim to have run first. The result is also mirrored to the dedicated verification log.
+    """
+    try:
+        return live_aim_service.mark_cross_center(req.u_px, req.v_px)
+    except LiveAimError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception(f"aim_mark_cross failed unexpectedly: {e}")
+        raise HTTPException(status_code=500, detail=f"Cross-centre verification failed: {e}")
+
+
+@robot_router.post("/aim_ui_log")
+def aim_ui_log(req: UiLogReq):
+    """
+    Mirror a live-aim UI notice into the dedicated verification log.
+
+    So the operator never has to copy-paste what the interface shows (e.g. "cross center at pixel (...), X deg
+    off the clicked sight line", "skipped (N red blobs ...)"). The message is stored verbatim; it is already
+    English UI text. This is a side-effect-free sink: it always returns ok so a lost notice never blocks the UI.
+    """
+    live_aim_service.log_ui_notice(req.level, req.message)
     return {"status": "ok"}
 
 

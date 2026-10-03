@@ -4,20 +4,21 @@
 hardware:
   camera:
     model: "orbbec"             # 可选: orbbec, realsense
-    width: 1280
-    height: 800
+    # 640x480 走 ASIC 硬件 D2C (0% 主机 CPU)；1280x800 及以上只能软对齐，逐帧软算吃满 CPU + 延迟抖动，指向时叠上抓帧/推流突发就饿死 frameset 触发看门狗重启。
+    width: 640
+    height: 480
     fps: 15
-    enable_depth_align: true    # 启用深度图到彩色图 D2C 对齐
+    enable_depth_align: true    # 启用深度图到彩色图 D2C 对齐（本分辨率命中硬件 D2C）
     
     # 视频流与硬件硬解/硬编码参数
     streaming:
       app: "live"
       stream_id: "orbbec_color"
-      width: 1280
-      height: 800
-      fps: 30
-      bitrate_kbps: 2500        # H.264 目标码率 (2.5Mbps)
-      gop: 30                   # 1秒关键帧间隔
+      width: 640                # 跟随 capture 分辨率，避免把小图再 upscale 编码白烧 CPU
+      height: 480
+      fps: 10                   # Mac 无硬编，OpenH264 软编；降帧率减轻编码负载，避免指向时被 CPU 抢走卡流
+      bitrate_kbps: 1200        # H.264 目标码率 (640x480 足够；高码率加重软编负担)
+      gop: 30                   # 关键帧间隔
     
     # 微服务服务端口与运行参数
     server:
@@ -34,6 +35,8 @@ hardware:
     port: 29999                 # 机械臂控制端口 (dobot 默认 29999, inexbot 默认 6001)
     global_speed_factor: 50     # 示教/远程/运行全局速度百分比 (startup 时 set_speed)
     max_tcp_speed_mm_s: 2000    # robot cr5最大线速度为2000mm/s, 在控制软件中设置
+    max_reach_mm: 900.0         # 基座到 TCP 的最大直线距离 (mm, CR5 臂展) —— 只用作候选点的几何筛除 (可达球),
+                                # 真实可达与奇异判定仍以控制器逆解为准; 换机械臂型号时必须同步修改
     max_joint_speed_deg_s: [180, 180, 180, 180, 180, 180]  # robot cr5最大关节速度为180度/s, 在控制软件中设置
     robot_urdf: "app/urdf/cr5_robot_with_my_tools.urdf" # cr5_robot.urdf/cr5_robot_with_gun.urdf
     robot_tcp_id: 1             # 机械臂末端工具坐标系ID: 默认 0 (法兰/工具0), 配置为 1 则是 gripper_tip_link (夹爪), 2 是 laser_head_link (激光头)
@@ -41,6 +44,18 @@ hardware:
     spray_do_index: 1           # 喷涂开关 DO 端子编号 (1-16, 默认 1; 预留后续扩展 purge_do_index 清洗, blow_do_index 吹气等)
     home_position: [180.0, 0.0, 90.0, 90.0, 90.0, 0.0]  # 机械臂原点/复位关节角 (单位: 度, [J1, J2, J3, J4, J5, J6])
     fold_position: [186.0, 0.0, 159.0, 18.0, 176.0, 0.0]  # 机械臂折叠/收纳关节角 (单位: 度, [J1, J2, J3, J4, J5, J6])
+    # 关节编码器零位偏移 Δq (单位: 度, [J1..J6]) —— 补偿臂绝对零位与真实零位的偏差。
+    # 生效范围: 只在运动学内核内部生效 (FK 加、IK 减), 让手眼标定与 follow 的 IK 走同一条
+    # 校正口径; 全零 = 控制器口径 (与改造前逐位一致)。
+    # 本参数绑定**这台机器** (二手 CR5 实测偏差最大 1.96°), 换机 / 大修 / 碰撞后必须重解,
+    # 严禁照抄他机数值; 合理范围 ±5° 以内, 超限直接报错 (CR5Kinematics.validate_joint_offsets)。
+    # 改动后需重跑手眼标定: 标定结果会声明自己的口径 (pose_frame_convention), 口径不符时
+    # 眼在手结果会被拒用 (运行期靠实时法兰位姿复合, 错一整个 Δq), 眼在手外仅告警不拦
+    # (实测两种口径解出的外参差 14.44mm / 1.59°, 且错用是静默的)。
+    # 当前值 = 4 次独立采集共 78 帧联合拟合 (共享一组 Δq, 每会话各自解 X/板位), 总重投影 0.918 px;
+    # 与早期单会话 (13 帧) 解在可辨识方向 j1/j5/j3+j4 上只差 0.02~0.09°。j6 为规范自由度钉 0
+    # (绕法兰 Z 的常量偏移会被外参 X 的旋转完全吸收), j3/j4 单值近不可分, 只有 j3+j4 稳定。
+    joint_offsets_deg: [-0.787, -0.972, -1.299, -0.162, -1.937, 0.0]
     #home_position: [0.0, 0.0, -90.0, -90.0, -90.0, 0.0]  # 机械臂原点/复位关节角 (单位: 度, [J1, J2, J3, J4, J5, J6])
     #fold_position: [0.0, 0.0, -156.0, 0.0, -170.0, 0.0]  # 机械臂折叠/收纳关节角 (单位: 度, [J1, J2, J3, J4, J5, J6])
 
@@ -50,16 +65,21 @@ calib:
   #   eye-to-hand (眼在手外): 相机固定于基座, 标定板装在法兰上 -> 求解 T_base_camera
   #   eye-in-hand (眼在手上): 相机装在法兰上, 标定板固定于世界 -> 求解 T_flange_camera
   # 仅作为新建会话的默认值, 每个会话在创建时记录自己的安装方式。
-  mount: "eye-to-hand"
+  mount: "eye-in-hand"
 
   capture:
     output_dir: "data/calib"    # 标定采集数据存储根目录
+    # 采样前的沉降等待 (毫秒): 控制器报 Idle 后法兰仍有残余振动, 立刻拍照会让
+    # 位姿读数与图像不是同一时刻。0 = 不等待, 上限 2000。
+    settle_ms: 250
   
   # 标定计算结果保存路径 (默认与视觉规划引用的路径一致)
-  result_path: "configs/calib/calibration_result.yaml"
+  result_path: "configs/calib/calibration_result_eih.yaml"
   
-  # 数据清洗阈值 (允许视觉位移与物理位移的偏差比例，0.05 代表 ±5%)
-  cleaning_threshold: 0.05
+  # 单样本残差裁剪上限 (像素): 首轮拟合解完后, 自身回差超过该值的样本被剔除并重解一次。
+  # 取值为当前批次残差分布的粗差界限, 太小会把正常姿态误差当粗差剔掉。
+  pruning:
+    max_px: 8.0
   
   board:
     rows: 12                    # 标定板行数 (节点数)
@@ -72,9 +92,40 @@ calib:
 # 3. 喷涂与规划作业参数 (Spraying & Planning)
 spraying:
   output_root: "data/runs"      # 生产运行数据存储根目录
-  calib_path: "configs/calib/calibration_result.yaml"
+  # 当前生效的手眼结果: 眼在手上 (Δq 补偿口径 joint_offset_v2, 0.833 px / ±1.09 mm)。
+  # 这一份就是运行时唯一真相 —— 机械臂、交互式重建、取点、自动航点读的都是它, 不会各挑一套。
+  # 装法以该文件里的 metadata.hand_eye_mount 为准 (calib.mount 只是结果缺失时的默认值):
+  #   眼在手上 -> 按每张 scan 采集时刻记录的法兰位姿复合 T_base_camera (缺记录当场报错不降级)
+  #   眼在手外 -> 直接取文件里的基座系常量
+  # 注意: Publish 接口写回的就是这个路径, 换装法 = 改这一行, 不要让两个名字并存。
+  calib_path: "configs/calib/calibration_result_eih.yaml"
   model_path: "models/wissight.pt"
   spray_dist_mm: 150          # 默认喷涂靶距 / TCP standoff 距离 (mm)
+  # 实时视频"光束指向"里被点像素的**兜底深度** (mm): 沿相机观测射线从光心量到"被点那一点"的长度。
+  # 两族候选谁优先也由它决定: 读到被点像素的**实测深度**时首选纯转腕 (swing, 指尖零位移、与臂展
+  # 无关、落点精度约 1mm); 深度读不到 (空洞/超量程/没开对齐) 才退到这里, 并改成首选共线族
+  # (on-ray, 光束即视线、深度无关) —— 因为那时纯转腕只能瞄这个猜测深度上的点, 1.8m 的墙配
+  # 600mm 的猜测会把落点偏出 20cm 量级。界面与日志会标注 depth_source=measured/config。
+  # 与 spray_dist_mm 同为 mm 但意义不同: spray_dist_mm 是枪口到工件表面的法向 standoff, 实时指向还拿它
+  # 当"枪口至少离镜头多远"的安全下界 (防眼在手上时喷枪/激光头碰到镜头)。
+  aim_distance_mm: 600.0
+  # 指向这一趟 MovJ 的速度百分比 (1~100): 指向是单点空走、不描轨迹, 所以不吃面板上为喷涂走线
+  # 调的慢速 (20 deg/s 在 180 deg/s 上限下只相当于 ~11%, 真机反馈到位很拖)。
+  aim_speed_percent: 50.0
+  # 到位后自动开喷涂 DO: 当前该端口接的是激光笔, 亮激光用来肉眼确认光斑。
+  # 换成真喷枪必须改 false (单点到位即开阀会在原地堆漆/滴漆); 不管这一项怎么设, 动作前
+  # 与所有异常路径仍然强制关断 DO (fail-close), 自动开阀只排在运动成功且读回反馈之后。
+  aim_do_on_arrive: true
+  # 眼在手上实时指向前, 臂必须已经静止的时长 (秒): 画面比现场落后“采集→编码→推流→播放器缓冲”
+  # 整条链路, 而视线是按请求那一刻的法兰位姿复合的; 两者不同源时用户点的是旧像素、后端算的是新射线,
+  # 整条射线就差出那段时间里臂的旋转量 (1m 外几十厘米), 且本地指标量不出来 (与共模外参相互抵消)。
+  # 相机断流/软重启时画面更不可信, 服务层会另项检查取流帧率。取 2.0 为保守值, 链路更短可调小; 0 = 关闭。
+  aim_frame_settle_s: 2.0
+  # 激光光轴相对工具 +Z 的固定安装角偏 [tx, ty] (工具系, 单位 deg; [0,0] = 关闭补偿)。
+  # 由人工 Mark-cross 在 5 组不同臂姿态下实测拟合: tx 稳定在 -2.55°、ty 在 +1.20° (方位~155°, 大小~2.8°)。
+  # 开启后规划会把指令姿态预旋, 让真实光轴而非 +Z 落在被点视线上; 校核残差应从~88mm 收敛到噪声级。
+  # 这是这台机器+这个激光工装的物理属性, 换机/大修/碰过支架后必须用 Mark-cross 重标。
+  laser_tilt_tool_deg: [-2.55, 1.20]
   spray_width_mm: 60.0         # 喷涂幅宽 (mm)
   overlap_rate: 0.2             # 喷幅重叠率 (0~1.0)
   point_spacing_mm: 100.0        # 沿行点间距 (mm)
@@ -208,7 +259,11 @@ follow:
     enable_servo_p: false
     health_port: 18081          # 18080 属于相机服务，8008 属于 ZLM
     max_cycles: 0               # 0 = 一直跑
-    calib_path: "configs/calib/calibration_result.yaml"
+    # 跟随的相机轴映射需要基座系**常量**外参, 因此这一段只吃眼在手外那份: 眼在手上时相机位姿
+    # 随臂变化, Python 侧拿不到常量就退回 follow.arm.camera_to_base_fallback_euler_deg 并把
+    # 原因显示出来 (不会反过来影响交互页)。C++ 节点本身只校验文件存在、不判装法。
+    # 与 spraying.calib_path 分开配, 两种装法才能同时生效: 跟随用 E2H, 交互用 EIH。
+    calib_path: "configs/calib/calibration_result_e2h.yaml"
     log_level: "info"
 
   # 臂侧镜像：把上面的相机系修正量换算成 CR5 关节角，喂给页面的仿真臂。

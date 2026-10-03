@@ -31,6 +31,9 @@ class RobotService:
         self._is_connected = False
         self._polling_thread = None
         self._ws_callbacks: List[Callable] = []
+        # 最后一次看到控制器"非 Idle"(running_status != 0) 的单调时刻 (s): 状态轮询是
+        # 唯一读控制器的地方, 所以"臂静止了多久"只能在这里记账 (眼在手上时画面延迟要拿它对齐)。
+        self._last_motion_ts: Optional[float] = None
 
         # 夹爪硬件管理 (钧舵 EPG50-060, 参数自 JunduoGripper 读取)
         self._gripper: Optional[JunduoGripper] = None
@@ -231,6 +234,21 @@ class RobotService:
     def is_moving(self) -> bool:
         """检查机械臂是否正在运动中"""
         return self.get_running_state() == 1
+
+    def seconds_since_motion(self) -> Optional[float]:
+        """
+        距最后一次看到控制器"非 Idle"过了多少秒 (单调时钟, s)。
+
+        为什么需要它而不只是 is_moving(): 眼在手上时, 视频里那一帧是**编码+推流+播放器缓冲**
+        之前的画面 (本链路实测百毫秒到秒级), 所以"此刻臂停了"并不等于"用户看到的画面对应此刻的
+        姿态" —— 只有静止时长覆盖掉整条显示延迟, 点击像素与按当前法兰复合出的视线才是同源的。
+        读的是轮询线程的账 (float 赋值在 CPython 下原子), 不额外开控制器往返。
+
+        :return: 秒数; 轮询线程自上线以来没见过运动 (或还没开始轮询) 时 None = 静止时长未知/无限
+        """
+        if self._last_motion_ts is None:
+            return None
+        return time.monotonic() - self._last_motion_ts
 
     def get_speed(self) -> tuple[float, float, float, float]:
         return self._speed_l, self._acc_l, self._speed_j, self._acc_j
@@ -750,6 +768,7 @@ class RobotService:
             "error_status": 0,
             "tool_vector_actual": [0.0] * 6,
             "hand_type": [0, 0, 0, 0],
+            "user_index": 0,
             "tool_index": 0,
             "run_queued_cmd": 0,
             "velocity_ratio": 0,
@@ -768,6 +787,9 @@ class RobotService:
             joints, _ = self.get_current_joint()
             status = self._driver.get_running_state() if self._driver else 0
             diagnostics = self.get_feedback_diagnostics()
+
+            if status != 0:
+                self._last_motion_ts = time.monotonic()
 
             if status != last_status:
                 logger.info(f"Robot status changed: {status}")
@@ -794,6 +816,7 @@ class RobotService:
                     "error_details": cached_error_details,
                     "tool_vector_actual": diagnostics.get("tool_vector_actual", pose),
                     "hand_type": diagnostics.get("hand_type", [0, 0, 0, 0]),
+                    "user_index": diagnostics.get("user_index", 0),
                     "tool_index": diagnostics.get("tool_index", 0),
                     "run_queued_cmd": diagnostics.get("run_queued_cmd", 0),
                     "velocity_ratio": diagnostics.get("velocity_ratio", 0),

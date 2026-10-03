@@ -69,7 +69,7 @@
 | `calib.board.cols` | `calib.board_cols` | `int` | **动态** | `NumberInput` | 标定板宽度方格数（默认 9）。新建检测或标定时热生效。 |
 | `calib.board.rows` | `calib.board_rows` | `int` | **动态** | `NumberInput` | 标定板高度方格数（默认 12）。新建检测或标定时热生效。 |
 | `calib.board.square_size_mm` | `calib.board_square_size_mm` | `float` | **动态** | `NumberInput` | 棋盘格物理格子边长（mm，默认 15.0）。标定解算时直接影响米制真值，非常关键。 |
-| `calib.cleaning_threshold` | `calib.cleaning_threshold` | `float` | **动态** | `NumberInput` | 视觉位移与机械臂位移校验偏差比例阈值（默认 0.05 即 ±5%）。数据清洗时使用。 |
+| `calib.pruning.max_px` | `calib.pruning.max_px` | `float` | **动态** | `NumberInput` | 单样本重投影残差上限（px，默认 8.0）。首轮拟合解完后剔除自身回差超阈的样本并重解一次。 |
 | `calib.capture.output_dir` | - | `str` | **静态** | - | 标定样本落盘存储目录（`data/calib`）。文件系统结构，保留在 YAML。 |
 | `calib.result_path` | - | `str` | **静态** | - | 标定外参矩阵持久化 YAML 路径。系统间数据契约，保留在 YAML。 |
 | `calib.root_points_path` | - | `str` | **静态** | - | 安全点位数据库路径。保留在 YAML。 |

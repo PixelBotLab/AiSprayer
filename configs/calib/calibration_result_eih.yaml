@@ -1,0 +1,186 @@
+T_base_board:
+- - 0.9769366099146051
+  - -0.20608872710238854
+  - -0.0558775157811751
+  - 865.4084355030113
+- - -0.20684576179990008
+  - -0.9783403782396995
+  - -0.008058233753136676
+  - 177.7456755894102
+- - -0.053006518787572204
+  - 0.019430410883931895
+  - -0.9984051122159301
+  - -112.77250612742314
+- - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+T_flange_camera:
+- - -0.999649453181886
+  - 0.024460574690235336
+  - -0.010131684903286836
+  - 26.05393326099231
+- - -0.024238633516519194
+  - -0.999475456650053
+  - -0.021477900256308666
+  - 51.157853744580876
+- - -0.01065173217875592
+  - -0.021224793049438428
+  - 0.9997179846144614
+  - 142.07187992317319
+- - 0.0
+  - 0.0
+  - 0.0
+  - 1.0
+board_params:
+  cols: 9
+  pattern_size_inner:
+  - 8
+  - 11
+  rows: 12
+  square_size_mm: 15.0
+board_pose_base:
+  pitch_deg: 3.0384738096617263
+  roll_deg: 178.88508181175052
+  x: 865.4084355030113
+  y: 177.7456755894102
+  yaw_deg: -11.954623448682483
+  z: -112.77250612742314
+camera_params:
+  camera_model: orbbec
+  distortion_coeffs:
+  - -0.03204389661550522
+  - 0.034532126039266586
+  - 0.0003080253954976797
+  - 0.00034928417881019413
+  - -0.01199629157781601
+  height: 800
+  intrinsic_matrix:
+  - - 611.683837890625
+    - 0.0
+    - 643.4285278320312
+  - - 0.0
+    - 611.6983642578125
+    - 405.1534118652344
+  - - 0.0
+    - 0.0
+    - 1.0
+  width: 1280
+camera_pose_flange:
+  pitch_deg: 0.6103108396342152
+  roll_deg: -1.2162513977010339
+  x: 26.05393326099231
+  y: 51.157853744580876
+  yaw_deg: -178.61101376143426
+  z: 142.07187992317319
+metadata:
+  confidence:
+    blocking: []
+    extrinsic_std_axes_mm:
+    - 0.631
+    - 0.691
+    - 0.564
+    extrinsic_std_rotation_deg: 0.0454
+    extrinsic_std_translation_mm: 1.093
+    grade: OK
+    jackknife_fits: 14
+    jackknife_refined: true
+    usable: true
+    warnings: []
+  data_quality:
+    axis_coverage: 0.728
+    degenerate: false
+    rotation_span_deg: 39.76
+    score: 99.7
+    translation_span_mm: 296.2
+  hand_eye_mount: eye-in-hand
+  joint_offsets_deg:
+  - -0.787
+  - -0.972
+  - -1.299
+  - -0.162
+  - -1.937
+  - 0.0
+  pose_angle_unit: deg
+  pose_frame_convention: joint_offset_v2
+  pose_reference:
+    flange_from_joints: 27
+    flange_recorded: 0
+    frame: flange
+    tcp_readout_fallback: 0
+  pruned_sample_ids: []
+  readout_consistency:
+    max_deg: 0.501
+    median_deg: 0.105
+    p90_deg: 0.287
+    pairs: 337
+    per_sample_deg:
+      1: 0.47
+      2: 0.42
+      3: 0.19
+      4: 0.3
+      5: 0.34
+      6: 0.44
+      7: 0.3
+      8: 0.3
+      9: 0.29
+      10: 0.5
+      11: 0.47
+      12: 0.24
+      13: 0.32
+      14: 0.29
+      15: 0.35
+      16: 0.42
+      17: 0.3
+      18: 0.22
+      19: 0.23
+      20: 0.3
+      21: 0.29
+      22: 0.36
+      23: 0.4
+      24: 0.44
+      25: 0.38
+      26: 0.4
+      27: 0.5
+    worst_arm_deg: 54.648
+    worst_pair: '#10<->#27'
+    worst_vision_deg: 55.149
+  reprojection_error_px: 0.8325173035424088
+  robot_configuration:
+    tool_index: 0
+    user_index: 0
+  rotation_error_deg: 0.19459381311377658
+  samples_total: 27
+  samples_used: 27
+  solver:
+    ax_xb_method: tsai
+    method_report:
+    - method: tsai
+      reprojection_error_px: 1.3421
+      rotation_error_deg: 0.1725
+      status: ok
+      translation_error_mm: 1.223
+    - method: park
+      reprojection_error_px: 1.3421
+      rotation_error_deg: 0.1725
+      status: ok
+      translation_error_mm: 1.223
+    - method: andreff
+      reprojection_error_px: 1.3421
+      rotation_error_deg: 0.1725
+      status: ok
+      translation_error_mm: 1.223
+    - method: horaud
+      reprojection_error_px: 1.3421
+      rotation_error_deg: 0.1725
+      status: ok
+      translation_error_mm: 1.223
+    - method: daniilidis
+      reprojection_error_px: 1.3421
+      rotation_error_deg: 0.1725
+      status: ok
+      translation_error_mm: 1.223
+    pixel_refined: true
+  source_data_dir: /Users/carl/robots/AiSprayer/data/calib/calib_20261002_190421
+  timestamp: '2026-10-02 21:18:35'
+  translation_error_mm: 1.485790765599864

@@ -3,7 +3,7 @@ import os
 import xml.etree.ElementTree as ET
 import yaml
 import logging
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -185,16 +185,28 @@ CONFIG_REGISTRY: List[Dict[str, Any]] = [
         "description": "Physical size of each grid square in millimeters.",
     },
     {
-        "key": "calib.cleaning_threshold",
+        "key": "calib.pruning.max_px",
         "category": "calib",
-        "label": "Data Cleaning Threshold",
+        "label": "Per-Sample Residual Limit (px)",
         "type": "number",
-        "yaml_path": "calib.cleaning_threshold",
-        "default": 0.05,
-        "min": 0.001,
-        "max": 0.5,
-        "step": 0.005,
-        "description": "Outlier filtering threshold for vision vs robot flange displacement deviation.",
+        "yaml_path": "calib.pruning.max_px",
+        "default": 8.0,
+        "min": 1.0,
+        "max": 50.0,
+        "step": 0.5,
+        "description": "Drop samples whose own reprojection residual against the first-pass fit exceeds this limit, then re-solve once.",
+    },
+    {
+        "key": "calib.capture.settle_ms",
+        "category": "calib",
+        "label": "Sample Settle Delay (ms)",
+        "type": "number",
+        "yaml_path": "calib.capture.settle_ms",
+        "default": 250,
+        "min": 0,
+        "max": 2000,
+        "step": 50,
+        "description": "Wait after the controller reports Idle before grabbing a calibration frame, so residual flange vibration does not desync pose and image.",
     },
 
     # ─── 3. 喷涂与规划工艺参数 (Spraying & Planning Process) ─────────────────
@@ -576,17 +588,49 @@ class SprayerConfig:
         当前标定结果对应的相机安装方式: 'eye-to-hand' 或 'eye-in-hand'。
 
         历史结果文件没写这个字段 (或写的是旧的 calibration_mode), 一律按眼在手外
-        处理 —— 那是本项目此前唯一支持的装法。
+        处理 —— 那是本项目此前唯一支持的装法。判定口径共用 core.handeye 的
+        resolve_result_mount, 与交互式重建选文件时读的是同一套规则。
         """
         if not self.calib_data:
             return self.calib_mount
-        meta = self.calib_data.get("metadata", {}) or {}
-        mount = (self.calib_data.get("hand_eye_mount")
-                 or meta.get("hand_eye_mount")
-                 or meta.get("calibration_mode"))
-        if mount:
-            return "eye-in-hand" if mount == "eye-in-hand" else "eye-to-hand"
-        return self.calib_mount
+        from core.handeye import resolve_result_mount
+        return resolve_result_mount(self.calib_data, default=self.calib_mount)
+
+    @property
+    def robot_joint_offsets_deg(self) -> List[float]:
+        """
+        关节编码器零位偏移 Δq (度, 6 轴, 默认全零 = 不补偿)。
+
+        它是**这台机器**的物理属性 (本项目跨会话实测稳到 0.34° 以内), 换机 / 大修 /
+        碰撞后必须重解。合法性 (6 个值、有限、± 5° 以内) 由 CR5Kinematics 统一校验,
+        这里只负责读出与默认值 —— 避免同一个校验在两处漂移。
+
+        只从 YAML 读、不进 SQLite 覆盖: 机器物理参数不属于运行期可调项, 出现在 Settings
+        里反而会被误改 (改了并不会自动重标, 只会让口径不匹配)。
+        """
+        val = self._get_yaml_nested("hardware.robot.joint_offsets_deg", [0.0] * 6)
+        return [float(v) for v in val]
+
+    @property
+    def pose_frame_convention(self) -> str:
+        """当前运行时的法兰位姿口径: 偏移全零 = controller_v1, 否则 joint_offset_v2。"""
+        from core.handeye import POSE_FRAME_CONTROLLER_V1, POSE_FRAME_JOINT_OFFSET_V2
+        offs = self.robot_joint_offsets_deg
+        return (POSE_FRAME_CONTROLLER_V1 if all(abs(v) <= 1e-9 for v in offs)
+                else POSE_FRAME_JOINT_OFFSET_V2)
+
+    def pose_frame_mismatch(self, data: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        """
+        对比一份标定结果的法兰位姿口径与当前运行时口径; 匹配返回 None, 不匹配返回英文原因。
+
+        判定本体在 core.handeye.pose_frame_mismatch (与发布预检、界面待确认标记同一口径),
+        本方法只负责把运行时的口径与偏移递过去。
+        """
+        from core.handeye import pose_frame_mismatch
+        return pose_frame_mismatch(
+            self.calib_data if data is None else data,
+            self.pose_frame_convention,
+            self.robot_joint_offsets_deg)
 
     @property
     def T_flange_camera(self):
@@ -595,55 +639,115 @@ class SprayerConfig:
             return None
         return self.calib_data.get("T_flange_camera")
 
+    def _camera_extrinsic(self, flange_pose_mm_deg: Optional[Sequence[Any]] = None):
+        """
+        把生效结果交给内核解析: (T_base_camera 米制或 None, mount, 英文原因/提醒)。
+
+        递过去的就是“当前运行时口径 + 当前偏移”这一对事实, 口径判定本体不在本层重写。
+        """
+        from core.handeye import resolve_camera_extrinsic
+        return resolve_camera_extrinsic(
+            self.calib_data, flange_pose_mm_deg,
+            runtime_frame=self.pose_frame_convention,
+            runtime_offsets_deg=self.robot_joint_offsets_deg)
+
+    def camera_extrinsic_at(self, base_flange_pose: Optional[Sequence[Any]] = None):
+        """
+        与 T_camera_to_base_at 同一条解析链, 但把 (T_base_camera, mount, 英文原因) 一起交回来。
+
+        存在的理由: 实时视频上的“指尖指向”这类动作必须把**为什么用不了外参**说给用户听
+        (相机此刻在哪 / 与标定口径不同源), 只返 None 就只能给出一句笼统的失败原因。
+        日志口径与 T_camera_to_base_at 完全一致 (本方法就是它的底层实现), 返值多一个 mount 与原因。
+
+        :return: (T_base_camera 4x4 列表或 None, mount, 英文原因或 None)
+        """
+        from core.handeye import EYE_IN_HAND
+        pose = list(base_flange_pose or [])
+        T, mount, note = self._camera_extrinsic(pose if len(pose) >= 6 else None)
+        if T is None:
+            # 没给法兰位姿是用法问题 (告警即可); 口径不同源是硬拦 (错一整个 Δq 在杆臂上的
+            # 投影), 必须报 error —— 两者都会返回 None, 但后者意味着当场就不能用。
+            if mount == EYE_IN_HAND and len(pose) >= 6:
+                logger.error(f"Refusing eye-in-hand extrinsics: {note}")
+            else:
+                logger.warning(f"Camera extrinsics unavailable: {note}")
+        return T, mount, note
+
     def T_camera_to_base_at(self, base_flange_pose):
         """
-        指定法兰位姿下相机到基座的变换 (4x4 列表, 平移 m)。
+        指定法兰位姿下相机到基座的变换 (4x4 列表, 平移 m); 不可用时为 None。
 
         眼在手外: 与法兰无关, 直接返回标定的常量外参。
         眼在手上: T_base_camera = T_base_flange(pose) · T_flange_camera, 每次拍摄都不同。
 
         :param base_flange_pose: [x, y, z, rx, ry, rz], 平移 mm, 姿态度 (Dobot 'xyz' 内禀序列)
+
+        入参必须是**法兰**位姿, 不能直接传 30004 的 tool_vector_actual: 后者是当前 tool
+        的 TCP 位姿, 与法兰差一个常量 tool 变换 (本项目实测 252.7mm / 175.1°)。标定的
+        T_flange_camera 是以法兰为参考解出的, 两者必须同源; 用关节反馈反推的法兰位姿
+        (core.motion.kinematics.flange_pose_from_joints) 不受示教器 tool 号影响。
+
+        判定本体 (含口径硬拦与 mm->m 换算) 在 core.handeye.resolve_camera_extrinsic,
+        与交互式重建走的是同一条解析链, 不会出现在“配置层一套、交互层一套”。
+        需要知道“为什么不可用”的调用方请用 camera_extrinsic_at。
         """
-        if self.hand_eye_mount != "eye-in-hand":
-            return self.T_camera_to_base
-        if base_flange_pose is None or len(base_flange_pose) < 6:
-            logger.warning("eye-in-hand calibration needs a base_flange_pose to resolve camera extrinsics")
-            return None
-        if not self.T_flange_camera:
-            logger.warning("Calibration result is eye-in-hand but T_flange_camera is missing")
-            return None
-
-        import numpy as np
-        from core.handeye import pose_to_matrix
-
-        T_base_flange = pose_to_matrix(base_flange_pose)
-        T = T_base_flange @ np.array(self.T_flange_camera, dtype=float)
-        T[:3, 3] /= 1000.0  # mm -> m, 与 T_camera_to_base 一致
-        return T.tolist()
+        return self.camera_extrinsic_at(base_flange_pose)[0]
 
     @property
     def T_camera_to_base(self):
         """手眼标定矩阵 (4x4 列表，平移部分被自动转换为米)。眼在手上时为 None, 改用 T_camera_to_base_at。"""
-        if self.calib_data:
-            key = 'T_base_camera' if 'T_base_camera' in self.calib_data else ('T_camera_to_base' if 'T_camera_to_base' in self.calib_data else None)
-            if key:
-                import copy
-                T = copy.deepcopy(self.calib_data[key])
-                # 标定文件中的平移部分是以毫米为单位保存的 (例如 847.1)
-                # 但后续 3D 处理流水线 (点云/URDF/规划) 均使用米 (m)
-                # 故在此处统一将平移部分缩放为米
-                T[0][3] /= 1000.0
-                T[1][3] /= 1000.0
-                T[2][3] /= 1000.0
-                return T
-            if self.hand_eye_mount == "eye-in-hand" and not getattr(self, "_warned_eye_in_hand", False):
-                # 眼在手上时相机在基座系的位姿不是常量, 返回一个错误的常量比返回 None 危险得多
+        if not self.calib_data:
+            return None
+        from core.handeye import EYE_IN_HAND
+        T, mount, note = self._camera_extrinsic()
+        if T is None:
+            # 眼在手上时相机在基座系的位姿不是常量, 返回一个错误的常量比返回 None 危险得多
+            if mount == EYE_IN_HAND and not getattr(self, "_warned_eye_in_hand", False):
                 self._warned_eye_in_hand = True
                 logger.warning(
                     "Active calibration is eye-in-hand: T_camera_to_base is not constant, "
                     "use T_camera_to_base_at(base_flange_pose)"
                 )
-        return None
+            return None
+        if note and not getattr(self, "_warned_pose_frame", False):
+            # 口径提示 (不阻断): 眼在手外运行期不消费法兰位姿, 返的就是一个基座系常量,
+            # 口径不一致只影响标定时被臂误差吸收掉的那一小部分 (实测 ±2.84mm 量级)。
+            self._warned_pose_frame = True
+            logger.warning(f"Stale pose frame in the active calibration result: {note}")
+        return T
+
+    @property
+    def follow_calib_path(self) -> Optional[str]:
+        """
+        follow 链路 (C++ 跟随节点 + Python 轴映射) 用的标定结果路径。
+
+        与 spraying.calib_path 分开配才能两种装法共存: 跟随时相机必须相对基座不动 (E2H),
+        而交互页现在也支持眼在手上。共用一个键的话, 把全局结果切到 EIH 会连带把跟随静默
+        降级为配置常量近似。未配则退回 spraying.calib_path (保持历史行为)。
+        """
+        path = self._get_yaml_nested("follow.runtime.calib_path")
+        return self._resolve_path(path) if path else self.calib_path
+
+    @property
+    def follow_camera_to_base(self):
+        """
+        follow 侧的相机→基座常量外参 (4x4 列表, 平移 m); 没有常量可用时为 None。
+
+        只读 follow_calib_path 那一份, 不读全局生效结果 —— 否则“切换装法”会顺带把跟随
+        的轴映射弄没。眼在手上时本来就没有常量可用, 返 None 让调用方明确降级。
+        """
+        from core.handeye import resolve_camera_extrinsic
+        T, _mount, note = resolve_camera_extrinsic(
+            self._load_yaml(self.follow_calib_path),
+            runtime_frame=self.pose_frame_convention,
+            runtime_offsets_deg=self.robot_joint_offsets_deg)
+        if T is None:
+            logger.warning(f"follow extrinsics unusable: {note}")
+        elif note and not getattr(self, "_warned_follow_pose_frame", False):
+            # 常量仍可用, 但口径对不上: 只记一次, 跟 follow_camera_to_base 一样不阻断产线
+            self._warned_follow_pose_frame = True
+            logger.warning(f"Stale pose frame in the follow calibration: {note}")
+        return T
 
     @property
     def model_path(self):
@@ -684,6 +788,89 @@ class SprayerConfig:
     def standoff_distance_mm(self) -> float:
         """TCP standoff 距离别名 (mm)"""
         return self.spray_distance_mm
+
+    @property
+    def aim_distance_mm(self) -> float:
+        """
+        实时视频“光束指向”里被点像素的**深度标注** (mm, 默认 600.0) —— 只用于界面回显。
+
+        量纲与物理意义与 spray_dist_mm 不同, 不能混用: spray_dist_mm 是**枪口到工件表面**
+        的法向 standoff (航点偏移量, 实时指向也拿它当“枪口至少离镜头多远”的安全下界);
+        本值是**相机光心沿观测射线到被点那一点**的距离 —— 单个像素反投影只能给出一条射线
+        (深度未知), 实时页面上又没拍深度图, 所以要给一个默认深度才能把像素标成基座系里的点。
+        本项目标定板作业距离 300~900mm, 600mm 是中位数量级。
+
+        注意: 指向本身**不吃这个值**。服务要求工具轴线与观测射线共线, 深度猜错也照样打中,
+        改这里只改变界面上那个“目标点坐标”的数字, 不改变机械臂落点。
+        """
+        return float(self.get_cascading("spraying.aim_distance_mm", "spraying.aim_distance_mm", 600.0))
+
+    @property
+    def aim_speed_percent(self) -> float:
+        """
+        实时指向这一趟 MovJ 的速度百分比 (1~100, 默认 50.0)。
+
+        为什么不跟控制面板的关节速度: 面板里那个值是为**喷涂走线**调的慢速 (默认 20 deg/s,
+        在 CR5 的 180 deg/s 上限下只折算成 ~11%), 而指向是单点空走、不描轨迹, 用喷涂速度
+        会显得拖沓 (真机反馈“到位很慢”)。接口显式传 speed (deg/s) 时仍以传入值为准。
+        """
+        return float(self.get_cascading("spraying.aim_speed_percent", "spraying.aim_speed_percent", 50.0))
+
+    @property
+    def aim_do_on_arrive(self) -> bool:
+        """
+        指向到位后是否自动打开喷涂 DO (默认 True)。
+
+        物理意义: 当前该端口接的是**激光笔**, 到位亮激光用来肉眼确认光斑。
+        换成真实喷枪必须设为 false —— 单点到位即开阀会在原地堆漆/滴漆。
+        无论这一项怎么设, 动作前与任何异常路径都仍然强制关断 (fail-close),
+        自动开阀只排在运动成功且读回反馈之后。
+        """
+        return bool(self.get_cascading("spraying.aim_do_on_arrive", "spraying.aim_do_on_arrive", True))
+
+
+    @property
+    def aim_frame_settle_s(self) -> float:
+        """
+        眼在手上实时指向前，臂必须已经静止的时长 (秒, 默认 2.0; 0 = 关闭这一项校验)。
+
+        物理意义: 视频画面比现场落后**整条显示链路** (采集→OpenH264 编码→ZLM 推流→播放器
+        缓冲, 本链路实测百毫秒到秒级, 相机重启/断流时更久), 而指向的视线是按**请求那一刻**的
+        法兰位姿复合的。两者不同源时, 用户点的是旧像素、后端算的是新射线, 整条射线差的就是那
+        段时间里臂的旋转量 (实测十几度 = 1m 外几十厘米), 而且本地指标量不出来 (光束与射线各自
+        自洽)。所以要求静止时长至少覆盖显示延迟; 取 2.0s 为保守值, 链路更短可调小。
+        眼在手外时相机不动, 视线与臂姿态无关, 这一项不适用 (服务层按装法跳过)。
+        """
+        val = self.get_cascading("spraying.aim_frame_settle_s", "spraying.aim_frame_settle_s", 2.0)
+        return max(float(val), 0.0)
+
+    @property
+    def laser_tilt_tool_deg(self) -> List[float]:
+        """
+        激光光轴相对**工具 +Z** 的固定安装角偏 (工具系 [tx, ty], 单位 deg, 默认 [0, 0] = 不补偿)。
+
+        物理意义: 规划一直硬编码"光束 == 工具 +Z", 但激光头与工具是刚性装配, 实际出光轴与 +Z
+        之间会有一个固定的小角度安装偏差。本项目 5 组人工 Mark-cross 在不同臂姿态下量到该偏差
+        在**工具系里几乎恒定** (tx≈-2.55°, ty≈+1.20°, 方位~155°, 大小~2.8°), 正是刚性安装角偏
+        的特征 —— 与关节零位那种"随姿态变"的误差不同, 故可以用一个常量旋转吸收进外参。
+
+        消费方式 (服务层三处同口径):
+        - 规划 _pose_of: 把指令姿态预乘一个工具系"逆倾"旋转, 让**真实光轴**(而非 +Z) 落在被点视线上;
+        - _measure / mark_cross 校核: 模型光束轴改用倾斜后的 R·b_tool, 于是补偿对了残差就收敛到 ~0。
+        [0, 0] 时所有旋转退化为单位阵, 完全等价于旧的"光束==+Z"行为 (故障安全默认, 只从 YAML 读)。
+        这是**这台机器 + 这个激光工装**的物理属性, 换机/大修/碰过支架后必须用 Mark-cross 重标。
+        """
+        val = self._get_yaml_nested("spraying.laser_tilt_tool_deg", [0.0, 0.0]) or [0.0, 0.0]
+        try:
+            tx, ty = float(val[0]), float(val[1])   # 只取前两个分量: tx 朝 +X 偏, ty 朝 +Y 偏
+        except (TypeError, ValueError, IndexError) as e:
+            raise ValueError(f"spraying.laser_tilt_tool_deg must be [tx, ty] in deg, got {val!r}: {e}")
+        # 防御: 安装角偏是"小量", 超限说明配错 (填成了欧拉全姿态 / 度弧混淆), 快速失败而非带病运动。
+        for name, v in (("tx", tx), ("ty", ty)):
+            if not (-15.0 <= v <= 15.0):
+                raise ValueError(f"spraying.laser_tilt_tool_deg.{name}={v} deg out of the plausible "
+                                 f"laser-mount range [-15, 15]; check units (deg, not rad)")
+        return [tx, ty]
 
     @property
     def overlap_rate(self) -> float:
@@ -838,9 +1025,33 @@ class SprayerConfig:
         return float(self.get_cascading("calib.board.square_size_mm", "calib.board.square_size_mm", 15.0))
 
     @property
-    def calib_cleaning_threshold(self) -> float:
-        """标定数据清洗偏差阈值 (比例)"""
-        return float(self.get_cascading("calib.cleaning_threshold", "calib.cleaning_threshold", 0.05))
+    def calib_pruning_max_px(self) -> float:
+        """
+        单样本重投影残差上限 (像素, 1~50), 超出则该样本被剔除后重解一次。
+
+        判据用的是首轮拟合对每个样本自己的残差, 比任何先验运动包络都直接。
+        非法输入 (非数字/越界) 一律收敛到边界, 不带病运行。
+        """
+        val = self.get_cascading("calib.pruning.max_px", "calib.pruning.max_px", 8.0)
+        try:
+            return min(max(float(val), 1.0), 50.0)
+        except (ValueError, TypeError):
+            return 8.0
+
+    @property
+    def calib_capture_settle_ms(self) -> int:
+        """
+        手眼采样前的沉降等待 (毫秒, 0~2000)。
+
+        控制器报 Idle 只代表插补结束, 法兰仍有残余振动; 立即拍照会让“位姿读数”与
+        “图像里的标定板”不是同一时刻, 直接污染 AX=XB 约束。0 = 不等待。
+        非法输入 (非数字/负数/超过 2s) 一律收敛到边界, 不带病运行。
+        """
+        val = self.get_cascading("calib.capture.settle_ms", "calib.capture.settle_ms", 250)
+        try:
+            return min(max(int(val), 0), 2000)
+        except (ValueError, TypeError):
+            return 250
 
     @property
     def camera_model(self) -> str:
@@ -870,6 +1081,21 @@ class SprayerConfig:
         """机器人最大关节速度 (度/s, 6轴列表, 默认 [180, 180, 180, 180, 180, 180])"""
         speeds = self._get_yaml_nested("hardware.robot.max_joint_speed_deg_s", [180.0, 180.0, 180.0, 180.0, 180.0, 180.0])
         return [float(x) for x in speeds]
+
+    @property
+    def robot_max_reach_mm(self) -> float:
+        """
+        机械臂臂展 (基座到**法兰**的最大直线距离, mm, 默认 900.0 = CR5 臂展)。
+
+        物理意义: 以基座为球心的**可达球**半径。它只用来把候选位置做几何筛除 (避开
+        那些根本够不着的点), 真正的可达/奇异判定仍然以控制器逆解为准 —— 球内不等
+        于可达 (关节限位、奇异区、本体干涉都不在球模型里)。
+        口径注意: 这一项是**法兰**半径, 不是带工具的 TCP 半径。实时指向候选的是 TK 标定后的
+        TCP, 所以它会把实测的工具长度 (|30004 TCP 读数 - FK 法兰|) 叠加到球半径上; 直接用本值
+        筛 TCP 会少算一整截工具 (本项目实测 153mm), 把可用工作区错杀成很小一段。
+        换臂型 (如 M1 系 700mm / CR3 系 600mm) 必须改这一项, 否则筛除结果会偏保守或偏激进。
+        """
+        return float(self._get_yaml_nested("hardware.robot.max_reach_mm", 900.0))
 
     @property
     def poi_tolerance_rpy_deg(self) -> List[float]:

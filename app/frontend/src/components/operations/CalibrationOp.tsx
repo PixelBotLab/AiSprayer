@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Play, FolderPlus, Trash2, Image as ImageIcon, Camera, ChevronLeft, ChevronRight, RotateCw } from 'lucide-react';
+import { Play, FolderPlus, Trash2, Image as ImageIcon, Camera, ChevronLeft, ChevronRight, RotateCw, Scan, Upload } from 'lucide-react';
 import { CustomModal, type ModalConfig } from '../common/CustomModal';
 import { TOOLTIP_BASE_CLASS, Tooltip } from '../common/Tooltip';
 import { API_BASE } from '../../config';
@@ -27,6 +27,48 @@ const MOUNT_HINTS: Record<string, string> = {
   'eye-in-hand': 'Camera mounted on the robot flange, chessboard fixed in the work cell.',
 };
 
+// 可用性三档结论, 与后端 assess_confidence() 的 grade 一一对应 (判定只在后端那一处)
+const GRADE_META: Record<string, { label: string; badge: string; box: string }> = {
+  OK: {
+    label: 'USABLE',
+    badge: 'text-emerald-300 bg-emerald-950/60 border-emerald-800/60',
+    box: 'border-emerald-900/50 bg-emerald-950/15',
+  },
+  CAUTION: {
+    label: 'CAUTION',
+    badge: 'text-amber-300 bg-amber-950/60 border-amber-800/60',
+    box: 'border-amber-900/50 bg-amber-950/15',
+  },
+  NOT_USABLE: {
+    label: 'NOT USABLE',
+    badge: 'text-rose-300 bg-rose-950/60 border-rose-800/70',
+    box: 'border-rose-900/60 bg-rose-950/20',
+  },
+};
+
+// 数值着色门槛 (px / mm / deg): 与后端 core/handeye/assess_confidence 的 _WARN/_USABLE 常量一一对应
+const REPROJ_WARN_PX = 1.5;
+const REPROJ_FAIL_PX = 4.0;
+const RESIDUAL_WARN_MM = 2.0;
+const RESIDUAL_FAIL_MM = 5.0;
+const ROT_WARN_DEG = 0.5;
+const ROT_FAIL_DEG = 1.5;
+// 留一法外参不确定度门槛 (旋转不变范数), 对应后端 _WARN_STD_* / _USABLE_STD_*
+const STD_WARN_MM = 1.5;
+const STD_FAIL_MM = 5.0;
+const STD_WARN_DEG = 0.2;
+const STD_FAIL_DEG = 1.0;
+// 臂读数与相机观测的相对转角失配 (deg), 对应后端 _WARN/_BLOCK_CONSISTENCY_*
+const CONSISTENCY_WARN_DEG = 0.3;
+const CONSISTENCY_BLOCK_DEG = 1.0;
+
+// 按 (warn, fail) 双门槛给数值上色: 绿灯不能只因为“没算”就亮绿
+const levelColor = (v: number | null | undefined, warn: number, fail: number) =>
+  v == null ? 'text-slate-400'
+    : v > fail ? 'text-rose-400'
+      : v > warn ? 'text-amber-400'
+        : 'text-emerald-400';
+
 const CalibrationOp: React.FC = () => {
   const [sessions, setSessions] = useState<string[]>([]);
   const [activeSession, setActiveSession] = useState<string | null>(null);
@@ -44,6 +86,22 @@ const CalibrationOp: React.FC = () => {
   const [hoveredSessionDelete, setHoveredSessionDelete] = useState<{ x: number; y: number } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
+  // 全局生效的那一份标定 (configs/calib/calibration_result.yaml), 发布按钮的作用对象
+  const [activeResult, setActiveResult] = useState<any | null>(null);
+  const [isPublishing, setIsPublishing] = useState(false);
+  // 重新绑定当前 session 装法的请求在飞
+  const [isMountBusy, setIsMountBusy] = useState(false);
+
+  // 标定板实时识别: 相机微服务的全局硬件模式 (角点检测 + 把叠加烧进推流)，只由下面的按钮手动进出
+  const [isBoardOverlay, setIsBoardOverlay] = useState(false);
+  const [isOverlayBusy, setIsOverlayBusy] = useState(false);
+  const [boardDetection, setBoardDetection] = useState<{ found: boolean; count: number } | null>(null);
+  // 归本视图持有的 ON 状态才在离开时复原，避免把别人开的模式关掉
+  const overlayOwnedRef = useRef(false);
+
+  // 采样互锁: 机械臂在动时采到的图与位姿不同步, 直接污染 AX=XB 约束
+  const [robotState, setRobotState] = useState<{ connected: boolean; moving: boolean } | null>(null);
+
   const minSamples = sessionData.min_samples ?? 3;
   const activeMount = sessionData.mount ?? selectedMount;
 
@@ -53,9 +111,50 @@ const CalibrationOp: React.FC = () => {
   const cameraPose = isInHand ? sessionData.result?.camera_pose_flange : sessionData.result?.camera_pose_base;
   const cameraMatrix = isInHand ? sessionData.result?.T_flange_camera : sessionData.result?.T_base_camera;
   const meta = sessionData.result?.metadata;
+  // 法兰位姿口径: 没写这个字段的历史结果一律读作 controller_v1 (与后端同一规则)
+  const resultFrame = meta?.pose_frame_convention || 'controller_v1';
   const reprojPx: number | null | undefined = meta?.reprojection_error_px;
   const reprojMm: number | undefined = meta?.translation_error_mm ?? meta?.reprojection_error_mm;
   const quality = meta?.data_quality;
+  const confidence = meta?.confidence;
+  // 旧结果文件没有 confidence 块: 退回只看 degenerate, 保证老 session 的提示不丢
+  const blockingIssues: string[] = confidence?.blocking
+    ?? (quality?.degenerate
+      ? ['Rotation axes are nearly parallel: the hand-eye transform is not observable.']
+      : []);
+  const cautionIssues: string[] = confidence?.warnings ?? [];
+  const gradeMeta = confidence ? GRADE_META[confidence.grade] : undefined;
+  const isResultUsable = confidence ? !!confidence.usable : true;
+  // 位姿参考系与免标定自检: 求解用的是法兰 (FK of joints) 还是 TCP 读数
+  const poseRef = meta?.pose_reference;
+  const robotCfg = meta?.robot_configuration;
+  const prunedIds: number[] = meta?.pruned_sample_ids ?? [];
+  const readout = meta?.readout_consistency;
+  const perSampleDeg: Record<string | number, number> = readout?.per_sample_deg ?? {};
+  // 旧结果文件里不确定度是分数组, 新口径是旋转不变范数 (标量)
+  const stdT: number | null = confidence?.extrinsic_std_translation_mm == null
+    ? null
+    : Array.isArray(confidence.extrinsic_std_translation_mm)
+      ? Math.max(...confidence.extrinsic_std_translation_mm)
+      : Number(confidence.extrinsic_std_translation_mm);
+  const stdAxes: number[] | null = confidence?.extrinsic_std_axes_mm ?? null;
+  const stdR: number | null = confidence?.extrinsic_std_rotation_deg ?? null;
+  // 缩略图上的坐标应当是求解真正用到的那个口径: 有法兰位姿 (FK of joints) 就显示它
+  const samplePoseList = (sample: any): number[] | undefined => {
+    const f = sample.flange_pose;
+    if (f) return [f.x, f.y, f.z];
+    return sample.pose;
+  };
+  // 采样互锁 (界面层这一道): 控制器反馈在动或未连接就置灰, 文案说清原因
+  const isRobotBlocked = !!robotState && (robotState.moving || !robotState.connected);
+  const captureHint = isCapturing ? 'Capturing Sample...'
+    : robotState?.moving ? 'Robot is moving. Wait until it stops, then capture.'
+      : robotState && !robotState.connected ? 'Robot is not connected.'
+        : 'Capture Single Sample at Current Pose';
+  // 当前 session 的就是全局在用那一份? 时间戳一并比, 避免发布后又重解一轮时误判为"已生效"
+  const isResultActive = !!(activeResult?.exists
+    && activeResult?.source_session === activeSession
+    && activeResult?.timestamp === meta?.timestamp);
 
   // Custom Modal State
   const [modalConfig, setModalConfig] = useState<ModalConfig>({
@@ -142,9 +241,93 @@ const CalibrationOp: React.FC = () => {
     }
   };
 
+  const fetchActiveResult = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/calib/active`);
+      if (res.ok) {
+        const data = await res.json();
+        setActiveResult(data.active || null);
+      }
+    } catch (err) {
+      console.error('Failed to fetch active calibration:', err);
+    }
+  };
+
   useEffect(() => {
     fetchSessions();
     fetchMountCatalog();
+    fetchActiveResult();
+  }, []);
+
+  // 进页只做只读同步: 相机模式是硬件全局状态, 视图不擅自切换
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/camera/status`);
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        const on = !!data.calibration_mode;
+        setIsBoardOverlay(on);
+        if (on) overlayOwnedRef.current = true;
+      } catch {
+        // Camera service offline: keep the switch at OFF
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // 以控制器反馈为唯一准源轮询运行状态: 机械臂在动时置灰采样/重采按钮
+  // (后端 POST /sessions/{id}/samples 也会同样拒绝, 这里是界面层的那一道)。
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/robot/state`);
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        setRobotState({ connected: !!data.connected, moving: !!data.is_moving });
+      } catch {
+        if (!cancelled) setRobotState(null);
+      }
+    };
+    poll();
+    const timer = window.setInterval(poll, 500);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, []);
+
+  // ON 时轮询最新检测结果: 叠加只在 800ms 内有检测才画在流上, 需要一个能读到的"没找到"提示
+  // (关闭时的清空在开关处理里做, 不在 effect 里同步 setState)
+  useEffect(() => {
+    if (!isBoardOverlay) return;
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/camera/corners`);
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        setBoardDetection({ found: !!data.found, count: data.count || 0 });
+      } catch {
+        if (!cancelled) setBoardDetection(null);
+      }
+    };
+    poll();
+    const timer = window.setInterval(poll, 800);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [isBoardOverlay]);
+
+  // 离开标定页 = 显式退回常规模式 (深度流与 D2C 对齐归位, 跟随不被长期顶掉)
+  useEffect(() => () => {
+    if (!overlayOwnedRef.current) return;
+    overlayOwnedRef.current = false;
+    fetch(`${API_BASE}/api/camera/calibration_mode`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: false }),
+      keepalive: true
+    }).catch(() => {
+      // Best-effort restore; the service keeps its own state and the next visit re-syncs
+    });
   }, []);
 
   useEffect(() => {
@@ -203,6 +386,7 @@ const CalibrationOp: React.FC = () => {
 
   const handleCapture = async () => {
     if (!activeSession || isCapturing || isRunning || isResampling) return;
+    if (robotState?.moving || robotState?.connected === false) return;
     setIsCapturing(true);
     try {
       const res = await fetch(`${API_BASE}/api/calib/sessions/${activeSession}/samples`, { method: 'POST' });
@@ -224,6 +408,7 @@ const CalibrationOp: React.FC = () => {
 
   const handleResampleAndCalibrate = async () => {
     if (!activeSession || isRunning || isResampling || isCapturing) return;
+    if (robotState?.moving || robotState?.connected === false) return;
     if (sessionData.samples.length < minSamples) {
       showAlert('Insufficient Samples', `'${activeMount}' calibration needs at least ${minSamples} valid waypoints. Current session has ${sessionData.samples.length}.`);
       return;
@@ -335,9 +520,132 @@ const CalibrationOp: React.FC = () => {
     }
   };
 
-  const activeImageUrl = activeSession && activeImage 
+  const handleToggleBoardOverlay = async () => {
+    // 切模式会重启取流管线，不能和抓拍/自动采样的帧落盘撞车
+    if (isOverlayBusy || isCapturing || isResampling) return;
+    const next = !isBoardOverlay;
+    setIsOverlayBusy(true);
+    try {
+      // 板参数不给: 后端统一回落到 calib.board, 保证叠加用的 pattern 与求解器一致
+      const res = await fetch(`${API_BASE}/api/camera/calibration_mode`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: next })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Failed to switch camera calibration mode');
+      }
+      setIsBoardOverlay(next);
+      overlayOwnedRef.current = next;
+      if (!next) setBoardDetection(null);
+    } catch (err: any) {
+      showAlert('Board Overlay Error', err.message);
+    } finally {
+      setIsOverlayBusy(false);
+    }
+  };
+
+  const activeImageUrl = activeSession && activeImage
     ? `${API_BASE}/api/calib/sessions/${activeSession}/images_with_corners/${activeImage}`
     : null;
+
+  // 把当前 session 的求解结果发布为全局生效标定 (取代手工 cp 到 configs/calib/)
+  const handlePublishResult = () => {
+    if (!activeSession || !sessionData.result || isPublishing) return;
+
+    const replaces = activeResult?.exists
+      ? `The currently active result is ${MOUNT_LABELS[activeResult.mount] || activeResult.mount}`
+        + `${activeResult.timestamp ? ` (${activeResult.timestamp})` : ''}; it is rolled over to calibration_result.prev.yaml.`
+      : 'No active calibration result exists yet.';
+
+    // 两种装法的消费方不同, 发布 EIH 会让只认恒定 T_base_camera 的链路失效, 必须明说
+    const mountImpact = resultMount === 'eye-in-hand'
+      ? ' Note: eye-in-hand results have no constant camera-to-base transform, so workpiece follow falls back to its manual extrinsics and 2D-mapped trajectory planning is rejected.'
+      : '';
+
+    // 结论不可用时仍允许发布 (现场可能要一份将就用), 但确认框必须把话说清
+    const verdictImpact = confidence && !confidence.usable
+      ? ` WARNING: this result is judged NOT USABLE (${[...blockingIssues, ...cautionIssues].join(' ')})`
+        + ' Publishing it is an explicit override.'
+      : confidence
+        ? ` Verdict: ${gradeMeta?.label ?? confidence.grade}.`
+        : '';
+
+    // 口径与当前运行时不一致时, 发布出去也不会被消费 (eye-in-hand 在加载时就被拒), 必须提前说清
+    const frameImpact = activeResult?.runtime_pose_frame
+      && resultFrame !== activeResult.runtime_pose_frame
+      ? ` WARNING: this session's flange poses are ${resultFrame} while the robot is configured for `
+        + `${activeResult.runtime_pose_frame}; extrinsics solved under different pose frames are not `
+        + 'interchangeable. Publish only as a temporary stopgap and re-run the calibration.'
+      : '';
+
+    setModalConfig({
+      isOpen: true,
+      type: 'confirm',
+      title: 'Publish Calibration Result',
+      message: `Publish "${activeSession}" (${MOUNT_LABELS[resultMount] || resultMount}) as the globally effective hand-eye calibration? ${replaces} Session folders are left untouched.${mountImpact}${verdictImpact}${frameImpact}`,
+      confirmText: 'Publish',
+      cancelText: 'Cancel',
+      onConfirm: async () => {
+        setIsPublishing(true);
+        try {
+          const res = await fetch(`${API_BASE}/api/calib/sessions/${activeSession}/publish`, { method: 'POST' });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.detail || 'Failed to publish calibration result');
+          await fetchActiveResult();
+          showAlert(
+            'Calibration Published',
+            `${activeSession} (${MOUNT_LABELS[resultMount] || resultMount}) is now the active hand-eye calibration. Runtime config was reloaded, no backend restart needed.`
+          );
+        } catch (err: any) {
+          showAlert('Publish Failed', err.message);
+        } finally {
+          setIsPublishing(false);
+        }
+      }
+    });
+  };
+
+  // 换装法: 无 session 时只给"下一个 New"预选; 有 session 时是重新绑定当前 session
+  const handleSelectMount = (mount: string) => {
+    if (isMountBusy || isRunning || isResampling || isCapturing) return;
+    if (!activeSession) {
+      setSelectedMount(mount);
+      return;
+    }
+    if (mount === activeMount) return;
+
+    const staleNote = sessionData.result
+      ? ` The stored result was solved as ${MOUNT_LABELS[resultMount] || resultMount} and is now stale, re-run the solver.`
+      : '';
+    setModalConfig({
+      isOpen: true,
+      type: 'confirm',
+      title: 'Re-bind Session Mount',
+      message: `Re-bind "${activeSession}" to ${MOUNT_LABELS[mount] || mount}? Captured samples are kept (a sample is just flange pose + image, independent of mounting).${staleNote}`,
+      confirmText: 'Re-bind',
+      cancelText: 'Cancel',
+      onConfirm: async () => {
+        setIsMountBusy(true);
+        try {
+          const res = await fetch(`${API_BASE}/api/calib/sessions/${activeSession}/mount`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mount })
+          });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) throw new Error(data.detail || 'Failed to re-bind session mount');
+          setSelectedMount(mount);
+          await fetchSessionData(activeSession);
+        } catch (err: any) {
+          showAlert('Mount Re-bind Failed', err.message);
+        } finally {
+          setIsMountBusy(false);
+        }
+      }
+    });
+  };
 
   const scrollTabs = (dir: 'left' | 'right') => {
     if (scrollRef.current) {
@@ -512,12 +820,31 @@ const CalibrationOp: React.FC = () => {
                   <div className="absolute top-0 right-0 bg-black/60 text-[8px] text-white px-1 py-0.2 rounded-bl">
                     #{sample.id}
                   </div>
+                  {/* 逐样本失配/被裁标记: 让操作员一眼看出该重采哪几帧 */}
+                  {(prunedIds.includes(sample.id) || perSampleDeg[sample.id] >= CONSISTENCY_WARN_DEG) && (
+                    <div className="absolute bottom-0 right-0 flex flex-col items-end gap-0.5">
+                      {prunedIds.includes(sample.id) && (
+                        <span className="bg-rose-900/80 text-rose-100 text-[7px] px-1 py-0.5 rounded-tl">
+                          DROPPED
+                        </span>
+                      )}
+                      {perSampleDeg[sample.id] >= CONSISTENCY_WARN_DEG && (
+                        <span className={`text-[7px] px-1 py-0.5 rounded-tl font-mono ${
+                          perSampleDeg[sample.id] >= CONSISTENCY_BLOCK_DEG
+                            ? 'bg-rose-900/80 text-rose-100'
+                            : 'bg-amber-900/80 text-amber-100'
+                        }`}>
+                          {`Δ ${perSampleDeg[sample.id].toFixed(2)}°`}
+                        </span>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <div className="p-1 flex flex-col gap-0.5 text-[7.5px] text-slate-400 font-mono tracking-tight border-t border-slate-800 leading-none">
                   <div className="flex justify-between">
-                    <span>X:{sample.pose?.[0]?.toFixed(0) ?? '0'}</span>
-                    <span>Y:{sample.pose?.[1]?.toFixed(0) ?? '0'}</span>
-                    <span>Z:{sample.pose?.[2]?.toFixed(0) ?? '0'}</span>
+                    <span>X:{samplePoseList(sample)?.[0]?.toFixed(0) ?? '0'}</span>
+                    <span>Y:{samplePoseList(sample)?.[1]?.toFixed(0) ?? '0'}</span>
+                    <span>Z:{samplePoseList(sample)?.[2]?.toFixed(0) ?? '0'}</span>
                   </div>
                 </div>
               </div>
@@ -531,7 +858,50 @@ const CalibrationOp: React.FC = () => {
           {/* Scrollable Results Area */}
           <div className="flex-1 overflow-y-auto custom-scrollbar p-2.5 flex flex-col gap-2.5">
             
-            {/* Hand-Eye Mount: selectable for a new session, locked once bound */}
+            {/* Board Live Detection: manual camera-wide mode switch (never auto-toggled) */}
+            <div className="flex flex-col gap-1 bg-slate-900 border border-slate-800 rounded px-2 py-1.5 shadow-inner">
+              <div className="flex justify-between items-center gap-1.5">
+                <div className="relative group flex items-center shrink-0">
+                  <span className="text-[9px] text-slate-500 uppercase tracking-wider font-bold cursor-help flex items-center gap-1">
+                    <Scan size={10} className={isBoardOverlay ? 'text-emerald-400' : ''} />
+                    <span>Board Overlay</span>
+                  </span>
+                  <Tooltip
+                    multiline
+                    side="bottom"
+                    align="start"
+                    maxWidthClass="max-w-[230px]"
+                    text="Detects the chessboard in the camera service and burns the corners into the live stream. Watch it in the Live Camera window (left sidebar). While ON, the depth stream, D2C alignment and workpiece follow are disabled. Leaving this page restores normal mode."
+                  />
+                </div>
+                <button
+                  onClick={handleToggleBoardOverlay}
+                  disabled={isOverlayBusy || isCapturing || isResampling}
+                  aria-label={isBoardOverlay ? 'Disable Live Board Detection' : 'Enable Live Board Detection'}
+                  className={`px-2 py-1 rounded text-[9px] font-mono font-bold uppercase tracking-wide transition-colors border ${
+                    isBoardOverlay
+                      ? 'text-emerald-400 bg-emerald-950/40 border-emerald-700/60 hover:bg-emerald-950/70'
+                      : 'text-slate-500 bg-slate-800/60 border-slate-700 hover:text-slate-200 hover:bg-slate-700/60'
+                  } ${isOverlayBusy ? 'opacity-40 cursor-wait' : ''}`}
+                >
+                  {isOverlayBusy ? '...' : isBoardOverlay ? 'ON' : 'OFF'}
+                </button>
+              </div>
+              {isBoardOverlay && (
+                <div className="flex justify-between items-center text-[8.5px] font-mono tracking-tight">
+                  <span className={boardDetection?.found ? 'text-emerald-400' : 'text-rose-400'}>
+                    {boardDetection === null
+                      ? 'DETECTING...'
+                      : boardDetection.found
+                        ? `${boardDetection.count} CORNERS`
+                        : 'NO BOARD FOUND'}
+                  </span>
+                  <span className="text-slate-500">DEPTH OFF</span>
+                </div>
+              )}
+            </div>
+
+            {/* Hand-Eye Mount: bound mount of the open session, click another to re-bind */}
             <div className="flex justify-between items-center gap-1.5 bg-slate-900 border border-slate-800 rounded px-2 py-1 shadow-inner">
               <div className="relative group flex items-center shrink-0">
                 <span className="text-[9px] text-slate-500 uppercase tracking-wider font-bold cursor-help">
@@ -541,7 +911,7 @@ const CalibrationOp: React.FC = () => {
                   multiline
                   text={
                     activeSession
-                      ? "Bound at session creation. Pick a different mount and press New to start a new session."
+                      ? "Mounting bound to the open session. Click the other one to re-bind this session (samples kept, solver must be re-run)."
                       : "Camera mounting for the next session created by New."
                   }
                   side="bottom"
@@ -550,13 +920,12 @@ const CalibrationOp: React.FC = () => {
               <div className="flex items-center gap-0.5 p-0.5 bg-slate-800/60 rounded-md border border-slate-700">
                 {(mountCatalog?.mounts || ['eye-to-hand', 'eye-in-hand']).map((m) => {
                   const bound = activeSession ? activeMount : selectedMount;
-                  const isBoundCurrent = !!activeSession;
                   const active = bound === m;
                   return (
                     <div key={m} className="relative group flex items-center">
                       <button
-                        disabled={isBoundCurrent}
-                        onClick={() => setSelectedMount(m)}
+                        disabled={isMountBusy || isRunning || isResampling || isCapturing}
+                        onClick={() => handleSelectMount(m)}
                         aria-label={MOUNT_LABELS[m] || m}
                         className={`px-1.5 py-1 rounded text-[9px] font-mono font-bold uppercase tracking-wide transition-colors border ${
                           active
@@ -564,7 +933,7 @@ const CalibrationOp: React.FC = () => {
                               ? 'text-indigo-300 bg-indigo-950/40 border-indigo-700/60'
                               : 'text-emerald-400 bg-emerald-950/40 border-emerald-700/60'
                             : 'text-slate-500 border-transparent hover:text-slate-200 hover:bg-slate-700/60'
-                        } ${isBoundCurrent ? 'cursor-not-allowed' : ''}`}
+                        } ${isMountBusy ? 'opacity-40 cursor-wait' : ''}`}
                       >
                         {MOUNT_ABBREV[m] || m}
                       </button>
@@ -581,14 +950,20 @@ const CalibrationOp: React.FC = () => {
               </div>
             </div>
 
-            {quality?.degenerate && (
-              <div className="relative group bg-rose-950/40 border border-rose-900/60 rounded px-2 py-1 text-[8.5px] text-rose-300 leading-tight cursor-help">
-                Rotation degenerate (axis coverage {quality.axis_coverage?.toFixed(2)}): result may be unreliable.
-                <Tooltip
-                  multiline
-                  text="All samples rotate about nearly the same axis, so the hand-eye transform is not uniquely observable. Capture waypoints with the flange rotated about clearly different axes."
-                  side="top"
-                />
+            {(blockingIssues.length > 0 || cautionIssues.length > 0) && (
+              <div
+                className={`rounded border px-2 py-1 text-[8.5px] leading-tight space-y-0.5 ${
+                  blockingIssues.length > 0
+                    ? 'bg-rose-950/40 border-rose-900/60 text-rose-300'
+                    : 'bg-amber-950/30 border-amber-900/50 text-amber-300'
+                }`}
+              >
+                {[...blockingIssues, ...cautionIssues].map((msg, i) => (
+                  <p key={i} className="flex gap-1">
+                    <span className="font-mono font-bold">!</span>
+                    <span>{msg}</span>
+                  </p>
+                ))}
               </div>
             )}
 
@@ -610,7 +985,7 @@ const CalibrationOp: React.FC = () => {
                       <span className="text-slate-500 text-[8.5px] cursor-help">Reproj</span>
                       <Tooltip text="Mean corner reprojection error in pixels" side="top" />
                     </div>
-                    <span className="text-xs font-mono text-emerald-400 font-bold leading-tight">
+                    <span className={`text-xs font-mono font-bold leading-tight ${levelColor(reprojPx, REPROJ_WARN_PX, REPROJ_FAIL_PX)}`}>
                       {reprojPx != null ? `${reprojPx.toFixed(2)} px` : 'N/A'}
                     </span>
                   </div>
@@ -619,17 +994,98 @@ const CalibrationOp: React.FC = () => {
                       <span className="text-slate-500 text-[8.5px] cursor-help">Residual</span>
                       <Tooltip text="Mean board-position residual of the fitted model in mm" side="top" />
                     </div>
-                    <span className="text-xs font-mono text-emerald-400 font-bold leading-tight">
+                    <span className={`text-xs font-mono font-bold leading-tight ${levelColor(reprojMm, RESIDUAL_WARN_MM, RESIDUAL_FAIL_MM)}`}>
                       {reprojMm != null ? `${reprojMm.toFixed(2)} mm` : 'N/A'}
                     </span>
                   </div>
                   <div className="flex flex-col text-right">
                     <span className="text-slate-500 text-[8.5px]">Rot Err</span>
-                    <span className="text-xs font-mono text-emerald-400 font-bold leading-tight">
+                    <span className={`text-xs font-mono font-bold leading-tight ${levelColor(meta?.rotation_error_deg, ROT_WARN_DEG, ROT_FAIL_DEG)}`}>
                       {meta?.rotation_error_deg != null ? `${meta.rotation_error_deg.toFixed(2)}°` : 'N/A'}
                     </span>
                   </div>
                 </div>
+
+                {/* Usability verdict: 重投影误差只说明样本自洽度, 能不能用看这份不确定度结论 */}
+                {confidence && gradeMeta && (
+                  <div className={`border rounded p-2 text-[9px] flex flex-col gap-1 ${gradeMeta.box}`}>
+                    <div className="flex items-center justify-between">
+                      <div className="relative group inline-flex items-center">
+                        <span className="text-slate-500 text-[8.5px] uppercase tracking-wider cursor-help">Extrinsic Uncertainty</span>
+                        <Tooltip
+                          multiline
+                          side="top"
+                          maxWidthClass="max-w-[260px]"
+                          text="Leave-one-out standard error of the solved camera extrinsic: how far this matrix moves when samples are dropped. Reprojection error alone does not prove the extrinsic is accurate."
+                        />
+                      </div>
+                      <span className={`px-1.5 py-0.5 rounded border text-[8.5px] font-mono font-bold ${gradeMeta.badge}`}>
+                        {gradeMeta.label}
+                      </span>
+                    </div>
+                    <div className="flex justify-between font-mono text-[8.5px] text-slate-300">
+                      <div className="relative group inline-flex">
+                        <span className={levelColor(stdT, STD_WARN_MM, STD_FAIL_MM)}>
+                          {stdT != null ? `+/-${stdT.toFixed(2)} mm` : '+/- N/A mm'}
+                        </span>
+                        <Tooltip
+                          multiline
+                          side="top"
+                          maxWidthClass="max-w-[260px]"
+                          text={`Rotation-invariant translation standard error${stdAxes ? ` (per flange axis: ${stdAxes.map(v => `${v.toFixed(2)} mm`).join(', ')})` : ''}. Per-axis values are display only; the verdict uses the invariant norm so it cannot depend on the tool orientation.`}
+                        />
+                      </div>
+                      <span className={levelColor(stdR, STD_WARN_DEG, STD_FAIL_DEG)}>
+                        {stdR != null ? `+/-${stdR.toFixed(3)}°` : '+/- N/A°'}
+                      </span>
+                      <span className="text-slate-500">
+                        {`${confidence.jackknife_fits || 0} re-fits`}
+                        {confidence.jackknife_refined === false ? ' [closed-form]' : ''}
+                      </span>
+                    </div>
+
+                    {/* 位姿链路自检: 求解参考系 + 臂读数与相机观测的相对转角失配 */}
+                    <div className="flex justify-between font-mono text-[8.5px] text-slate-400">
+                      <div className="relative group inline-flex items-center gap-1">
+                        <span>Pose ref:</span>
+                        <span className={poseRef?.frame === 'tcp' || poseRef?.frame === 'flange+tcp'
+                          ? 'text-amber-400' : 'text-slate-300'}>
+                          {poseRef?.frame ?? 'n/a'}
+                        </span>
+                        {robotCfg?.tool_index != null && <span>{`tool ${robotCfg.tool_index}`}</span>}
+                        {robotCfg?.user_index != null && <span>{`user ${robotCfg.user_index}`}</span>}
+                        <Tooltip
+                          multiline
+                          side="top"
+                          maxWidthClass="max-w-[260px]"
+                          text="'flange' means the hand-eye solve used the flange pose from forward kinematics of the joint feedback, which is independent of the pendant tool number. 'tcp' means it fell back to the Cartesian readout of the active tool: the extrinsic then starts at the tool tip and breaks when the tool changes."
+                        />
+                      </div>
+                      <span className="text-slate-500">
+                        {prunedIds.length > 0 ? `pruned ${prunedIds.map(i => `#${i}`).join(' ')}` : 'no pruning'}
+                      </span>
+                    </div>
+                    <div className="relative group inline-flex items-center gap-1 font-mono text-[8.5px]">
+                      <span className="text-slate-400">Arm vs camera:</span>
+                      {readout ? (
+                        <span className={levelColor(readout.median_deg, CONSISTENCY_WARN_DEG, CONSISTENCY_BLOCK_DEG)}>
+                          {`+/-${readout.median_deg?.toFixed(3)}° med`}
+                        </span>
+                      ) : (
+                        <span className="text-slate-500">N/A</span>
+                      )}
+                      {readout && (
+                        <span className="text-slate-500">{`+/-${readout.p90_deg?.toFixed(3)}° p90`}</span>
+                      )}
+                      <Tooltip
+                        multiline
+                        side="top"
+                        maxWidthClass="max-w-[280px]"
+                        text={`Relative rotation reported by the robot readout vs seen by the camera must be identical (conjugation preserves rotation angle), independent of any extrinsic. ${readout ? `Worst pair ${readout.worst_pair}: arm ${readout.worst_arm_deg?.toFixed(2)}° vs camera ${readout.worst_vision_deg?.toFixed(2)}° over ${readout.pairs} pairs.` : 'No comparable sample pair available.'} A large gap means the pose chain itself is untrustworthy.`}
+                      />
+                    </div>
+                  </div>
+                )}
 
                 {/* Camera Pose (XYZ RPY) */}
                 <div className="flex flex-col gap-1">
@@ -703,18 +1159,42 @@ const CalibrationOp: React.FC = () => {
               )}
             </div>
 
+            {/* 当前全局生效的标定 (发布按钮的作用对象) */}
+            <div className="relative group flex items-center justify-between px-1 text-[8.5px] text-slate-500 -mt-1.5">
+              <span className="cursor-help uppercase tracking-wider">
+                Active Calibration
+                <span className="ml-1.5 font-mono text-slate-300">
+                  {activeResult?.exists ? (MOUNT_ABBREV[activeResult.mount] || activeResult.mount) : 'NONE'}
+                </span>
+                {activeResult?.pose_frame === 'joint_offset_v2' && (
+                  <span className="ml-1.5 font-mono text-sky-300">Δq</span>
+                )}
+              </span>
+              <span className={`font-mono truncate max-w-[150px] ${activeResult?.pose_frame_warning ? 'text-amber-400' : ''}`}>
+                {activeResult?.exists ? (activeResult.source_session || activeResult.path) : '-'}
+              </span>
+              <Tooltip
+                multiline
+                side="top"
+                align="end"
+                maxWidthClass="max-w-[260px]"
+                text={`Globally effective result: ${activeResult?.exists ? activeResult.path : 'none'}. Publishing a session overwrites that file and rolls the previous one to calibration_result.prev.yaml.`
+                  + `${activeResult?.pose_frame_warning ? ` Pose frame mismatch: ${activeResult.pose_frame_warning}` : ''}`}
+              />
+            </div>
+
             <div className="flex gap-1.5 items-center">
               {/* 1. Capture Button */}
               <div className="relative group flex-1 flex items-center justify-center">
                 <button 
                   onClick={handleCapture}
-                  disabled={isCapturing || isRunning || isResampling || !activeSession}
+                  disabled={isCapturing || isRunning || isResampling || !activeSession || isRobotBlocked}
                   className="w-full h-8 bg-gradient-to-r from-slate-800 to-slate-900 hover:from-slate-700 hover:to-slate-800 text-slate-200 rounded-lg shadow transition-all flex items-center justify-center active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed border border-slate-700 hover:border-slate-600"
                 >
                   <Camera size={14} className={isCapturing ? "animate-pulse text-sky-400" : "text-slate-300"} />
                 </button>
                 <Tooltip
-                  text={isCapturing ? 'Capturing Sample...' : 'Capture Single Sample at Current Pose'}
+                  text={captureHint}
                   side="top"
                   align="start"
                 />
@@ -724,13 +1204,13 @@ const CalibrationOp: React.FC = () => {
               <div className="relative group flex-1 flex items-center justify-center">
                 <button 
                   onClick={handleResampleAndCalibrate}
-                  disabled={isRunning || isResampling || isCapturing || !activeSession || sessionData.samples.length < minSamples}
+                  disabled={isRunning || isResampling || isCapturing || !activeSession || isRobotBlocked || sessionData.samples.length < minSamples}
                   className="w-full h-8 bg-gradient-to-r from-slate-800 to-slate-900 hover:from-slate-700 hover:to-slate-800 text-slate-200 rounded-lg shadow transition-all flex items-center justify-center active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed border border-slate-700 hover:border-slate-600"
                 >
                   <RotateCw size={14} className={isResampling ? "animate-spin text-sky-400" : "text-slate-300"} />
                 </button>
                 <Tooltip
-                  text={isResampling ? 'Resampling Waypoints...' : 'Resample All Waypoints & Calibrate'}
+                  text={isRobotBlocked ? captureHint : (isResampling ? 'Resampling Waypoints...' : 'Resample All Waypoints & Calibrate')}
                   side="top"
                   align="center"
                 />
@@ -752,7 +1232,29 @@ const CalibrationOp: React.FC = () => {
                 />
               </div>
 
-              {/* 4. Delete Session Button */}
+              {/* 5. Publish As Active Calibration Button */}
+              <div className="relative group flex-1 flex items-center justify-center">
+                <button
+                  onClick={handlePublishResult}
+                  disabled={!sessionData.result || isResultActive || isRunning || isResampling || isPublishing}
+                  className="w-full h-8 bg-gradient-to-r from-slate-800 to-slate-900 hover:from-indigo-950/70 hover:to-slate-800 text-slate-200 rounded-lg shadow transition-all flex items-center justify-center active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed border border-slate-700 hover:border-indigo-800"
+                >
+                  <Upload size={14} className={isPublishing ? "animate-pulse text-indigo-400" : !isResultUsable ? "text-rose-400" : "text-slate-300"} />
+                </button>
+                <Tooltip
+                  multiline
+                  side="top"
+                  align="end"
+                  maxWidthClass="max-w-[240px]"
+                  text={isResultActive
+                    ? 'This result is already the active calibration'
+                    : !isResultUsable
+                      ? `Publish Anyway (${gradeMeta?.label || 'result flagged'}: reprojection ${reprojPx != null ? reprojPx.toFixed(2) : 'N/A'} px, uncertainty ${stdT != null ? `+/-${stdT.toFixed(1)} mm` : 'N/A'})`
+                      : 'Publish This Result As Active Calibration (overwrites configs/calib result, previous one is backed up)'}
+                />
+              </div>
+
+              {/* 6. Delete Session Button */}
               <div className="relative group flex-1 flex items-center justify-center">
                 <button 
                   onClick={() => handleDeleteSession()}

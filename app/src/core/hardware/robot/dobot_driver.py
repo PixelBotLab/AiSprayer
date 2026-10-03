@@ -38,6 +38,7 @@ class DobotDriver(BaseRobotDriver):
         self._cached_acc_j: float = 10.0
         self._cached_running_status: int = 0
         self._cached_hand_type: List[int] = [0, 0, 0, 0]   # 1008~1011 手系 (int8 x4)
+        self._cached_user_index: int = 0                    # 1012 当前用户坐标系索引
         self._cached_tool_index: int = 0                    # 1013 当前工具坐标系索引
         self._cached_run_queued_cmd: int = 0                # 1014 算法队列运行标志 / 当前执行段序号
         self._cached_velocity_ratio: int = 0                # 1016 关节速度比例 (%)
@@ -152,6 +153,8 @@ class DobotDriver(BaseRobotDriver):
                     if 'hand_type' in d.dtype.names:
                         ht = d['hand_type']
                         self._cached_hand_type = [int(x) for x in (ht.tolist() if hasattr(ht, 'tolist') else list(ht))]
+                    if 'user_index' in d.dtype.names:
+                        self._cached_user_index = int(d['user_index'].item())
                     if 'tool_index' in d.dtype.names:
                         self._cached_tool_index = int(d['tool_index'].item())
                     if 'run_queued_cmd' in d.dtype.names:
@@ -185,6 +188,7 @@ class DobotDriver(BaseRobotDriver):
             "error_status": self._cached_error_status,
             "tool_vector_actual": self._cached_pose or [0.0]*6,
             "hand_type": self._cached_hand_type,         # int8 x4，手系配置
+            "user_index": self._cached_user_index,       # 当前用户坐标系索引 (笛卡尔读数的表达式坐标系)
             "tool_index": self._cached_tool_index,       # 当前工具坐标系索引
             "run_queued_cmd": self._cached_run_queued_cmd,  # 算法队列当前执行段序号
             "velocity_ratio": self._cached_velocity_ratio,      # 1016 关节速度比例 (%)
@@ -294,6 +298,8 @@ class DobotDriver(BaseRobotDriver):
         rx_deg = math.degrees(lst[3])
         ry_deg = math.degrees(lst[4])
         rz_deg = math.degrees(lst[5])
+        # 逆解用的完整坐标+工具号必须可归因: 内部量纲是 mm+rad, 封包后 here 就是 mm+deg。
+        pose_mm_deg = [round(v, 1) for v in (lst[0], lst[1], lst[2], rx_deg, ry_deg, rz_deg)]
         try:
             # InverseSolution(x,y,z,rx,ry,rz,user,tool)
             res = self.dashboard.InverseSolution(lst[0], lst[1], lst[2], rx_deg, ry_deg, rz_deg, 0, self.tool_num)
@@ -301,8 +307,14 @@ class DobotDriver(BaseRobotDriver):
             response = parse_response(res)
             if response.ok and len(response.values) >= 6:
                 return True
-        except Exception:
-            pass
+            # “真的够不着”与“指令不被支持/参数不合协议”对外都只表现为 False, 不打日志就永远分不出来
+            # (实测: 10/10 全拒与“臂确实不在工件那侧”长得一模一样)。ErrorID 是控制器的原始依据。
+            logger.warning(
+                f"InverseSolution refused pose (mm, deg) {pose_mm_deg} with tool={self.tool_num}: "
+                f"ErrorID={response.error_id}, raw={response.raw!r}")
+        except Exception as e:
+            logger.warning(
+                f"InverseSolution query failed for pose (mm, deg) {pose_mm_deg} with tool={self.tool_num}: {e}")
         return False
 
     def _wait_motion_done(self, timeout: float = 600.0) -> bool:

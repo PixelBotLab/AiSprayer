@@ -7,6 +7,7 @@ import threading
 import traceback
 import multiprocessing as mp
 from logging.handlers import QueueHandler
+from typing import Optional
 
 import cv2
 import numpy as np
@@ -22,8 +23,25 @@ from core.vision import (
     depth_to_point_cloud,
 )
 from core.config import SprayerConfig
+from core.handeye import (
+    EYE_IN_HAND, pose_frame_mismatch, resolve_camera_extrinsic, resolve_result_mount,
+)
+from core.motion.kinematics import flange_pose_from_joints
 
 logger = logging.getLogger(__name__)
+
+# scan.params.yaml 里记录“这张图拍摄时相机靠什么定位”的块名。眼在手上时它是像素→基座
+# 映射的唯一依据, 写与读都只走本模块 (capture_hand_eye_provenance / read_scan_hand_eye)。
+HAND_EYE_BLOCK = "hand_eye"
+
+
+class HandEyeCalibrationError(ValueError):
+    """
+    手眼外参当场解不出来 (生效结果是眼在手上但缺法兰位姿 / 采集时的装法或口径对不上)。
+
+    故意做成 ValueError 的子类: 重建在子进程里跑, 异常名与文本是唯一能带回父进程的部分,
+    _reraise_worker_error 按名重建后 api 仍会把英文原因当成 400 报给界面。
+    """
 
 # open3d 0.19 (aarch64) 内置 PoissonRecon 的等值面提取是竞态的: 同一份输入连跑会得到不同面数
 # (71222/71223/71224), 偶发打印 "Failed to close loop" 并进一步升级为挂死或段错误,
@@ -128,6 +146,10 @@ def _reraise_worker_error(res: dict):
     logger.error(f"Reconstruction worker failed ({exc_type}): {err}\n{tb}")
     if exc_type == "FileNotFoundError":
         raise FileNotFoundError(err)
+    if exc_type == HandEyeCalibrationError.__name__:
+        # 自定义异常跳回父进程时只剩类型名字符串: 不显式按名重建就会落到 RuntimeError, 界面拿到 500,
+        # 而这三条拒用理由都是现场能自己修的 (接臂 / 重新采集 / 改回 E2H), 必须是 400。
+        raise HandEyeCalibrationError(err)
     if exc_type == "ValueError":
         raise ValueError(err)
     raise RuntimeError(f"Reconstruction worker error: {err}")
@@ -290,13 +312,201 @@ class InteractiveReconstructionService:
     def __init__(self):
         self.calib_dir = os.path.abspath(os.path.join(PROJECT_ROOT, "data", "calib"))
 
-    def get_latest_calibration(self) -> tuple[np.ndarray, np.ndarray | None, str]:
+    def _published_session_name(self) -> str | None:
+        """全局生效 (已发布) 的那一份结果来于哪个 session; 读不到返回 None。"""
+        try:
+            meta = (SprayerConfig().calib_data or {}).get("metadata", {}) or {}
+        except Exception:
+            return None
+        src = meta.get("source_data_dir")
+        return os.path.basename(str(src)) if src else None
+
+    @staticmethod
+    def _intrinsics_k(data: dict):
+        """标定结果里的相机内参 K (3x3) 或 None; 两种装法的结果文件写法相同。"""
+        cam = data.get("camera_params") or {}
+        k_list = cam.get("intrinsic_matrix")
+        return np.array(k_list, dtype=np.float64) if k_list else None
+
+    @classmethod
+    def _e2h_payload(cls, data: dict):
         """
-        Locates the latest hand-eye calibration result from data/calib/
-        Returns:
-            (T_camera_to_base_4x4_in_meters, intrinsics_k_3x3, source_description)
+        从一份 E2H 结果里取 (T_camera_to_base_4x4_米制, 内参 K_3x3 或 None, 误差_mm)。
+
+        没有基座系常量时返回 None (调用方跳过这个 session)。mm -> m 的换算不在这里做,
+        而是交给 core.handeye.resolve_camera_extrinsic —— 与生效结果、眼在手上复合走同一条
+        解析链, 避免同一个换算两处各写一遍而漂移。
         """
-        # 1. Search data/calib for latest calibration_result.yaml
+        T, _mount, _note = resolve_camera_extrinsic(data)
+        if T is None:
+            return None
+        err = (data.get("metadata", {}) or {}).get("reprojection_error_mm", 0.0)
+        return np.array(T, dtype=np.float64), cls._intrinsics_k(data), float(err)
+
+    @staticmethod
+    def read_scan_hand_eye(template_path: Optional[str]) -> dict:
+        """读 scan.params.yaml 里的 hand_eye 块; 模板、文件或块缺失都返回 {} (由调用方处置)。"""
+        if not template_path:
+            return {}
+        path = os.path.join(template_path, "scan.params.yaml")
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                pdata = yaml.safe_load(f) or {}
+        except Exception as e:
+            logger.warning(f"Could not read hand_eye from {path}: {e}")
+            return {}
+        block = pdata.get(HAND_EYE_BLOCK) or {}
+        return block if isinstance(block, dict) else {}
+
+    def capture_hand_eye_provenance(self) -> dict:
+        """
+        采集一张 scan 时写下“这张图的相机在哪由什么确定”的溯源信息 (由调用方写进 scan.params.yaml)。
+
+        眼在手上: 必须当场由关节反馈 FK 出法兰位姿 —— 那是这张图唯一的 3D 尺度来源, 事后补
+        不出来 (臂一动相机就动), 拿不到就直接失败: 静默拍一张“以后解不出外参”的图比拒绝贵得多。
+        眼在手外: 相机相对基座不动, 法兰位姿对成像没有意义, 但仍把装法与口径落盘, 供现场
+        核对“这张图是在哪种装法、哪个口径下采的”。
+
+        法兰位姿走的是与标定完全同源的那个 FK (FK(q+Δq), 校正口径), 否则采集与求解不同源,
+        复合时会错一整个 Δq 在杆臂上的投影 (实测 14.44mm / 1.59°)。
+        """
+        cfg = SprayerConfig()
+        mount = cfg.hand_eye_mount
+        joints = None
+        flange_pose = None
+        if mount == EYE_IN_HAND:
+            # 局部 import: 本模块还要在 spawn 子进程里跑, 不应把机械臂服务拖进重建 worker
+            from apps.robot.services.robot_service import robot_service
+            joints, reason = robot_service.get_current_joint()
+            flange_pose = flange_pose_from_joints(joints)
+            if flange_pose is None:
+                raise HandEyeCalibrationError(
+                    "Active calibration is eye-in-hand but the flange pose could not be "
+                    f"recorded at capture ({reason or 'forward kinematics unavailable'}). "
+                    "Connect the robot and capture again, or point spraying.calib_path at an "
+                    "eye-to-hand result")
+        rel_source = ""
+        if cfg.calib_path:
+            rel_source = os.path.relpath(cfg.calib_path, PROJECT_ROOT)
+        return {
+            "mount": mount,
+            "pose_frame_convention": cfg.pose_frame_convention,
+            "flange_pose_mm_deg": ([round(float(v), 4) for v in flange_pose]
+                                   if flange_pose else None),
+            "flange_joints_deg": ([round(float(v), 4) for v in list(joints)[:6]]
+                                  if joints else None),
+            "calibration_source": rel_source,
+        }
+
+    def _require_scan_flange_pose(self, template_path: Optional[str], cfg, mount: str) -> list:
+        """
+        眼在手上时从这张 scan 的 hand_eye 块里取采集时刻的法兰位姿; 任何对不上都当场拒绝。
+
+        三道闸缺一不可:
+        1. 没块 = 图是在支持眼在手之前 (或臂未连接) 采的 —— 没有“相机当时在哪”这个信息;
+        2. 采集时记的装法与生效结果不同 = 相机已经重新装过但沿用了旧图;
+        3. 采集时的口径与当前运行时口径不同 = 采完图后又改了 hardware.robot.joint_offsets_deg。
+        这三种情况都能“算得出数”, 但算出来的是错的落点 —— 只失败, 不回退。
+        """
+        if not template_path:
+            raise HandEyeCalibrationError(
+                "Active calibration is eye-in-hand: the camera pose is not a constant, so the "
+                "scan's capture-time flange pose is required. Pass the template directory.")
+        block = self.read_scan_hand_eye(template_path)
+        params_rel = os.path.relpath(os.path.join(template_path, "scan.params.yaml"),
+                                     PROJECT_ROOT)
+        cap_mount = block.get("mount")
+        if not cap_mount:
+            raise HandEyeCalibrationError(
+                f"{params_rel} records no '{HAND_EYE_BLOCK}' block, so this scan has no flange "
+                "pose to resolve the eye-in-hand camera against. Capture it again with the "
+                "robot connected (the arm-mounted camera must not move during capture)")
+        if cap_mount != mount:
+            raise HandEyeCalibrationError(
+                f"This scan was captured with the camera mounted '{cap_mount}' while the active "
+                f"calibration is '{mount}'; re-capture after remounting and re-calibrating")
+        cap_frame = block.get("pose_frame_convention")
+        if cap_frame != cfg.pose_frame_convention:
+            raise HandEyeCalibrationError(
+                f"This scan's flange pose was recorded in pose frame '{cap_frame}' but the "
+                f"runtime frame is '{cfg.pose_frame_convention}' "
+                "(hardware.robot.joint_offsets_deg changed after capture); re-capture the scan")
+        pose = block.get("flange_pose_mm_deg")
+        if not pose or len(list(pose)) < 6:
+            raise HandEyeCalibrationError(
+                f"{params_rel} has an eye-in-hand '{HAND_EYE_BLOCK}' block but no "
+                "flange_pose_mm_deg; capture the scan again with the robot connected")
+        return [float(v) for v in list(pose)[:6]]
+
+    def _resolve_active_calibration(self, cfg, template_path: Optional[str]):
+        """
+        把 spraying.calib_path 指向的**已发布**结果解析成本次要用的外参; 不可用时返回 None。
+
+        返回 None 只发生在“这份结果对本链路根本没用”时 (无数据 / 眼在手外但带不出常量),
+        那时才允许退回扫 data/calib 的历史兜底。眼在手上解不出法兰位姿是报错, 不是 None。
+        """
+        data = cfg.calib_data or {}
+        if not data:
+            return None
+        mount = resolve_result_mount(data, default=cfg.calib_mount)
+        flange_pose = (self._require_scan_flange_pose(template_path, cfg, mount)
+                       if mount == EYE_IN_HAND else None)
+        T, resolved_mount, note = resolve_camera_extrinsic(
+            data, flange_pose,
+            runtime_frame=cfg.pose_frame_convention,
+            runtime_offsets_deg=cfg.robot_joint_offsets_deg)
+        if T is None:
+            if mount == EYE_IN_HAND:
+                raise HandEyeCalibrationError(note)
+            return None
+        rel = (os.path.relpath(cfg.calib_path, PROJECT_ROOT) if cfg.calib_path
+               else "global config")
+        desc = f"{rel} ({resolved_mount}"
+        if flange_pose is not None:
+            desc += (f", flange pose from capture at "
+                     f"[{', '.join(f'{v:.1f}' for v in flange_pose[:3])} mm]")
+        if note:
+            desc += f" [WARNING: {note}]"
+        return np.array(T, dtype=np.float64), self._intrinsics_k(data), desc
+
+    def get_latest_calibration(self, template_path: Optional[str] = None
+                               ) -> tuple[np.ndarray, np.ndarray | None, str]:
+        """
+        取当前生效的手眼外参, 解析成 (T_base_camera 4x4 米制, 内参 K_3x3 或 None, 英文来源描述)。
+
+        两种装法都支持, 装法不靠猜 —— 由结果文件自己的 metadata.hand_eye_mount 决定 (判定与
+        SprayerConfig.hand_eye_mount 共用 resolve_result_mount), 所以切换只要在配置里改
+        spraying.calib_path; 眼在手上时本方法按该 scan 采集时刻的法兰位姿复合外参。
+
+        取哪一份: 先解 spraying.calib_path 指向的**已发布**结果 (机械臂运行时用的就是它,
+        交互页必须与之一致, 否则“点的那一下”与“走的那条”吃两套外参); 只有发布结果对本链路
+        完全不可用时, 才退回扫 data/calib/ 取最新的眼在手外 session (历史兜底)。
+
+        口径 (controller_v1 / joint_offset_v2) 与装法正交, 同样得对齐: 兜底那条链是按文件
+        自己挑结果的, 不经过 SprayerConfig 的加载守卫, 所以在此比一次 —— 优先取口径一致的
+        最新一份; 一份都不一致时沿用最新的, 但把不符写进 desc 让界面看得见 (E2H 运行期不消费
+        法兰位姿, 错的只是标定时被臂误差吸收掉的那一小部分, 所以只提示不阻断)。
+
+        :param template_path: 本次要映射的那张 scan 所在模板目录 (眼在手上时必需)
+        :raises HandEyeCalibrationError: 生效结果是眼在手上, 但这次解析不出相机位姿
+                 (图没记录法兰位姿 / 采集装法或口径与生效结果不符) —— 绝不静默降级。
+        """
+        cfg = SprayerConfig()
+
+        # 0. 已发布的生效结果 (两种装法通用); 它不可用时才继续往下扫 session
+        active = self._resolve_active_calibration(cfg, template_path)
+        if active is not None:
+            logger.info(f"Loaded calibration from the active result: {active[2]}")
+            return active
+
+        runtime_frame = cfg.pose_frame_convention
+        published_sess = self._published_session_name()
+        skipped_eye_in_hand: list[str] = []
+        stale_frame: list[str] = []
+        chosen = None             # 口径一致的最新一份 (优先)
+        fallback = None           # 口径不一致但可用的最新一份
+
+        # 1. Search data/calib for latest calibration_result.yaml (仅当没有可用发布结果)
         if os.path.exists(self.calib_dir):
             sessions = sorted(
                 [d for d in os.listdir(self.calib_dir) if os.path.isdir(os.path.join(self.calib_dir, d))],
@@ -304,43 +514,64 @@ class InteractiveReconstructionService:
             )
             for sess in sessions:
                 res_path = os.path.join(self.calib_dir, sess, "calibration_result.yaml")
-                if os.path.exists(res_path):
-                    try:
-                        with open(res_path, 'r', encoding='utf-8') as f:
-                            data = yaml.safe_load(f) or {}
-                        
-                        t_mat = data.get("T_base_camera") or data.get("T_camera_to_base")
-                        if t_mat:
-                            T = np.array(t_mat, dtype=np.float64)
-                            # Convert translation from mm to meters
-                            T[0, 3] /= 1000.0
-                            T[1, 3] /= 1000.0
-                            T[2, 3] /= 1000.0
-                            
-                            intr_k = None
-                            cam_params = data.get("camera_params", {})
-                            if "intrinsic_matrix" in cam_params:
-                                intr_k = np.array(cam_params["intrinsic_matrix"], dtype=np.float64)
-                                
-                            err = data.get("metadata", {}).get("reprojection_error_mm", 0.0)
-                            desc = f"{sess} (Reprojection Error: {err:.3f} mm)"
-                            logger.info(f"Loaded latest calibration from: {res_path} ({desc})")
-                            return T, intr_k, desc
-                    except Exception as e:
-                        logger.warning(f"Error reading calibration file {res_path}: {e}")
+                if not os.path.exists(res_path):
+                    continue
+                try:
+                    with open(res_path, 'r', encoding='utf-8') as f:
+                        data = yaml.safe_load(f) or {}
 
-        # 2. Fallback to SprayerConfig global config
-        try:
-            cfg = SprayerConfig()
-            if cfg.T_camera_to_base is not None:
-                T = np.array(cfg.T_camera_to_base, dtype=np.float64)
-                desc = f"Global config ({cfg.calib_path})"
-                logger.info(f"Loaded calibration from global config: {desc}")
-                return T, None, desc
-        except Exception as e:
-            logger.warning(f"Error reading global SprayerConfig calibration: {e}")
+                    # 显式识别装法: 不能只靠"没有 T_base_camera 这个键"隐式过滤,
+                    # 否则哪天给 EIH 结果补写一个兼容键, 就会被当成基座系外参静默用错。
+                    if resolve_result_mount(data) == EYE_IN_HAND:
+                        skipped_eye_in_hand.append(sess)
+                        logger.info(
+                            f"Skipping eye-in-hand calibration session '{sess}' "
+                            f"(fixed-scene mapping needs a constant T_base_camera)")
+                        continue
 
-        # 3. Fallback to Identity
+                    payload = self._e2h_payload(data)
+                    if payload is None:
+                        continue
+
+                    # 口径守卫: 本链路绕开了配置层的加载拦截, 必须自己比一次
+                    reason = pose_frame_mismatch(data, runtime_frame,
+                                                 cfg.robot_joint_offsets_deg)
+                    if reason:
+                        stale_frame.append(sess)
+                        logger.warning(
+                            f"Calibration session '{sess}' has a stale pose frame: {reason}")
+                        if fallback is None:
+                            fallback = (sess, *payload)
+                        continue
+
+                    chosen = (sess, *payload)
+                    break
+                except Exception as e:
+                    logger.warning(f"Error reading calibration file {res_path}: {e}")
+
+        cand = chosen if chosen is not None else fallback
+        if cand is not None:
+            sess, T, intr_k, err = cand
+            desc = f"{sess} (Reprojection Error: {err:.3f} mm)"
+            if chosen is None:
+                # 没有一份对得上口径: 用最新的, 但必须让界面看得见这个降级
+                desc += (f" [WARNING: no session matches the configured pose frame "
+                         f"'{runtime_frame}'; re-run the calibration: "
+                         f"{', '.join(stale_frame)}]")
+            if stale_frame and chosen is not None:
+                desc += (f" [skipped {len(stale_frame)} session(s) with a stale pose "
+                         f"frame: {', '.join(stale_frame)}]")
+            if skipped_eye_in_hand:
+                desc += (f" [skipped {len(skipped_eye_in_hand)} eye-in-hand "
+                         f"session(s): {', '.join(skipped_eye_in_hand)}]")
+            # 本流水线按"最新 session"取, 与已发布的全局槽位不是同一份时
+            # 必须能在界面上看出来, 否则现场会按错的标定调轨迹
+            if published_sess and published_sess != sess:
+                desc += f" [published global calibration: {published_sess}]"
+            logger.info(f"Loaded calibration from session '{sess}' ({desc})")
+            return T, intr_k, desc
+
+        # 2. Fallback to Identity
         logger.warning("No calibration result found. Falling back to Identity matrix.")
         return np.eye(4, dtype=np.float64), None, "Identity (Uncalibrated)"
 
@@ -455,7 +686,7 @@ class InteractiveReconstructionService:
                 logger.warning(f"Could not read intrinsics from scan.params.yaml: {e}")
 
         # 4. Load Hand-Eye Calibration
-        T_camera_to_base, calib_k, calib_desc = self.get_latest_calibration()
+        T_camera_to_base, calib_k, calib_desc = self.get_latest_calibration(template_path)
         if intrinsics_k is None and calib_k is not None:
             intrinsics_k = calib_k
             logger.info("Using camera intrinsics from calibration result")

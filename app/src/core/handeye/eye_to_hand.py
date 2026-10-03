@@ -14,8 +14,8 @@
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy.spatial.transform import Rotation as Rot
@@ -48,6 +48,8 @@ class EyeToHandSolution:
     euler_order: str
     sign_vector: Tuple[int, int, int]
     per_sample_errors_mm: List[float]
+    # 逐样本角点重投影误差 (px), 键是样本在传入列表里的下标; 与眼在手同一个裁剪口径。
+    per_sample_reprojection_px: Dict[int, float] = field(default_factory=dict)
 
 
 def _rotations(samples: Sequence[CalibSample], order: str, signs) -> Optional[List[np.ndarray]]:
@@ -140,8 +142,10 @@ def solve(samples: Sequence[CalibSample],
     R_flange_board, rotation_error = _mean_board_rotation_residual(samples, T_base_cam, R_bt_list)
 
     reproj_px = None
-    if K is not None:
-        reproj_px = _reprojection_error_px(samples, T_base_cam, t_off, R_bt_list, R_flange_board, K, D)
+    errs_px = per_sample_reprojection_px(samples, T_base_cam, t_off, R_bt_list,
+                                        R_flange_board, K, D)
+    if errs_px:
+        reproj_px = float(np.mean(list(errs_px.values())))
 
     return EyeToHandSolution(
         T_base_camera=T_base_cam,
@@ -153,6 +157,7 @@ def solve(samples: Sequence[CalibSample],
         euler_order=order,
         sign_vector=tuple(int(x) for x in signs),
         per_sample_errors_mm=errs,
+        per_sample_reprojection_px=errs_px,
     )
 
 
@@ -176,23 +181,26 @@ def _mean_board_rotation_residual(
         [rotation_angle_deg(R, R_fb) for R in T_fb_list]))
 
 
-def _reprojection_error_px(samples: Sequence[CalibSample], T_base_camera: np.ndarray,
-                           t_off: np.ndarray, R_bt_list: List[np.ndarray],
-                           R_flange_board: np.ndarray, K: np.ndarray,
-                           D: Optional[Sequence[float]]) -> Optional[float]:
+def per_sample_reprojection_px(samples: Sequence[CalibSample], T_base_camera: np.ndarray,
+                               t_off: np.ndarray, R_bt_list: List[np.ndarray],
+                               R_flange_board: np.ndarray, K: Optional[np.ndarray],
+                               D: Optional[Sequence[float]]) -> Dict[int, float]:
     """
-    真·重投影误差: 由标定结果反推板角点在相机系的三维位置, 投影回像素后与实测角点比较。
-    """
-    usable = [(s, R_bt) for s, R_bt in zip(samples, R_bt_list)
-              if s.obj_pts is not None and s.corners_px is not None]
-    if not usable:
-        return None
+    逐样本角点重投影误差 (px), 键为样本在传入列表中的下标。
 
-    errs = []
-    for s, R_bt in usable:
+    由标定结果反推板角点在相机系的三维位置, 投影回像素后与实测角点比较。没角点的
+    样本直接缺席结果; 无内参时返回空字典。上报的重投影均值与上层的残差裁剪共用这一处。
+    """
+    out: Dict[int, float] = {}
+    if K is None:
+        return out
+
+    for i, (s, R_bt) in enumerate(zip(samples, R_bt_list)):
+        if s.obj_pts is None or s.corners_px is None:
+            continue
         T_board_base = make_transform(R_bt @ R_flange_board, s.flange_xyz + R_bt @ t_off)
         T_camera_board = np.linalg.inv(T_base_camera) @ T_board_base
         projected = project_points(s.obj_pts, T_camera_board, K, D)
-        errs.append(float(np.mean(np.linalg.norm(
-            projected - s.corners_px.reshape(-1, 2), axis=1))))
-    return float(np.mean(errs)) if errs else None
+        out[i] = float(np.mean(np.linalg.norm(
+            projected - s.corners_px.reshape(-1, 2), axis=1)))
+    return out

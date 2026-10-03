@@ -5,12 +5,12 @@ import logging
 import cv2
 import numpy as np
 import yaml
-from scipy.spatial.transform import Rotation as R_tool
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../.."))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, "app/src"))
 
 from apps.interactive.reconstruction_service import reconstruction_service
+from core.handeye import euler_deg_from_rotation, tool_euler_deg_from_z_axis, tool_frame_from_z_axis
 from core.utils.fast_yaml import fast_yaml_load, fast_yaml_dump
 from core.config import sprayer_config
 
@@ -24,7 +24,7 @@ class ManualPathService:
     def __init__(self):
         self.template_group_dir = os.path.abspath(os.path.join(PROJECT_ROOT, "data", "template_group"))
         self._depth_cache = {}  # { template_name: (mtime, depth_map) }
-        self._calib_cache = None  # (last_check_time, T_cam_to_base, k_matrix, calib_desc)
+        self._calib_cache = None  # (template_name, last_check_time, T_cam_to_base, k_matrix, calib_desc)
 
     def _get_depth_map(self, template_name: str) -> np.ndarray:
         template_dir = os.path.join(self.template_group_dir, template_name)
@@ -51,13 +51,19 @@ class ManualPathService:
         self._depth_cache[template_name] = (mtime, depth_map)
         return depth_map
 
-    def _get_calibration(self):
+    def _get_calibration(self, template_name: str):
+        """
+        按模板解析外参: 眼在手上时每个模板吃自己那次拍摄记录的法兰位姿, 所以缓存必须按模板分。
+        同一模板 5s 内复用 (改了配置不必重启就能看得见, 但也不会每次磁盘往返)。
+        """
         now = time.time()
-        if self._calib_cache and (now - self._calib_cache[0] < 5.0):
-            return self._calib_cache[1], self._calib_cache[2], self._calib_cache[3]
+        cache = self._calib_cache
+        if cache and cache[0] == template_name and (now - cache[1] < 5.0):
+            return cache[2], cache[3], cache[4]
 
-        T, k, desc = reconstruction_service.get_latest_calibration()
-        self._calib_cache = (now, T, k, desc)
+        T, k, desc = reconstruction_service.get_latest_calibration(
+            os.path.join(self.template_group_dir, template_name))
+        self._calib_cache = (template_name, now, T, k, desc)
         return T, k, desc
 
     def sample_point_pose(
@@ -80,8 +86,8 @@ class ManualPathService:
         u = max(0, min(w - 1, int(u)))
         v = max(0, min(h - 1, int(v)))
 
-        # 1. Load Hand-Eye calibration and intrinsics (cached)
-        T_cam_to_base_m, k_matrix, calib_desc = self._get_calibration()
+        # 1. Load Hand-Eye calibration and intrinsics (cached per template)
+        T_cam_to_base_m, k_matrix, calib_desc = self._get_calibration(template_name)
         
         if k_matrix is not None:
             fx = float(k_matrix[0, 0])
@@ -165,18 +171,10 @@ class ManualPathService:
         p_tcp_base = p_surf_base + float(standoff_dist_mm) * normal_base
 
         # 6. Compute Tool 6D Orientation Euler Angles (deg)
+        #    工具 +Z = 指向工件内部 (表面法向的反向); 姿态构造口径单一收在 core.handeye,
+        #    与实时视频指向 / 自动航点共用同一套 'xyz' 内禀约定与自旋参考轴
         z_tool = -normal_base / (np.linalg.norm(normal_base) + 1e-6)
-        x_ref = np.array([0.0, 0.0, 1.0], dtype=np.float32)
-        if abs(np.dot(z_tool, x_ref)) > 0.92:
-            x_ref = np.array([1.0, 0.0, 0.0], dtype=np.float32)
-            
-        y_tool = np.cross(z_tool, x_ref)
-        y_tool /= (np.linalg.norm(y_tool) + 1e-6)
-        x_tool = np.cross(y_tool, z_tool)
-        x_tool /= (np.linalg.norm(x_tool) + 1e-6)
-
-        r_mat = np.column_stack((x_tool, y_tool, z_tool))
-        euler_deg = R_tool.from_matrix(r_mat).as_euler('xyz', degrees=True)
+        euler_deg = tool_euler_deg_from_z_axis(z_tool)
 
         # 7. Compute Physically Accurate 2D Normal vector projection on image (matches verify_tab.py)
         # In camera frame, TCP point is P_tcp_cam = P_surf_cam + standoff * normal_cam
@@ -314,30 +312,11 @@ class ManualPathService:
             # Tool Z points opposite to surface normal into the target
             z_tool = -norm_base / (np.linalg.norm(norm_base) + 1e-6)
 
-            if prev_x_tool is None:
-                x_ref = np.array([0.0, 0.0, 1.0], dtype=np.float64)
-                if abs(np.dot(z_tool, x_ref)) > 0.92:
-                    x_ref = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-            else:
-                x_ref = prev_x_tool
-
-            y_tool = np.cross(z_tool, x_ref)
-            y_len = np.linalg.norm(y_tool)
-            if y_len > 1e-6:
-                y_tool /= y_len
-            else:
-                y_tool = np.array([0.0, 1.0, 0.0], dtype=np.float64)
-
-            x_tool = np.cross(y_tool, z_tool)
-            x_len = np.linalg.norm(x_tool)
-            if x_len > 1e-6:
-                x_tool /= x_len
-            else:
-                x_tool = np.array([1.0, 0.0, 0.0], dtype=np.float64)
-            prev_x_tool = x_tool
-
-            r_mat = np.column_stack((x_tool, y_tool, z_tool))
-            euler_deg = R_tool.from_matrix(r_mat).as_euler('xyz', degrees=True)
+            # 切向一致 (Tangent-Consistent Frame): 用**上一点的 x_tool** 作自旋参考轴,
+            # 否则相邻点的 Rz 会整片跳 180°, 连带把逆解翻到另一个分支
+            r_mat = tool_frame_from_z_axis(z_tool, x_ref=prev_x_tool)
+            euler_deg = euler_deg_from_rotation(r_mat)
+            prev_x_tool = r_mat[:, 0]
 
             p_surf_base = np.array(wp["surface_point_base_mm"], dtype=np.float64)
             standoff = float(wp.get("standoff_distance_mm", 150.0))
@@ -408,7 +387,7 @@ class ManualPathService:
         # Compute dense 3D surface points along each path segment using depth map
         try:
             depth_map = self._get_depth_map(template_name)
-            T_cam_to_base_m, k_matrix, _ = self._get_calibration()
+            T_cam_to_base_m, k_matrix, _ = self._get_calibration(template_name)
             if k_matrix is not None:
                 fx, fy = float(k_matrix[0, 0]), float(k_matrix[1, 1])
                 cx, cy = float(k_matrix[0, 2]), float(k_matrix[1, 2])

@@ -64,6 +64,37 @@ logging.basicConfig(
 # Silence watchfiles info logs (which spam the console due to OrbbecSDK.log.txt changing)
 logging.getLogger("watchfiles.main").setLevel(logging.WARNING)
 
+# 页面状态类接口是亚秒级只读轮询 (角点检测 800ms、臂状态 500ms/3s), 全量记进 access 日志
+# 会把真正的动作与报警冲走。这里只静音“这些路径上的 2xx GET”: 任何 POST (运动/开关喷)
+# 与任何非 2xx (detail 里带英文报错) 一律保留, 出事时日志仍然是完整的。
+_POLLING_GET_PATHS = (
+    "/api/robot/state",         # 臂状态 (主推通道是 /api/robot/ws 广播, 部分页仍在轮询)
+    "/api/camera/corners",      # 标定板角点检测结果
+    "/api/camera/stream_info",  # 推流信息
+)
+
+
+class PollingAccessFilter(logging.Filter):
+    """按路径过滤高频只读轮询的访问日志行 (不靠正则套整个文本, 免得过匹配)。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.name != "uvicorn.access":
+            return True
+        args = record.args
+        # uvicorn 的 args = (client_addr, method, full_path, http_version, status_code);
+        # 形状一旦对不上就照常放行 —— 宁可日志吵, 也不能漏掉异常。
+        if not isinstance(args, tuple) or len(args) < 5:
+            return True
+        method, path, status = str(args[1]), str(args[2]), str(args[4])
+        if method != "GET" or not status.startswith("2"):
+            return True
+        return not path.split("?")[0].startswith(_POLLING_GET_PATHS)
+
+
+_polling_filter = PollingAccessFilter()
+console_handler.addFilter(_polling_filter)
+file_handler.addFilter(_polling_filter)
+
 from services.log_service import ws_log_handler, log_service
 logging.getLogger().addHandler(ws_log_handler)
 

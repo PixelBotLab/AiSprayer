@@ -13,7 +13,10 @@ import trimesh
 from core.utils.fast_yaml import fast_yaml_load
 
 from apps.interactive.manual_path_service import manual_path_service
-from apps.interactive.reconstruction_service import reconstruction_service
+from apps.interactive.reconstruction_service import (
+    HandEyeCalibrationError,
+    reconstruction_service,
+)
 from apps.interactive.sam_service import sam_service
 from core.config import SprayerConfig, sprayer_config
 from core.vision import (
@@ -49,7 +52,7 @@ class AutoPathService:
         mesh = self._load_mesh(template_dir)
         masks_data = self._load_masks(template_dir)
         camera_k, image_size = self._load_intrinsics(template_dir)
-        T_camera_to_base, calib_k, calib_desc = self._load_hand_eye()
+        T_camera_to_base, calib_k, calib_desc = self._load_hand_eye(template_dir)
         if camera_k is None and calib_k is not None:
             camera_k = calib_k
             logger.info("Using camera K from calibration result (%s)", calib_desc)
@@ -169,8 +172,17 @@ class AutoPathService:
         return k, image_size
 
     @staticmethod
-    def _load_hand_eye() -> tuple[Optional[np.ndarray], Optional[np.ndarray], str]:
-        T, calib_k, desc = reconstruction_service.get_latest_calibration()
+    def _load_hand_eye(template_dir: str) -> tuple[Optional[np.ndarray], Optional[np.ndarray], str]:
+        """
+        取本模板要用的外参 (眼在手上时按这张 scan 记录的法兰位姿复合)。
+
+        外参解不出来当使用错误报回 (400), 而不是抛一个 500: 那三条拒用理由 (没记录法兰位姿 /
+        采集装法不符 / 采集后改了偏移) 都是现场能自己修的。
+        """
+        try:
+            T, calib_k, desc = reconstruction_service.get_latest_calibration(template_dir)
+        except HandEyeCalibrationError as e:
+            raise AutoPathServiceError(str(e)) from e
         if desc.startswith("Identity") or T is None:
             return None, calib_k, desc
         T = np.asarray(T, dtype=np.float64)

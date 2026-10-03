@@ -58,6 +58,21 @@ chessboard_rotation_deg:
 - -87.58436341590664
 - 108.4578443466997
 metadata:
+  confidence:
+    blocking: []
+    extrinsic_std_axes_mm:
+    - 1.838
+    - 1.175
+    - 1.818
+    extrinsic_std_rotation_deg: 0.1319
+    extrinsic_std_translation_mm: 2.84
+    grade: CAUTION
+    jackknife_fits: 14
+    jackknife_refined: true
+    usable: true
+    warnings:
+    - Reprojection error 2.83 px is above the 1.5 px target.
+    - Extrinsic uncertainty +/-2.8 mm, +/-0.13 deg (leave-one-out estimate).
   data_quality:
     axis_coverage: 0.714
     degenerate: false
@@ -66,8 +81,53 @@ metadata:
     translation_span_mm: 250.0
   hand_eye_mount: eye-to-hand
   pose_angle_unit: deg
+  pose_reference:
+    flange_from_joints: 0
+    flange_recorded: 0
+    frame: tcp
+    tcp_readout_fallback: 27
+  pruned_sample_ids: []
+  readout_consistency:
+    max_deg: 1.412
+    median_deg: 0.285
+    p90_deg: 0.804
+    pairs: 322
+    per_sample_deg:
+      1: 0.82
+      2: 0.71
+      3: 0.65
+      4: 0.73
+      5: 0.89
+      6: 1.41
+      7: 0.57
+      8: 1.04
+      9: 0.87
+      10: 1.0
+      11: 1.27
+      12: 1.03
+      13: 0.85
+      14: 0.96
+      15: 0.9
+      16: 0.82
+      17: 0.88
+      18: 0.82
+      19: 1.01
+      20: 0.99
+      21: 1.01
+      22: 1.04
+      23: 1.4
+      24: 0.92
+      25: 0.94
+      26: 1.36
+      27: 1.41
+    worst_arm_deg: 45.268
+    worst_pair: '#6<->#27'
+    worst_vision_deg: 46.68
   reprojection_error_mm: 1.9499285787878153
   reprojection_error_px: 2.831529759249394
+  robot_configuration:
+    tool_index: null
+    user_index: null
   rotation_error_deg: 0.4577553008839739
   samples_total: 27
   samples_used: 27
@@ -78,5 +138,5 @@ metadata:
     - 1
     - 1
   source_data_dir: /Users/carl/robots/AiSprayer/data/calib/calib_20260812_230221
-  timestamp: '2026-09-05 18:57:02'
+  timestamp: '2026-10-02 14:09:11'
   translation_error_mm: 1.9499285787878153

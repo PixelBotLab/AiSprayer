@@ -11,7 +11,7 @@ sys.path.insert(0, os.path.join(PROJECT_ROOT, "app/src"))
 
 from apps.calib.services.calibration_service import calibration_service
 from core.handeye import (
-    EYE_TO_HAND, MIN_SAMPLES, MOUNTS, RECOMMENDED_SAMPLES,
+    MIN_SAMPLES, MOUNTS, RECOMMENDED_SAMPLES,
 )
 
 calib_router = APIRouter(prefix="/api/calib", tags=["Calibration"])
@@ -25,10 +25,32 @@ def list_sessions():
 def list_mounts():
     return {
         "mounts": list(MOUNTS),
-        "default": calibration_service.config.get("calib", {}).get("mount", EYE_TO_HAND),
+        # 默认装法走运行时配置 (含 SQLite 覆盖), 与 create_session 回落用的是同一个值
+        "default": calibration_service.sprayer.calib_mount,
         "min_samples": dict(MIN_SAMPLES),
         "recommended_samples": dict(RECOMMENDED_SAMPLES),
     }
+
+@calib_router.get("/active")
+def get_active_result():
+    """Currently published (globally effective) calibration, for the "what will be replaced" prompt."""
+    return {"active": calibration_service.get_active_result()}
+
+@calib_router.post("/sessions/{session_id}/publish")
+def publish_session_result(session_id: str):
+    """
+    Publish a solved session result as the globally effective hand-eye calibration.
+
+    Only the global slot (configs/calib/calibration_result.yaml) is overwritten and the
+    previous one is rolled to calibration_result.prev.yaml; session folders are untouched.
+    """
+    try:
+        outcome = calibration_service.publish_result(session_id)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to publish calibration result: {e}")
+    return {"status": "ok", **outcome}
 
 class NewSessionReq(BaseModel):
     mount: Optional[str] = None
@@ -56,11 +78,29 @@ def get_session(session_id: str):
     data = calibration_service.get_session_data(session_id)
     return data
 
+class SetMountReq(BaseModel):
+    mount: str
+
+@calib_router.put("/sessions/{session_id}/mount")
+def set_session_mount(session_id: str, req: SetMountReq):
+    """
+    Re-bind an existing session to another camera mounting (samples are kept, the solver
+    must be re-run because the stored result was computed for the previous mounting).
+    """
+    try:
+        outcome = calibration_service.set_session_mount(session_id, req.mount)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": "ok", **outcome}
+
 @calib_router.post("/sessions/{session_id}/samples")
 def add_sample(session_id: str):
     try:
         count = calibration_service.capture_sample(session_id)
     except Exception as e:
+        logger.error(f"Failed to capture sample for session '{session_id}': {e}", exc_info=True)
         raise HTTPException(status_code=400, detail=str(e))
     return {"samples_count": count}
 

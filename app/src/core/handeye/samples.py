@@ -2,21 +2,30 @@
 """
 标定样本模型与数据质量评估 (两种安装共用)。
 
-两种安装共用同一套清洗与质量评估, 因为它们的运动学约束是同一条: 相机观测到的
-标定板位移, 必须与机器人法兰位移在刚体运动学的允许范围内一致。
+两种安装共用同一套质量评估: 样本的空间/姿态多样性决定解的可观测性, 而刚体约束
+U·X·V = Z 本身就是免费的一致性校验 —— 相机观测与机械臂位姿读数只要互相矛盾,
+再怎么优化都解不出可信外参。
   eye-to-hand: 标定板随法兰运动, 静止相机观测其位移;
   eye-in-hand: 标定板固定, 相机随法兰运动, 板在相机系下的观测反向平移。
 差别只在旋转轴覆盖度的重要性: AX=XB 的可观测性让眼在手上的旋转多样性权重更高。
+
+粗差裁剪必须在**首轮拟合之后**做 (prune_outliers): 拿拟合前的运动学包络做三角
+不等式时, 区间要按“法兰到板的作用距离”张开 (眼在上 300~600mm), 对真实采样偏差
+完全不敏感, 实测一批 12px 的数据一帧都剔不掉。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from scipy.spatial.transform import Rotation as Rot
 
 from .geometry import DOBOT_EULER_SEQ, rotation_angle_deg, rotation_axis_coverage
+
+# 两帧之间至少要转这么多度, 这一对才拿来判定一致性: 相对转角接近 0 时, 旋转轴方向
+# 本身是数值病态的, 零点几度的差值没有物理意义。
+_MIN_PAIR_ROTATION_DEG = 5.0
 
 
 @dataclass
@@ -30,7 +39,6 @@ class CalibSample:
     corners_px: Optional[np.ndarray] = None
     image_file: str = ""
     joints_deg: Optional[Sequence[float]] = None
-    pose_diag_deg: Optional[float] = None
     obj_pts: Optional[np.ndarray] = field(default=None, repr=False)
 
     @property
@@ -54,56 +62,114 @@ class CalibSample:
         return self.T_base_flange[:3, :3]
 
 
-def clean_samples(samples: Sequence[CalibSample],
-                  threshold: float = 0.05,
-                  motion_envelope_mm: float = 500.0,
-                  min_reliable_dist_mm: float = 10.0,
-                  log_callback=None) -> List[CalibSample]:
+def readout_rotation_consistency(samples: Sequence[CalibSample]) -> Optional[dict]:
     """
-    剔除相机观测位移与机器人运动学不一致的异常样本 (两种安装共用)。
+    机械臂笛卡尔姿态读数与相机观测是否互相矛盾 (两种装法共用, 不依赖任何待标定外参)。
 
-    判据不再直接用 d_c / d_r ≈ 1: 那只对"纯平移"成立。刚体上偏离法兰原点的点,
-    在法兰转动 θ 时额外移动最多 2·sin(θ/2)·|t|, 其中 |t| 是该点到法兰原点的距离
-    (眼在手外是板相对法兰的 TCP 偏移, 眼在手上是板相对法兰的作用距离)。老实现因此
-    把旋转丰富的样本一律误判为异常, 只能用 0.80~1.20 的经验宽容带打补丁。
+    原理: 刚体约束 U_i·X·V_i = Z (X 为外参常量, Z 为该装法下的常量位姿) 展开即
+        V_i⁻¹·V_j = Z⁻¹·(U_i⁻¹·U_j)·Z
+    右边是左边的共轭, 而**共轭不改变旋转角** —— 所以任意两帧之间, “臂说自己转了多少度”
+    与“相机看到板转了多少度”必须严格相等。该等式与 X、Z、tool 偏置、基座/用户坐标系
+    约定全部无关, 是唯一不需要先标定就能做的判决实验。
 
-    这里用三角不等式给出随转角自动张开的一致区间:
-        |d_r - d_rot| · (1-threshold)  <=  d_c  <=  (d_r + d_rot) · (1+threshold)
-    既能容忍真实的大角度样本, 又能抓住角点检测错乱这类粗差。
+    差值明显大于零说明位姿链路本身不可信 (法兰姿态读数不准 / 相机在支架上微动 / 标定板
+    被碰过), 这批数据怎么解都解不出好外参, 应当直接拒收而不是送去重解。
+
+    返回 None 表示样本不足以成对比较; `per_sample_deg` 按样本号给出每个样本参与过的
+    最大失配, 供界面逐行标红。
     """
-    if not samples:
-        return []
+    usable = [s for s in samples
+              if s.T_base_flange is not None and s.T_camera_board is not None]
+    if len(usable) < 2:
+        return None
+
+    diffs: List[float] = []
+    per_sample: Dict[int, float] = {}
+    worst = (0.0, usable[0].sample_id, usable[1].sample_id, 0.0, 0.0)
+    for i in range(len(usable) - 1):
+        for j in range(i + 1, len(usable)):
+            a, b = usable[i], usable[j]
+            arm = rotation_angle_deg(a.T_base_flange[:3, :3], b.T_base_flange[:3, :3])
+            vis = rotation_angle_deg(a.T_camera_board[:3, :3], b.T_camera_board[:3, :3])
+            if max(arm, vis) < _MIN_PAIR_ROTATION_DEG:
+                continue
+            d = abs(arm - vis)
+            diffs.append(d)
+            for sid in (a.sample_id, b.sample_id):
+                per_sample[sid] = max(per_sample.get(sid, 0.0), d)
+            if d > worst[0]:
+                worst = (d, a.sample_id, b.sample_id, arm, vis)
+    if not diffs:
+        return None
+
+    arr = np.sort(np.array(diffs, dtype=np.float64))
+    return {
+        "median_deg": round(float(np.median(arr)), 3),
+        "p90_deg": round(float(arr[min(int(0.9 * len(arr)), len(arr) - 1)]), 3),
+        "max_deg": round(float(arr[-1]), 3),
+        "pairs": int(len(arr)),
+        "worst_pair": f"#{worst[1]}<->#{worst[2]}",
+        "worst_arm_deg": round(float(worst[3]), 3),
+        "worst_vision_deg": round(float(worst[4]), 3),
+        "per_sample_deg": {int(k): round(float(v), 2) for k, v in per_sample.items()},
+    }
+
+
+def prune_outliers(samples: Sequence[CalibSample],
+                   errors: Sequence[Optional[float]],
+                   max_error: float,
+                   unit: str,
+                   min_keep: int,
+                   max_drop_ratio: float = 0.25,
+                   log_callback=None) -> Tuple[List[CalibSample], List[int]]:
+    """
+    按“每个样本自己的拟合残差”裁剪粗差, 返回 (保留样本, 被剔样本号)。
+
+    用的已经是拟合出的解对每个样本的残差, 判据比任何先验包络都直接: 拿运动学包络做
+    三角不等式时, 区间必须按“法兰到板的作用距离”张开 (眼在上 300~600mm), 对真实采样
+    偏差完全不敏感 —— 实测一批 12px 的数据一帧都剔不掉。因此必须在首轮拟合之后做。
+
+    只重解一次, 不做迭代剪枝 —— 按残差反复剔除会把可观测性一起剪掉 (旋转轴覆盖度急剧下降)。
+
+    只能剪少数粗差, 不能拿它整改整批坏数据:
+    - 残差为 None 的样本 (无角点可比较) 不判不剪: 没有证据就不能当粗差处理;
+    - 没人超阈、或保留数低于 min_keep 时不剪;
+    - 超阈样本超过 max_drop_ratio 比例时也不剪 —— 那是整批系统性不自洽 (位姿链路或采样
+      布局问题), 剪到凑巧能拟合是造假结果而不是修好结果, 应当让判决说 NOT_USABLE。
+      实测一批 29 帧平均 12px 的数据按 8px 上限会剪掉 21 帧, 剩下 8 帧旋转轴退化,
+      重解反而发到 88px / 米级不确定度。
+    """
+    if len(errors) != len(samples):
+        raise ValueError(f"errors ({len(errors)}) must align with samples ({len(samples)})")
 
     def log(msg: str) -> None:
         if log_callback:
             log_callback(msg)
 
-    base = samples[0]
-    kept = [base]
-    log(f"  [KEEP] Sample {base.sample_id}: Reference Base")
+    keep_idx = [i for i, e in enumerate(errors) if e is None or float(e) <= max_error]
+    dropped_n = len(samples) - len(keep_idx)
+    if dropped_n == 0:
+        return list(samples), []
+    if len(keep_idx) < min_keep:
+        log(f"  [SKIP] {dropped_n} sample(s) exceed the {max_error:.2f}{unit} limit, but only "
+            f"{len(keep_idx)} would remain (below the {min_keep} needed to solve); keeping all")
+        return list(samples), []
+    if dropped_n > max_drop_ratio * len(samples):
+        log(f"  [SKIP] {dropped_n}/{len(samples)} samples exceed the {max_error:.2f}{unit} "
+            f"limit: the batch is systematically inconsistent, pruning would remove the "
+            f"evidence instead of the blunder; keeping all and reporting the verdict")
+        return list(samples), []
 
-    for s in samples[1:]:
-        d_r = float(np.linalg.norm(s.flange_xyz - base.flange_xyz))
-        d_c = float(np.linalg.norm(s.board_in_camera - base.board_in_camera))
-
-        if d_r < min_reliable_dist_mm:
+    kept: List[CalibSample] = []
+    dropped: List[int] = []
+    for i, s in enumerate(samples):
+        if i in keep_idx:
             kept.append(s)
-            continue
-
-        theta = np.radians(rotation_angle_deg(base.rotation, s.rotation))
-        d_rot = 2.0 * abs(np.sin(theta / 2.0)) * motion_envelope_mm
-
-        lo = max(0.0, d_r - d_rot) * (1.0 - threshold)
-        hi = (d_r + d_rot) * (1.0 + threshold)
-
-        if lo <= d_c <= hi:
-            kept.append(s)
-            log(f"  [KEEP] Sample {s.sample_id}: observed {d_c:.1f}mm vs kinematic "
-                f"{d_r:.1f}mm (+/-{d_rot:.1f}mm rotation term)")
         else:
-            log(f"  [DROP] Sample {s.sample_id}: observed {d_c:.1f}mm outside kinematic "
-                f"band [{lo:.1f}, {hi:.1f}]mm")
-    return kept
+            dropped.append(s.sample_id)
+            log(f"  [DROP] Sample {s.sample_id}: own residual {float(errors[i]):.2f}{unit} "
+                f"exceeds the {max_error:.2f}{unit} limit")
+    return kept, dropped
 
 
 def evaluate_data_quality(samples: Sequence[CalibSample], mount: str) -> dict:

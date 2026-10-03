@@ -137,11 +137,15 @@ class FollowService:
         """
         相机轴 → 基座轴。优先手眼标定结果，退路才是配置常量 —— **用哪个必须能被看见**，
         因为两者给出的是不同的平移方向映射，悄悄降级比直接失败更危险。
+
+        外参只读 follow 侧那一份 (follow.runtime.calib_path)，不读全局生效结果：跟随时相机
+        必须相对基座不动 (eye-to-hand)，而交互页现在也支持眼在手上；读同一个键会让“切装法”
+        顺带把跟随弄成降级状态。
         """
         self._R_cb = None
         self._R_cb_source = ""
         try:
-            T = sprayer_config.T_camera_to_base
+            T = sprayer_config.follow_camera_to_base
         except Exception as e:                                   # 解析失败也要能说清是哪儿失败
             self._R_cb_source = f"标定结果读取异常：{e}"
             logger.warning("%s", self._R_cb_source)
@@ -156,8 +160,8 @@ class FollowService:
                 self._R_cb_source = f"标定矩阵不可用：{e}"
                 logger.warning("%s", self._R_cb_source)
         else:
-            self._R_cb_source = ("标定结果缺失，或当前安装是 eye-in-hand（相机位姿不是常量，"
-                                 "不能当固定轴映射用）")
+            self._R_cb_source = ("follow.runtime.calib_path 那一份结果缺失、或它装法是 "
+                                 "eye-in-hand（相机位姿不是常量，不能当固定轴映射用）")
         try:
             self._R_cb = rotation_camera_to_base_fallback(self._arm["fallback_euler_deg"])
             self._R_cb_source += " → 已退回配置常量 follow.arm.camera_to_base_fallback_euler_deg（降级，方向会有偏差）"
@@ -648,13 +652,17 @@ class FollowService:
 
     def _get_kin(self):
         with self._kin_lock:
-            if self._kin is None:
-                try:
-                    from core.motion.kinematics import CR5Kinematics
-                    self._kin = CR5Kinematics()
-                except Exception as e:
-                    logger.error("CR5 运动学初始化失败: %s", e)
-                    return None
+            # 走全项目唯一的装配入口: 关节零位偏移 Δq 只在一处从配置读出并注入运动学内核,
+            # follow 的 IK 输出因此与标定的 FK 口径同源 (偏移全零时与改造前逐位相同)。
+            # 配置改过则重建实例, 不让 33 Hz 发射线程继续吃旧口径。
+            from core.motion.kinematics import kinematics_from_config
+            try:
+                if self._kin is None or not self._kin.matches_joint_offsets(
+                        sprayer_config.robot_joint_offsets_deg):
+                    self._kin = kinematics_from_config()
+            except Exception as e:
+                logger.error("CR5 运动学初始化失败: %s", e)
+                return None
             return self._kin
 
     # -------------------------------------------------------------- 33 Hz 发射

@@ -385,17 +385,24 @@ class CameraService:
             "calibration_mode": False
         }
 
-    def set_calibration_mode(self, enabled: bool, rows: int = 12, cols: int = 9, square_size_mm: float = 15.0) -> bool:
+    def set_calibration_mode(
+        self, enabled: bool, rows: int = 12, cols: int = 9, square_size_mm: float = 15.0,
+        board_type: str = "chessboard", draw_corners: bool = True) -> bool:
         """
         动态切换标定模式 / 常规模式。
+
+        rows/cols 是标定板**节点总数** (C++ 侧按 cols-1 x rows-1 求 inner pattern)，
+        必须和物理板一致，否则检测永远失败且画面没有任何提示。
+        draw_corners=False 只跑检测、不把角点烧进推流。
         """
         try:
             payload = {
                 "enabled": enabled,
+                "board_type": board_type,
                 "rows": rows,
                 "cols": cols,
                 "square_size_mm": square_size_mm,
-                "draw_corners": True
+                "draw_corners": draw_corners
             }
             r = requests.post(f"{CPP_BASE_URL}/api/v1/camera/calibration_mode", json=payload, timeout=1.5)
             if r.status_code == 200:
@@ -405,24 +412,6 @@ class CameraService:
         except Exception as e:
             logger.error(f"Failed to set calibration mode: {e}")
         return False
-
-    def get_intrinsics(self) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-        """
-        获取相机内参矩阵 (3x3) 与畸变参数 (5x1)。
-        """
-        try:
-            r = requests.get(f"{CPP_BASE_URL}/api/v1/camera/intrinsics", timeout=1.0)
-            if r.status_code == 200:
-                d = r.json().get("data", {})
-                k_mat = np.array(d.get("intrinsic_matrix", []))
-                d_coeffs = np.array(d.get("distortion_coeffs", []))
-                if k_mat.size == 9:
-                    return k_mat, d_coeffs
-            else:
-                logger.warning(f"Failed to get intrinsics from C++ service, status: {r.status_code}")
-        except Exception as e:
-            logger.warning(f"Failed to get intrinsics: {e}")
-        return None, None
 
     def get_intrinsics_dict(self) -> Dict[str, Any]:
         """
@@ -437,6 +426,46 @@ class CameraService:
         except Exception as e:
             logger.warning(f"Failed to get intrinsics dict: {e}")
         return {}
+
+    def _fetch_frame(self, path: str, flags: int) -> Optional[np.ndarray]:
+        """
+        从 C++ 侧抓一张**当下最新帧** (彩色 JPEG / 16bit 深度 PNG 同一口径)。
+
+        为什么走 latest_*.jpg|png 而不是 save_frame: 自检要的是"当下这一帧"做像素级差分,
+        不需要落盘; 一帧走本机回环的开销可忽略。
+        :return: 解码后的图像 (彩色 BGR / 深度 uint16 mm); 离线 / 暂无帧 / 网络异常时 None
+        """
+        try:
+            r = requests.get(f"{CPP_BASE_URL}{path}", timeout=1.5)
+            if r.status_code != 200 or not r.content:
+                return None
+            return cv2.imdecode(np.frombuffer(r.content, dtype=np.uint8), flags)
+        except Exception as e:
+            logger.warning(f"Failed to fetch {path}: {e}")
+            return None
+
+    def get_color_frame(self) -> Optional[np.ndarray]:
+        """
+        抓取最新一帧彩色图, 返回 BGR numpy 数组 (与推流同源的那帧原始帧)。
+
+        注意该接口会叠加标定角点画线 —— 只有 calibration_mode 开启时才有叠加, 指向流程里
+        标定模式是关的; 即使开着, 与参考帧做差分时光标静止的静态叠加也会自然抵消。
+        :return: BGR 图像; 取不到时 None (调用方按"没有画面"降级)
+        """
+        return self._fetch_frame("/api/v1/camera/latest_frame.jpg", cv2.IMREAD_COLOR)
+
+    def get_depth_frame(self) -> Optional[np.ndarray]:
+        """
+        抓取最新一帧 16bit 深度图: HxW uint16, **单位 mm** (与彩色对齐后的网格)。
+
+        有了它, 一帧画面里的一个像素才能从"一条射线"定成"一个三维点" (射线参数 =
+        深度值 / 射线与光轴的 z 分量, 因为深度图存的是沿光轴 Z 的距离而非斜距)。
+        :return: uint16 深度网格 (mm); 取不到或不是单通道网格时 None
+        """
+        img = self._fetch_frame("/api/v1/camera/latest_depth.png", cv2.IMREAD_UNCHANGED)
+        if img is None or img.ndim != 2:
+            return None
+        return img
 
     def get_stream_info(self, host_ip: str = "127.0.0.1") -> Dict[str, Any]:
         """
